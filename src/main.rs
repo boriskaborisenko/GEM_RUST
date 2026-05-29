@@ -33,6 +33,7 @@ struct AppState {
     started_at: i64,
     spot_price: Option<f64>,
     volatility_mgr: VolatilityManager,
+    shutdown_pending: bool,
 }
 
 #[tokio::main]
@@ -101,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
         started_at: get_now_ms(),
         spot_price: None,
         volatility_mgr: volatility_mgr.clone(),
+        shutdown_pending: false,
     };
 
     app_state.system_logs.push(format!("GEM System Initialized for {} {}", asset, interval));
@@ -118,6 +120,24 @@ async fn main() -> anyhow::Result<()> {
     let mut monitor_interval = tokio::time::interval(Duration::from_millis(1000));
 
     loop {
+        if app_state.shutdown_pending {
+            let mut can_exit = false;
+            {
+                let port = app_state.portfolio.lock().unwrap();
+                let has_active = port.windows.values().any(|w| w.status == "LIVE" || w.status == "ENTERED_PRE_START");
+                if !has_active {
+                    can_exit = true;
+                }
+            }
+            if can_exit {
+                render_dashboard(&app_state);
+                println!("\n=================================================================================");
+                println!("  \x1b[38;5;114mSESSION DONE!\x1b[0m - All active positions concluded.");
+                println!("=================================================================================\n");
+                return Ok(());
+            }
+        }
+
         tokio::select! {
             // A. Render Terminal Dashboard
             _ = render_interval.tick() => {
@@ -233,7 +253,7 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
                 // Проверяем, укладываемся ли в коридор покупки (например, [120с - 5с])
                 let is_within_time = secs_to_start >= app.config.pre_start_entry.min_seconds_before_start
                                   && secs_to_start <= app.config.pre_start_entry.max_seconds_before_start;
-                if is_within_time {
+                if is_within_time && !app.shutdown_pending {
                     let current_atr = app.volatility_mgr.get_current_atr();
                     
                     // Логируем причину пропуска по волатильности без спама
@@ -342,7 +362,7 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
                     // Safety force close past the end
                     app.system_logs.push(format!("[SAFETY CLOSE] Window #{} past end time ({}s). Force closing.", current.window_number, secs_to_end));
                     let mut port = app.portfolio.lock().unwrap();
-                    port.close_window(current.window_number, "CLOSED_TIME");
+                    port.close_window(current.window_number, "CLOSED_TIME", app.spot_price);
                     
                     let updated = port.get_or_create_window_state(current.window_number, "", &current.market);
                     app.current_window = Some(updated.clone());
@@ -366,7 +386,7 @@ async fn promote_next_to_current(app: &mut AppState, event_tx: &mpsc::UnboundedS
         if curr.status == "LIVE" || curr.status == "SKIPPED" {
             app.system_logs.push(format!("[Lifecycle] Force closing overlapping CURRENT Window #{}", curr.window_number));
             let mut port = app.portfolio.lock().unwrap();
-            port.close_window(curr.window_number, "CLOSED_TIME");
+            port.close_window(curr.window_number, "CLOSED_TIME", app.spot_price);
         }
     }
 
@@ -425,6 +445,12 @@ async fn process_event(app: &mut AppState, event: MarketEvent, _event_tx: &mpsc:
             app.system_logs.push(msg);
             if app.system_logs.len() > 30 {
                 app.system_logs.remove(0);
+            }
+        }
+        MarketEvent::ShutdownRequested => {
+            if !app.shutdown_pending {
+                app.shutdown_pending = true;
+                app.system_logs.push("[SYSTEM] SOFT SHUTDOWN INITIATED - NEXT window buys are now disabled!".to_string());
             }
         }
         MarketEvent::SpotTick { asset: _, price, timestamp } => {
@@ -500,6 +526,9 @@ fn render_dashboard(app: &AppState) {
     println!("{}", paint("=================================================================================", "dim"));
     let strategy_title = format!("STRATEGY: {}", app.config.strategy.to_uppercase().replace("_", " "));
     println!("  {}     {}     {}", paint(&strategy_title, "bold"), paint(&format!("Asset: {}", app.asset), "cyan"), paint(&format!("Interval: {}", app.interval), "cyan"));
+    if app.shutdown_pending {
+        println!("  {}", paint("SHUTDOWN PENDING | NEXT window buys are disabled.", "red"));
+    }
     println!("{}", paint("=================================================================================", "dim"));
 
     let runtime = format_runtime(get_now_ms() - app.started_at);

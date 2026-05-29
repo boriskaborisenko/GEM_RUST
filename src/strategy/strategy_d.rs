@@ -283,23 +283,35 @@ impl TradeStrategy for DynamicGridStrategy {
             let is_spot_within_reach = pct_abs <= max_allowed_deviation;
 
             if is_spot_within_reach {
-                if is_up_strong && up_bid >= 0.75 && dn_ask <= 0.16 && dn_ask > 0.0 {
+                // ─── ПОЛНОСТЬЮ АВТОНОМНЫЙ ДИНАМИЧЕСКИЙ ПОРОГ ПО ATR ───
+                let dynamic_max_ask = if current_atr >= 30.0 {
+                    0.24 // При высокой волатильности готовы брать слабую ногу до 24 центов
+                } else if current_atr < 15.0 {
+                    0.10 // В боковике/тухляке берем только по ультра-скидке до 10 центов
+                } else {
+                    // Плавная математическая интерполяция между 0.10$ и 0.24$ под живой ATR!
+                    let range = 30.0 - 15.0;
+                    let factor = (current_atr - 15.0) / range;
+                    0.10 + factor * 0.14
+                };
+
+                if is_up_strong && up_bid >= 0.75 && dn_ask <= dynamic_max_ask && dn_ask > 0.0 {
                     *buy_flag = true;
                     signals.push(OrderSignal {
                         side: "DOWN".to_string(),
                         is_buy: true,
                         amount: win_state.initial_down_shares * 0.50, // Докупка 50% от начального объема
                         price: dn_ask,
-                        reason: format!("dynamic_buy_weak_down_deviation_ok_pct_{:.4}", pct_abs),
+                        reason: format!("dynamic_buy_weak_down_deviation_ok_atr_limit_{:.2}", dynamic_max_ask),
                     });
-                } else if !is_up_strong && dn_bid >= 0.75 && up_ask <= 0.16 && up_ask > 0.0 {
+                } else if !is_up_strong && dn_bid >= 0.75 && up_ask <= dynamic_max_ask && up_ask > 0.0 {
                     *buy_flag = true;
                     signals.push(OrderSignal {
                         side: "UP".to_string(),
                         is_buy: true,
                         amount: win_state.initial_up_shares * 0.50, // Докупка 50% от начального объема
                         price: up_ask,
-                        reason: format!("dynamic_buy_weak_up_deviation_ok_pct_{:.4}", pct_abs),
+                        reason: format!("dynamic_buy_weak_up_deviation_ok_atr_limit_{:.2}", dynamic_max_ask),
                     });
                 }
             }

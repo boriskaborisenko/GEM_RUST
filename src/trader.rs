@@ -234,9 +234,104 @@ impl Portfolio {
         trades
     }
 
-    pub fn close_window(&mut self, window_number: usize, status: &str) {
-        // Sell off anything left
-        self.sell_all(window_number, "time_stop_emergency");
+    pub fn close_window(&mut self, window_number: usize, status: &str, spot_price: Option<f64>) {
+        let mut redeemed = false;
+        
+        let mut win_market = None;
+        if let Some(w) = self.windows.get(&window_number) {
+            win_market = Some((w.market.clone(), w.up_shares, w.down_shares));
+        }
+
+        if let Some((market, up_shares, down_shares)) = win_market {
+            if let (Some(spot), Some(ptb)) = (spot_price, market.price_to_beat) {
+                if ptb > 0.0 {
+                    let up_won = spot > ptb;
+                    
+                    // Редемп выигрышной стороны строго по 1.00$
+                    if up_won {
+                        if up_shares > 0.0 {
+                            let val = up_shares * 1.00;
+                            self.available_cash += val;
+                            let cash_after = self.available_cash;
+                            
+                            if let Some(win) = self.windows.get_mut(&window_number) {
+                                win.cash_returned += val;
+                                win.up_shares = 0.0;
+                                win.trades.push(TradeRecord {
+                                    timestamp: get_now_ms(),
+                                    trade_type: "REDEEM".to_string(),
+                                    side: "UP".to_string(),
+                                    reason: "option_expired_itm_win_1.00".to_string(),
+                                    price: 1.00,
+                                    shares: up_shares,
+                                    usd_value: val,
+                                    available_cash_after: cash_after,
+                                });
+                            }
+                        }
+                        if down_shares > 0.0 {
+                            let cash_after = self.available_cash;
+                            if let Some(win) = self.windows.get_mut(&window_number) {
+                                win.down_shares = 0.0;
+                                win.trades.push(TradeRecord {
+                                    timestamp: get_now_ms(),
+                                    trade_type: "EXPIRED".to_string(),
+                                    side: "DOWN".to_string(),
+                                    reason: "option_expired_otm_loss_0.00".to_string(),
+                                    price: 0.00,
+                                    shares: down_shares,
+                                    usd_value: 0.00,
+                                    available_cash_after: cash_after,
+                                });
+                            }
+                        }
+                    } else {
+                        if down_shares > 0.0 {
+                            let val = down_shares * 1.00;
+                            self.available_cash += val;
+                            let cash_after = self.available_cash;
+                            
+                            if let Some(win) = self.windows.get_mut(&window_number) {
+                                win.cash_returned += val;
+                                win.down_shares = 0.0;
+                                win.trades.push(TradeRecord {
+                                    timestamp: get_now_ms(),
+                                    trade_type: "REDEEM".to_string(),
+                                    side: "DOWN".to_string(),
+                                    reason: "option_expired_itm_win_1.00".to_string(),
+                                    price: 1.00,
+                                    shares: down_shares,
+                                    usd_value: val,
+                                    available_cash_after: cash_after,
+                                });
+                            }
+                        }
+                        if up_shares > 0.0 {
+                            let cash_after = self.available_cash;
+                            if let Some(win) = self.windows.get_mut(&window_number) {
+                                win.up_shares = 0.0;
+                                win.trades.push(TradeRecord {
+                                    timestamp: get_now_ms(),
+                                    trade_type: "EXPIRED".to_string(),
+                                    side: "UP".to_string(),
+                                    reason: "option_expired_otm_loss_0.00".to_string(),
+                                    price: 0.00,
+                                    shares: up_shares,
+                                    usd_value: 0.00,
+                                    available_cash_after: cash_after,
+                                });
+                            }
+                        }
+                    }
+                    redeemed = true;
+                }
+            }
+        }
+
+        // Если не удалось точно определить победителя (нет спота или страйка) - делаем обычный экстренный сброс по Bid
+        if !redeemed {
+            self.sell_all(window_number, "time_stop_emergency");
+        }
 
         if let Some(win) = self.windows.get_mut(&window_number) {
             // FIX Auto-Loss Bug: Only count towards session stats and wins/losses if we actually entered (spent > 0)

@@ -76,6 +76,7 @@ pub struct PricesState {
 #[derive(Debug, Clone)]
 pub enum MarketEvent {
     Log(String),
+    ShutdownRequested,
     SpotTick {
         asset: String,
         price: f64,
@@ -159,6 +160,31 @@ pub async fn find_upcoming_markets(asset: &str, interval: &str) -> Vec<MarketWin
                 if let Some(m) = m {
                     if let Some(parsed) = parse_market(&m, asset, interval) {
                         results.push(parsed);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: broad search by slug_contains if exact slug matches returned 0 results (crucial for 15m intervals!)
+    if results.is_empty() {
+        let fallback_url = format!("{}/events", GAMMA_API);
+        if let Ok(res) = client.get(&fallback_url)
+            .query(&[
+                ("slug_contains", &slug_prefix),
+                ("closed", &"false".to_string()),
+                ("limit", &"20".to_string()),
+                ("order", &"startDate".to_string()),
+                ("ascending", &"true".to_string())
+            ])
+            .send().await 
+        {
+            if let Ok(events) = res.json::<Value>().await {
+                if let Some(events_arr) = events.as_array() {
+                    for ev in events_arr {
+                        if let Some(parsed) = parse_market(ev, asset, interval) {
+                            results.push(parsed);
+                        }
                     }
                 }
             }
