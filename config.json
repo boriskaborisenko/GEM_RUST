@@ -1,0 +1,26 @@
+{
+  "strategy": "dynamic_grid",
+  "minBtcAtr": 0.0,
+  "session": {
+    "startingBank": 100,
+    "buyUpUsd": 16.5,
+    "buyDownUsd": 13.5
+  },
+  "preStartEntry": {
+    "enabled": true,
+    "minSecondsBeforeStart": 5,
+    "maxSecondsBeforeStart": 120,
+    "minSideAsk": 0.44,
+    "maxSideAsk": 0.56
+  },
+  "sellStrategy": {
+    "exitBid": 0.65
+  },
+  "asymmetricLadder": {
+    "strongSteps": [0.62, 0.72],
+    "weakSteps": [0.70, 0.85],
+    "decayEnabled": true
+  },
+  "exitBeforeEndSeconds": 25,
+  "forceCloseAtEnd": false
+}
