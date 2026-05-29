@@ -1,5 +1,3 @@
-#![allow(dead_code, unused_imports, non_snake_case, unused_variables, unused_mut)]
-
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value;
@@ -44,6 +42,23 @@ pub struct MarketWindow {
     #[serde(rename = "priceToBeat")]
     pub price_to_beat: Option<f64>,
     pub tokens: TokensMap,
+}
+
+impl MarketWindow {
+    /// Рассчитывает отклонение текущего спота от страйка (PTB).
+    /// Возвращает Option<(f64, f64)>, где:
+    /// - Первый элемент: абсолютное отклонение (Spot - PTB)
+    /// - Второй элемент: процентное отклонение ((Spot - PTB) / PTB * 100.0)
+    pub fn get_ptb_deviation(&self, spot_price: Option<f64>) -> Option<(f64, f64)> {
+        match (spot_price, self.price_to_beat) {
+            (Some(spot), Some(ptb)) if ptb > 0.0 => {
+                let delta = spot - ptb;
+                let pct = (delta / ptb) * 100.0;
+                Some((delta, pct))
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

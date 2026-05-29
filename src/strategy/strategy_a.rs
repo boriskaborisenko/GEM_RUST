@@ -51,9 +51,9 @@ impl TradeStrategy for SimpleBothStrategy {
             return None;
         }
 
-        // Допускаем сбалансированное отклонение +/-1 цент для гарантированного входа
-        let min_ask = 0.49;
-        let max_ask = 0.52;
+        // Допускаем сбалансированное отклонение на базе динамических порогов из конфига
+        let min_ask = config.pre_start_entry.min_side_ask;
+        let max_ask = config.pre_start_entry.max_side_ask;
         if up_ask < min_ask || up_ask > max_ask || dn_ask < min_ask || dn_ask > max_ask {
             return None;
         }
@@ -73,6 +73,7 @@ impl TradeStrategy for SimpleBothStrategy {
         market: &MarketWindow,
         win_state: &WindowState,
         secs_to_end: i64,
+        _current_atr: f64,
     ) -> Vec<OrderSignal> {
         let mut signals = vec![];
         let window_number = win_state.window_number;

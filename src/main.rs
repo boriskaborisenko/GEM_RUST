@@ -267,17 +267,66 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
     if trigger_buy {
         if let Some(next_market) = next_market_opt {
             let mut port = app.portfolio.lock().unwrap();
-            let total_cost = app.config.session.buy_up_usd + app.config.session.buy_down_usd;
-            if port.available_cash >= total_cost {
-                app.system_logs.push(format!("[STRATEGY] Pre-start entry triggered for Window #{}. UP Ask: ${:.2} | DOWN Ask: ${:.2}", window_num, up_ask_val, dn_ask_val));
+            
+            // Расчитываем динамический бюджет и распределение по сторонам
+            let (buy_up_usd, buy_down_usd) = {
+                let min_b = app.config.session.min_window_budget;
+                let max_b = app.config.session.max_window_budget;
+                let pct_b = app.config.session.window_budget_pct;
+                let ratio = app.config.session.cheaper_side_ratio;
+
+                // Бюджет на базе % от Equity
+                let mut budget = port.equity * (pct_b / 100.0);
+                if budget < min_b {
+                    budget = min_b;
+                }
+                if budget > max_b {
+                    budget = max_b;
+                }
+
+                // Корректируем по доступному кэшу
+                if port.available_cash < budget {
+                    if port.available_cash >= min_b {
+                        budget = port.available_cash;
+                    } else {
+                        budget = 0.0; // Сигнал отмены (мало средств)
+                    }
+                }
+
+                if budget > 0.0 {
+                    // Распределяем сплит: на большую часть (ratio) покупаем более дешевую сторону
+                    if up_ask_val < dn_ask_val {
+                        // UP дешевле
+                        (budget * ratio, budget * (1.0 - ratio))
+                    } else if dn_ask_val < up_ask_val {
+                        // DOWN дешевле
+                        (budget * (1.0 - ratio), budget * ratio)
+                    } else {
+                        // Равны
+                        (budget / 2.0, budget / 2.0)
+                    }
+                } else {
+                    (0.0, 0.0)
+                }
+            };
+
+            let total_cost = buy_up_usd + buy_down_usd;
+            if total_cost > 0.0 && port.available_cash >= total_cost {
+                app.system_logs.push(format!(
+                    "[STRATEGY] Pre-start entry triggered for Window #{}. Budget: ${:.2} (UP: ${:.2}, DOWN: ${:.2}). UP Ask: ${:.2} | DOWN Ask: ${:.2}",
+                    window_num, total_cost, buy_up_usd, buy_down_usd, up_ask_val, dn_ask_val
+                ));
                 
-                port.execute_buy(window_num, "UP", app.config.session.buy_up_usd, up_ask_val, "pre_start_entry_50_51");
-                port.execute_buy(window_num, "DOWN", app.config.session.buy_down_usd, dn_ask_val, "pre_start_entry_50_51");
+                port.execute_buy(window_num, "UP", buy_up_usd, up_ask_val, "pre_start_entry_dynamic");
+                port.execute_buy(window_num, "DOWN", buy_down_usd, dn_ask_val, "pre_start_entry_dynamic");
                 
                 let updated = port.get_or_create_window_state(window_num, "", &next_market);
                 app.next_window = Some(updated.clone());
             } else {
-                app.system_logs.push(format!("[STRATEGY] REJECTED entry for Window #{}: Insufficient cash (${:.2} needed, ${:.2} available)", window_num, total_cost, port.available_cash));
+                app.system_logs.push(format!(
+                    "[STRATEGY] REJECTED entry for Window #{}: Insufficient cash (${:.2} needed, ${:.2} available)",
+                    window_num, total_cost, port.available_cash
+                ));
             }
         }
     }
@@ -410,8 +459,9 @@ async fn process_event(app: &mut AppState, event: MarketEvent, _event_tx: &mpsc:
             if role == "CURRENT" {
                 if let Ok(end) = chrono::DateTime::parse_from_rfc3339(&market.end_time) {
                     let secs_to_end = (end.timestamp_millis() - timestamp) / 1000;
+                    let current_atr = app.volatility_mgr.get_current_atr();
                     
-                    let signals = strat.process_live_tick(&app.config, &prices, app.spot_price, &win_state.market, &win_state, secs_to_end);
+                    let signals = strat.process_live_tick(&app.config, &prices, app.spot_price, &win_state.market, &win_state, secs_to_end, current_atr);
                     
                     for sig in signals {
                         if sig.is_buy {
@@ -559,17 +609,16 @@ fn render_window_block(
     lines.push(format!("Price to Beat (Strike): {}", paint(&strike_str, "magenta")));
 
     let spot_str = spot_price.map(|p| format!("${:.2}", p)).unwrap_or_else(|| "N/A".to_string());
-    let distance_str = match (spot_price, m.price_to_beat) {
-        (Some(s), Some(p)) => {
-            let delta = s - p;
+    let distance_str = match m.get_ptb_deviation(spot_price) {
+        Some((delta, pct)) => {
             let (tone, formatted) = if delta >= 0.0 {
-                ("green", format!("+${:.2}", delta))
+                ("green", format!("+${:.2} (+{:.4}%)", delta, pct))
             } else {
-                ("red", format!("-${:.2}", delta.abs()))
+                ("red", format!("-${:.2} ({:.4}%)", delta.abs(), pct))
             };
             paint(&formatted, tone)
         }
-        _ => paint("N/A", "dim"),
+        None => paint("N/A", "dim"),
     };
     lines.push(format!("Live Spot Price: {} | Dist: {}", paint(&spot_str, "cyan"), distance_str));
     lines.push(paint("--------------------------------------", "dim"));

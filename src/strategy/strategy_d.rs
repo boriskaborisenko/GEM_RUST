@@ -65,9 +65,9 @@ impl TradeStrategy for DynamicGridStrategy {
             return None;
         }
 
-        // Допускаем сбалансированное отклонение +/-1 цент для гарантированного входа
-        let min_ask = 0.49;
-        let max_ask = 0.52;
+        // Допускаем сбалансированное отклонение на базе динамических порогов из конфига
+        let min_ask = config.pre_start_entry.min_side_ask;
+        let max_ask = config.pre_start_entry.max_side_ask;
         if up_ask < min_ask || up_ask > max_ask || dn_ask < min_ask || dn_ask > max_ask {
             return None;
         }
@@ -87,6 +87,7 @@ impl TradeStrategy for DynamicGridStrategy {
         market: &MarketWindow,
         win_state: &WindowState,
         secs_to_end: i64,
+        current_atr: f64,
     ) -> Vec<OrderSignal> {
         let mut signals = vec![];
         let window_number = win_state.window_number;
@@ -143,9 +144,63 @@ impl TradeStrategy for DynamicGridStrategy {
             }
         }
 
+        // Вычисляем абсолютное процентное отклонение спота от страйка (PTB)
+        let mut pct_abs = 0.0;
+        if let (Some(spot), Some(ptb)) = (spot_price, market.price_to_beat) {
+            if ptb > 0.0 {
+                pct_abs = ((spot - ptb).abs() / ptb) * 100.0;
+            }
+        }
+
         // Автоматически определяем силу по объемам на входе
         let is_up_strong = win_state.initial_up_shares >= win_state.initial_down_shares;
-        let strong_grid = vec![0.58, 0.66, 0.75];
+        
+        // Выявляем, является ли сильная сторона более дешевой (с бóльшим весом долей 60/40)
+        let initial_up = win_state.initial_up_shares;
+        let initial_dn = win_state.initial_down_shares;
+        let is_strong_side_cheaper = if is_up_strong { initial_up > initial_dn } else { initial_dn > initial_up };
+
+        // ─── ТРЕХМЕРНАЯ АДАПТИВНАЯ СЕТКА СИЛЬНОЙ СТОРОНЫ (TVDS STRONG GRID) ───
+        // Ступень 1 (40%):
+        let step1_target = if time_pct < 30.0 && current_atr >= 30.0 {
+            0.62 // Резкий старт: не спешим продавать лидера
+        } else if time_pct >= 60.0 || current_atr < 15.0 {
+            0.54 // Затухание или тухляк: выходим быстрее
+        } else {
+            0.58 // Стандарт
+        };
+
+        // Ступень 2 (40%):
+        let step2_target = if time_pct < 60.0 && current_atr >= 30.0 {
+            0.72 // Сильный мид-гейм импульс
+        } else if time_pct >= 80.0 || current_atr < 15.0 {
+            0.60 // Сброс перед финалом / при затухании
+        } else {
+            0.66 // Стандарт
+        };
+
+        // Ступень 3 (Раннер — 20%):
+        let step3_target = if is_strong_side_cheaper {
+            // Крупная дешевая сторона (60%): даем прибыли течь при мощном тренде
+            if pct_abs >= 0.20 && current_atr >= 30.0 {
+                0.92 // Держим до победных 92 центов
+            } else if time_pct >= 80.0 || current_atr < 15.0 {
+                0.68 // Сейв в боковике/конце
+            } else {
+                0.75 // Стандарт
+            }
+        } else {
+            // Менее объемная дорогая сторона (40%): выходим умеренно
+            if pct_abs >= 0.20 && current_atr >= 30.0 {
+                0.85
+            } else if time_pct >= 80.0 || current_atr < 15.0 {
+                0.68
+            } else {
+                0.75
+            }
+        };
+
+        let strong_grid = vec![step1_target, step2_target, step3_target];
 
         // ─── 1. МОНИТОРИНГ СЕТКИ ПРОДАЖ ДЛЯ СИЛЬНОЙ СТОРОНЫ ───
         if is_up_strong {
@@ -174,7 +229,7 @@ impl TradeStrategy for DynamicGridStrategy {
                             is_buy: false,
                             amount: sell_amount,
                             price: up_bid,
-                            reason: format!("dynamic_grid_exit_step_{}_{:.2}", *current_step, target),
+                            reason: format!("tvds_strong_grid_exit_step_{}_{:.2}", *current_step, target),
                         });
                     }
                 }
@@ -205,7 +260,7 @@ impl TradeStrategy for DynamicGridStrategy {
                             is_buy: false,
                             amount: sell_amount,
                             price: dn_bid,
-                            reason: format!("dynamic_grid_exit_step_{}_{:.2}", *current_step, target),
+                            reason: format!("tvds_strong_grid_exit_step_{}_{:.2}", *current_step, target),
                         });
                     }
                 }
@@ -215,24 +270,38 @@ impl TradeStrategy for DynamicGridStrategy {
         // ─── 2. МОДУЛЬ DYNAMIC BUY (ДОКУПКА ПРИ СИЛЬНОМ ТРЕНДЕ) ───
         let buy_flag = self.buy_triggered.entry(window_number).or_insert(false);
         if time_pct <= 60.0 && !*buy_flag {
-            if is_up_strong && up_bid >= 0.75 && dn_ask <= 0.16 && dn_ask > 0.0 {
-                *buy_flag = true;
-                signals.push(OrderSignal {
-                    side: "DOWN".to_string(),
-                    is_buy: true,
-                    amount: win_state.initial_down_shares * 0.50, // Докупка 50% от начального объема
-                    price: dn_ask,
-                    reason: "dynamic_buy_weak_down_at_trend_peak".to_string(),
-                });
-            } else if !is_up_strong && dn_bid >= 0.75 && up_ask <= 0.16 && up_ask > 0.0 {
-                *buy_flag = true;
-                signals.push(OrderSignal {
-                    side: "UP".to_string(),
-                    is_buy: true,
-                    amount: win_state.initial_up_shares * 0.50, // Докупка 50% от начального объема
-                    price: up_ask,
-                    reason: "dynamic_buy_weak_up_at_trend_peak".to_string(),
-                });
+            // Определяем порог допустимого отклонения спота от страйка на основе волатильности (ATR)
+            let max_allowed_deviation = if current_atr >= 30.0 {
+                0.12 // Высокая волатильность: разрешаем докупку при отклонении до 0.12%
+            } else if current_atr < 15.0 {
+                0.03 // Тухляк: только до 0.03% (почти на страйке)
+            } else {
+                0.08 // Нормальный рынок: до 0.08% отклонения
+            };
+
+            // Допускаем закуп только если спот находится в пределах досягаемости для потенциального разворота
+            let is_spot_within_reach = pct_abs <= max_allowed_deviation;
+
+            if is_spot_within_reach {
+                if is_up_strong && up_bid >= 0.75 && dn_ask <= 0.16 && dn_ask > 0.0 {
+                    *buy_flag = true;
+                    signals.push(OrderSignal {
+                        side: "DOWN".to_string(),
+                        is_buy: true,
+                        amount: win_state.initial_down_shares * 0.50, // Докупка 50% от начального объема
+                        price: dn_ask,
+                        reason: format!("dynamic_buy_weak_down_deviation_ok_pct_{:.4}", pct_abs),
+                    });
+                } else if !is_up_strong && dn_bid >= 0.75 && up_ask <= 0.16 && up_ask > 0.0 {
+                    *buy_flag = true;
+                    signals.push(OrderSignal {
+                        side: "UP".to_string(),
+                        is_buy: true,
+                        amount: win_state.initial_up_shares * 0.50, // Докупка 50% от начального объема
+                        price: up_ask,
+                        reason: format!("dynamic_buy_weak_up_deviation_ok_pct_{:.4}", pct_abs),
+                    });
+                }
             }
         }
 
@@ -273,58 +342,68 @@ impl TradeStrategy for DynamicGridStrategy {
                     }
                 }
 
-                // ─── А. УЛЬТИМАТИВНЫЙ ТЕЙК-ПРОФИТ СЛАБОЙ СТОРОНЫ ───
-                // Если слабая сторона сама взлетела до целевого тейка из конфига (например, >= 0.65$),
-                // мы забираем этот жирный профит моментально и без всяких условий!
+                // ─── АДАПТИВНАЯ МОДЕЛЬ ВЫХОДА ДЛЯ СЛАБОЙ СТОРОНЫ (TVDS MATRIX) ───
                 let mut should_sell = false;
                 let mut reason_str = String::new();
 
-                if second_bid >= config.sell_strategy.exit_bid {
-                    should_sell = true;
-                    reason_str = format!("unconditional_profit_take_ge_{:.2}", config.sell_strategy.exit_bid);
-                }
-
-                // ─── Б. ОППОРТУНИСТИЧЕСКИЙ ВЫХОД ДЛЯ DYNAMIC BUY (СЛИВ ПО 30 КОПЕЕК!) ───
-                // Если мы совершили усреднение (Dynamic BUY), у нас огромный объем по низкой цене.
-                // При росте контракта >= 0.30$, мы сливаем DOWN для надежной фиксации leveraged прибыли!
-                let has_dynamic_buy = *self.buy_triggered.entry(window_number).or_insert(false);
-                if !should_sell && has_dynamic_buy && second_bid >= 0.30 {
-                    should_sell = true;
-                    reason_str = "dynamic_buy_opportunistic_exit_bid_ge_0.30".to_string();
-                }
-
-                // ─── В. ВЫХОД ПО ДИСТАНЦИИ СПОТА К СТРАЙКУ (DISTANCE ABS & PCT) ───
-                // Если спот-курс прижался вплотную к страйку (расстояние <= 40$ или <= 0.05% от цены),
-                // и слабая сторона уже стоит прилично (например, >= 0.30$), мы выходим, не дожидаясь физического пробития!
-                if !should_sell {
-                    if let (Some(spot), Some(ptb)) = (spot_price, market.price_to_beat) {
-                        let distance_abs = (spot - ptb).abs();
-                        let distance_pct = (distance_abs / spot) * 100.0;
-                        
-                        let is_near_strike = distance_abs <= 40.0 || distance_pct <= 0.05;
-                        if is_near_strike && second_bid >= 0.30 {
-                            should_sell = true;
-                            reason_str = format!("spot_near_strike_exit_dist_{:.1}_bid_{:.2}", distance_abs, second_bid);
+                // 1. Определение целевого Bid на основе матрицы TVDS (Время × Волатильность × Отклонение)
+                let (weak_target, zone_desc) = if time_pct < 30.0 {
+                    // Ранняя фаза (Времени полно, распада нет): ждем глубокого разворота
+                    if current_atr >= 30.0 {
+                        (0.65, "early_high_vol_wait_reversal") // Высокая волатильность: ждем полноценный взлет
+                    } else if current_atr < 15.0 {
+                        (0.40, "early_sluggish_exit_fast") // Боковик: выходим при первой же возможности
+                    } else {
+                        (0.50, "early_normal_vol_wait")
+                    }
+                } else if time_pct < 60.0 {
+                    // Средняя фаза (Разгар битвы)
+                    if pct_abs <= 0.05 {
+                        (0.65, "mid_near_strike_wait_reversal") // Сверхблизко: выжидаем полноценный разворот
+                    } else if pct_abs <= 0.15 {
+                        (0.30, "mid_moderate_take_30") // Умеренно: фиксируем отличные x2 от закупа по 0.15
+                    } else {
+                        // Спот ушел далеко
+                        if current_atr >= 30.0 {
+                            (0.22, "mid_far_high_vol_wait") // Волатильно: ждем небольшого отскока
+                        } else if current_atr < 15.0 {
+                            (0.17, "mid_far_sluggish_dump_17") // Затухание: сливаем по 0.17 для сохранения кэша
+                        } else {
+                            (0.20, "mid_far_normal_vol_wait")
                         }
                     }
+                } else if time_pct < 80.0 {
+                    // Поздняя фаза (Пошел сильный временной распад)
+                    if pct_abs <= 0.05 {
+                        (0.45, "late_near_strike_wait_reversal")
+                    } else if pct_abs <= 0.20 {
+                        (0.20, "late_moderate_take_20") // Быстро сбрасываем в легкий плюс
+                    } else {
+                        (0.12, "late_far_dump_12") // Спасаем крохи
+                    }
+                } else if time_pct < 90.0 {
+                    // Финальная фаза (Последние минуты, распад критический)
+                    if pct_abs <= 0.03 {
+                        (0.30, "end_near_strike_reversal_hope")
+                    } else {
+                        (0.10, "end_far_emergency_dump_10") // Шансов почти нет: забираем 10 центов вместо 0
+                    }
+                } else {
+                    // Фаза экспирации (Последний шанс перед сгоранием в ноль)
+                    (0.08, "expiration_unconditional_dump_08")
+                };
+
+                if second_bid >= weak_target {
+                    should_sell = true;
+                    reason_str = format!("tvds_weak_exit_{}_bid_ge_{:.2}", zone_desc, weak_target);
                 }
 
-                // ─── Г. ЛОГИКА НА РЕАЛЬНОМ КРОССОВЕРЕ (ЕСЛИ ДРУГИЕ УСЛОВИЯ ЕЩЕ НЕ СРАБОТАЛИ) ───
-                if !should_sell && state.ptb_crossed {
-                    // Математическая нелинейная модель Time-Decay распада
-                    let time_factor = (time_pct / 100.0).powf(1.5);
-                    let target_decay_bid = 0.50 * (1.0 - time_factor);
-
-                    if time_pct < 50.0 && second_bid >= target_decay_bid {
+                // 2. Дополнительная страховка: Окупаемость раунда по формуле безубытка в поздней фазе (60% - 80%)
+                if !should_sell && time_pct >= 60.0 && time_pct < 80.0 {
+                    let min_safe_price = (win_state.spent - win_state.cash_returned) / second_shares;
+                    if min_safe_price > 0.0 && min_safe_price < 0.65 && second_bid >= min_safe_price {
                         should_sell = true;
-                        reason_str = format!("time_decay_crossover_sell_pct_{:.1}_bid_{:.2}", time_pct, second_bid);
-                    } else if time_pct >= 50.0 && time_pct <= 75.0 {
-                        // Точный расчет безубыточности раунда по фактическому кэшу
-                        let min_safe_price = (win_state.spent - win_state.cash_returned) / second_shares;
-                        if second_bid >= min_safe_price {
-                            should_sell = true;
-                            reason_str = format!("exact_breakeven_exit_bid_ge_{:.2}", min_safe_price);
-                        }
+                        reason_str = format!("tvds_late_exact_breakeven_bid_ge_{:.2}", min_safe_price);
                     }
                 }
 

@@ -7,10 +7,14 @@ use std::path::Path;
 pub struct SessionConfig {
     #[serde(rename = "startingBank")]
     pub starting_bank: f64,
-    #[serde(rename = "buyUpUsd")]
-    pub buy_up_usd: f64,
-    #[serde(rename = "buyDownUsd")]
-    pub buy_down_usd: f64,
+    #[serde(rename = "minWindowBudget")]
+    pub min_window_budget: f64,
+    #[serde(rename = "maxWindowBudget")]
+    pub max_window_budget: f64,
+    #[serde(rename = "windowBudgetPct")]
+    pub window_budget_pct: f64,
+    #[serde(rename = "cheaperSideRatio")]
+    pub cheaper_side_ratio: f64,
 }
 
 #[derive(Debug, Deserialize, Clone)]

@@ -3,15 +3,17 @@
   "minBtcAtr": 0.0,
   "session": {
     "startingBank": 100,
-    "buyUpUsd": 16.5,
-    "buyDownUsd": 13.5
+    "minWindowBudget": 30.0,
+    "maxWindowBudget": 150.0,
+    "windowBudgetPct": 10.0,
+    "cheaperSideRatio": 0.60
   },
   "preStartEntry": {
     "enabled": true,
     "minSecondsBeforeStart": 5,
     "maxSecondsBeforeStart": 120,
-    "minSideAsk": 0.44,
-    "maxSideAsk": 0.56
+    "minSideAsk": 0.48,
+    "maxSideAsk": 0.52
   },
   "sellStrategy": {
     "exitBid": 0.65

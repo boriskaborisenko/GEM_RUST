@@ -44,6 +44,7 @@ pub trait TradeStrategy {
         market: &MarketWindow,
         win_state: &WindowState,
         secs_to_end: i64,
+        current_atr: f64,
     ) -> Vec<OrderSignal>;
 
     fn get_strategy_state(&self, window_number: usize) -> Option<StrategyState>;
@@ -84,8 +85,9 @@ impl StrategyEngine {
         market: &MarketWindow,
         win_state: &WindowState,
         secs_to_end: i64,
+        current_atr: f64,
     ) -> Vec<OrderSignal> {
-        self.active_strategy.process_live_tick(config, prices, spot_price, market, win_state, secs_to_end)
+        self.active_strategy.process_live_tick(config, prices, spot_price, market, win_state, secs_to_end, current_atr)
     }
 
     pub fn get_strategy_state(&self, window_number: usize) -> Option<StrategyState> {
