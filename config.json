@@ -5,8 +5,7 @@
     "startingBank": 100,
     "minWindowBudget": 30.0,
     "maxWindowBudget": 150.0,
-    "windowBudgetPct": 10.0,
-    "cheaperSideRatio": 0.60
+    "windowBudgetPct": 10.0
   },
   "preStartEntry": {
     "enabled": true,

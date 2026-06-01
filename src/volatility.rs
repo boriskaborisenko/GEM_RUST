@@ -1,7 +1,7 @@
+use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use futures_util::{StreamExt, SinkExt};
-use serde::Deserialize;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
 const BYBIT_WS_URL: &str = "wss://stream.bybit.com/v5/public/linear";
@@ -53,7 +53,7 @@ impl VolatilityManager {
         let client = reqwest::Client::new();
         // Загружаем последние 50 минутных свечей BTCUSDT
         let url = "https://api.bybit.com/v5/market/kline?category=linear&symbol=BTCUSDT&interval=1&limit=50";
-        
+
         let resp = client.get(url).send().await?;
         if !resp.status().is_success() {
             return Err(format!("Bybit REST error: {}", resp.status()).into());
@@ -69,7 +69,7 @@ impl VolatilityManager {
             .ok_or("result.list not found in Bybit response")?;
 
         let mut temp_history = vec![];
-        
+
         // Bybit возвращает свечи от новых к старым (descending), обходим в обратном порядке (ascending)
         for item in list.iter().rev() {
             let item_arr = item.as_array().ok_or("kline item is not an array")?;
@@ -138,10 +138,12 @@ impl VolatilityManager {
                     match message {
                         Ok(Message::Text(text)) => {
                             if let Ok(response) = serde_json::from_str::<BybitResponse>(&text) {
-                                if let (Some(topic), Some(data_list)) = (response.topic, response.data) {
+                                if let (Some(topic), Some(data_list)) =
+                                    (response.topic, response.data)
+                                {
                                     if topic == "kline.1.BTCUSDT" && !data_list.is_empty() {
                                         let candle = &data_list[0];
-                                        
+
                                         // Нас интересуют только полностью закрытые свечи
                                         if candle.confirm {
                                             let high: f64 = candle.high.parse().unwrap_or(0.0);
@@ -149,10 +151,13 @@ impl VolatilityManager {
                                             let close: f64 = candle.close.parse().unwrap_or(0.0);
 
                                             let new_bar = Bar { high, low, close };
-                                            
+
                                             // Рассчитываем и обновляем ATR
-                                            if let Some(new_atr) = Self::calculate_next_atr(&mut history, new_bar) {
-                                                let mut atr_lock = current_atr_clone.lock().unwrap();
+                                            if let Some(new_atr) =
+                                                Self::calculate_next_atr(&mut history, new_bar)
+                                            {
+                                                let mut atr_lock =
+                                                    current_atr_clone.lock().unwrap();
                                                 *atr_lock = new_atr;
                                                 println!("[ATR Update] Новое значение ATR(14): {:.2} USD", new_atr);
                                             }
@@ -187,7 +192,7 @@ impl VolatilityManager {
         }
 
         let prev_bar = history.last().unwrap();
-        
+
         // Классическая формула True Range: Max(H-L, |H-C_prev|, |L-C_prev|)
         let tr1 = new_bar.high - new_bar.low;
         let tr2 = (new_bar.high - prev_bar.close).abs();
@@ -209,13 +214,13 @@ impl VolatilityManager {
         // Если это первый расчет после накопления 14 свечей — считаем простое среднее
         // В последующие разы используем классическое сглаживание Уайлдера (RMA)
         let mut sum_tr = current_tr;
-        
+
         // Считаем TR для предыдущих элементов истории
         for i in 1..history.len() - 1 {
             let h = history[i].high;
             let l = history[i].low;
-            let pc = history[i-1].close;
-            let tr = (h-l).max((h-pc).abs()).max((l-pc).abs());
+            let pc = history[i - 1].close;
+            let tr = (h - l).max((h - pc).abs()).max((l - pc).abs());
             sum_tr += tr;
         }
 

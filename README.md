@@ -81,15 +81,9 @@ This budget is bounded strictly between configured limits:
 $$Budget = \max(minWindowBudget, \min(maxWindowBudget, Budget_{raw}))$$
 If available cash is lower than the calculated budget but higher than `minWindowBudget`, the budget is clipped to available cash. If cash is below `minWindowBudget`, the entry is skipped entirely.
 
-### 2. Intelligent Budget Split (Cheap-Side Sizing)
-When entering a market, the bot compares contract Ask prices and applies the larger portion of the budget to the cheaper YES contract (which has higher leverage and upside):
-* If $UP\_Ask < DOWN\_Ask$:
-  - $UP\_Budget = Budget \times cheaperSideRatio$
-  - $DOWN\_Budget = Budget \times (1.0 - cheaperSideRatio)$
-* If $DOWN\_Ask < UP\_Ask$:
-  - $DOWN\_Budget = Budget \times cheaperSideRatio$
-  - $UP\_Budget = Budget \times (1.0 - cheaperSideRatio)$
-* If prices are identical, the budget is split 50/50.
+### 2. Strategy-Owned Budget Split
+The base window budget still comes from Equity, but the final split is now supplied by the active strategy via `EntrySignal`.
+For Strategy D, the split is ATR-regime aware: low ATR scouts close to neutral, normal ATR uses only a mild cheap-side tilt, and high ATR moves back toward 50/50. This avoids a misleading global `cheaperSideRatio` knob.
 
 ### 3. Volatility-Aware Dynamic BUY Filter
 To prevent buying cheap contracts of the losing side (Dynamic BUY) during strong, irreversible trends, the bot calculates the maximum allowed spot price percentage deviation ($pct\_abs$) from strike based on the current **RMA-smoothed ATR**:
@@ -113,8 +107,7 @@ All runtime options are managed in a single, clean JSON configuration file:
     "startingBank": 100,
     "minWindowBudget": 30.0,
     "maxWindowBudget": 150.0,
-    "windowBudgetPct": 10.0,
-    "cheaperSideRatio": 0.60
+    "windowBudgetPct": 10.0
   },
   "preStartEntry": {
     "enabled": true,
@@ -143,7 +136,6 @@ All runtime options are managed in a single, clean JSON configuration file:
 * `session.minWindowBudget`: Minimum allowed budget per window.
 * `session.maxWindowBudget`: Maximum allowed budget per window.
 * `session.windowBudgetPct`: Percentage of current equity to allocate per trade.
-* `session.cheaperSideRatio`: Share of the budget spent on the cheaper YES contract.
 * `preStartEntry.minSideAsk` & `maxSideAsk`: The narrow entry corridor (e.g. `0.48` and `0.52`) required to enter a trade before the market starts.
 * `sellStrategy.exitBid`: Default target bid for exit-taking logic.
 

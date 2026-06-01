@@ -1,8 +1,8 @@
-use std::fs;
-use std::path::Path;
 use gcp_auth::{CustomServiceAccount, TokenProvider};
 use serde::Deserialize;
 use serde_json::json;
+use std::fs;
+use std::path::Path;
 
 /// Структура ответа от Vertex AI API для безопасного парсинга
 #[derive(Deserialize, Debug)]
@@ -31,35 +31,43 @@ pub struct VertexAnalytics {
 }
 
 impl VertexAnalytics {
-    /// Инициализация модуля аналитики. 
+    /// Инициализация модуля аналитики.
     /// Метод принимает путь к JSON-файлу вашего сервисного аккаунта,
     /// автоматически выставляет переменную окружения и инициализирует менеджер токенов.
-    pub fn new<P: AsRef<Path>>(key_path: P) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn new<P: AsRef<Path>>(
+        key_path: P,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let path_ref = key_path.as_ref();
-        
+
         if !path_ref.exists() {
             return Err(format!(
-                "Критическая ошибка: Файл креденшелов сервисного аккаунта не найден по пути: {:?}", 
+                "Критическая ошибка: Файл креденшелов сервисного аккаунта не найден по пути: {:?}",
                 path_ref
-            ).into());
+            )
+            .into());
         }
 
         // Автоматически выставляем переменную окружения для библиотеки gcp_auth
         std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", path_ref);
-        
+
         // Читаем содержимое JSON-ключа, чтобы автоматически вытащить project_id проекта GCP
         let key_content = fs::read_to_string(path_ref)?;
         let key_json: serde_json::Value = serde_json::from_str(&key_content)?;
-        
+
         let project_id = key_json["project_id"]
             .as_str()
-            .ok_or("В предоставленном сервисном JSON-ключе отсутствует обязательное поле 'project_id'")?
+            .ok_or(
+                "В предоставленном сервисном JSON-ключе отсутствует обязательное поле 'project_id'",
+            )?
             .to_string();
 
         // Создаем менеджер аутентификации Google на базе CustomServiceAccount (совместимо с gcp_auth 0.12)
         let service_account = CustomServiceAccount::from_file(key_path)?;
 
-        println!("[Vertex AI] Успешная авторизация. Проект инициализации: {}", project_id);
+        println!(
+            "[Vertex AI] Успешная авторизация. Проект инициализации: {}",
+            project_id
+        );
         Ok(Self {
             service_account,
             project_id,
@@ -68,13 +76,16 @@ impl VertexAnalytics {
 
     /// Отправляет накопленные CSV логи торгов робота в Gemini 2.5 Pro на глубокий аудит.
     /// Возвращает текстовый отчет с рекомендациями по изменению параметров стратегии.
-    pub async fn analyze_trading_logs(&self, logs_csv: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn analyze_trading_logs(
+        &self,
+        logs_csv: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // 1. Запрашиваем токен доступа. gcp_auth берет его из кэша памяти,
         // либо запрашивает новый у Google OAuth 2.0, если прошлый стек токена истек (> 1 часа).
         let scopes = &["https://www.googleapis.com/auth/cloud-platform"];
         let token = self.service_account.token(scopes).await?;
 
-        // 2. Строим endpoint к Vertex AI API. 
+        // 2. Строим endpoint к Vertex AI API.
         // Используем модель gemini-2.5-pro, так как она обладает лучшей математической логикой для анализа таблиц.
         let url = format!(
             "https://us-central1-aiplatform.googleapis.com/v1/projects/{}/locations/us-central1/publishers/google/models/gemini-2.5-pro:generateContent",
@@ -113,7 +124,8 @@ impl VertexAnalytics {
 
         // 5. Выполняем асинхронный HTTP POST запрос с Bearer OAuth2 токеном нашего сервисного аккаунта
         let client = reqwest::Client::new();
-        let response = client.post(&url)
+        let response = client
+            .post(&url)
             .bearer_auth(token.as_str())
             .json(&payload)
             .send()
@@ -127,7 +139,7 @@ impl VertexAnalytics {
 
         // 6. Безопасно парсим ответ через типизированную структуру
         let resp_data: VertexResponse = response.json::<VertexResponse>().await?;
-        
+
         let ai_report = resp_data
             .candidates
             .first()

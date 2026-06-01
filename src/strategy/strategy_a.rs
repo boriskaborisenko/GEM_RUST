@@ -1,7 +1,9 @@
 use crate::client::{MarketWindow, PricesState};
-use crate::trader::WindowState;
 use crate::config::Config;
-use crate::strategy::{OrderSignal, StrategyState, TradeStrategy};
+use crate::strategy::{
+    EntrySignal, OrderSignal, StrategyState, TradeStrategy, LEGACY_CHEAPER_SIDE_RATIO,
+};
+use crate::trader::WindowState;
 use std::collections::HashMap;
 
 // ─── СТРАТЕГИЯ А: Базовая «тупая» (Simple Both Strategy) ───
@@ -31,7 +33,7 @@ impl TradeStrategy for SimpleBothStrategy {
         window_number: usize,
         secs_to_start: i64,
         _current_btc_atr: f64,
-    ) -> Option<(f64, f64)> {
+    ) -> Option<EntrySignal> {
         if !config.pre_start_entry.enabled {
             return None;
         }
@@ -59,7 +61,13 @@ impl TradeStrategy for SimpleBothStrategy {
         }
 
         self.entered_windows.insert(window_number);
-        Some((up_ask, dn_ask))
+        Some(EntrySignal {
+            up_ask,
+            down_ask: dn_ask,
+            budget_multiplier: 1.0,
+            cheaper_side_ratio: LEGACY_CHEAPER_SIDE_RATIO,
+            reason: "simple_both_balanced_pre_start".to_string(),
+        })
     }
 
     /**
@@ -74,6 +82,7 @@ impl TradeStrategy for SimpleBothStrategy {
         win_state: &WindowState,
         secs_to_end: i64,
         _current_atr: f64,
+        _spot_signal: crate::strategy::SpotSignalSnapshot,
     ) -> Vec<OrderSignal> {
         let mut signals = vec![];
         let window_number = win_state.window_number;

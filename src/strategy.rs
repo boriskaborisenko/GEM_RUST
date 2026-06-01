@@ -4,8 +4,10 @@ pub mod strategy_c;
 pub mod strategy_d;
 
 use crate::client::{MarketWindow, PricesState};
-use crate::trader::WindowState;
 use crate::config::Config;
+use crate::trader::WindowState;
+
+pub const LEGACY_CHEAPER_SIDE_RATIO: f64 = 0.60;
 
 #[derive(Debug, Clone)]
 pub struct OrderSignal {
@@ -14,6 +16,22 @@ pub struct OrderSignal {
     pub amount: f64,
     pub price: f64,
     pub reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct EntrySignal {
+    pub up_ask: f64,
+    pub down_ask: f64,
+    pub budget_multiplier: f64,
+    pub cheaper_side_ratio: f64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SpotSignalSnapshot {
+    pub raw_velocity_usd_per_sec: Option<f64>,
+    pub smoothed_velocity_usd_per_sec: Option<f64>,
+    pub acceleration_usd_per_sec2: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -34,7 +52,7 @@ pub trait TradeStrategy {
         window_number: usize,
         secs_to_start: i64,
         current_btc_atr: f64,
-    ) -> Option<(f64, f64)>;
+    ) -> Option<EntrySignal>;
 
     fn process_live_tick(
         &mut self,
@@ -45,6 +63,7 @@ pub trait TradeStrategy {
         win_state: &WindowState,
         secs_to_end: i64,
         current_atr: f64,
+        spot_signal: SpotSignalSnapshot,
     ) -> Vec<OrderSignal>;
 
     fn get_strategy_state(&self, window_number: usize) -> Option<StrategyState>;
@@ -63,7 +82,9 @@ impl StrategyEngine {
             "dynamic_grid" => Box::new(strategy_d::DynamicGridStrategy::new()),
             _ => Box::new(strategy_a::SimpleBothStrategy::new()),
         };
-        Self { active_strategy: active }
+        Self {
+            active_strategy: active,
+        }
     }
 
     pub fn check_pre_start_entry(
@@ -73,8 +94,14 @@ impl StrategyEngine {
         window_number: usize,
         secs_to_start: i64,
         current_btc_atr: f64,
-    ) -> Option<(f64, f64)> {
-        self.active_strategy.check_pre_start_entry(config, prices, window_number, secs_to_start, current_btc_atr)
+    ) -> Option<EntrySignal> {
+        self.active_strategy.check_pre_start_entry(
+            config,
+            prices,
+            window_number,
+            secs_to_start,
+            current_btc_atr,
+        )
     }
 
     pub fn process_live_tick(
@@ -86,8 +113,18 @@ impl StrategyEngine {
         win_state: &WindowState,
         secs_to_end: i64,
         current_atr: f64,
+        spot_signal: SpotSignalSnapshot,
     ) -> Vec<OrderSignal> {
-        self.active_strategy.process_live_tick(config, prices, spot_price, market, win_state, secs_to_end, current_atr)
+        self.active_strategy.process_live_tick(
+            config,
+            prices,
+            spot_price,
+            market,
+            win_state,
+            secs_to_end,
+            current_atr,
+            spot_signal,
+        )
     }
 
     pub fn get_strategy_state(&self, window_number: usize) -> Option<StrategyState> {

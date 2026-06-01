@@ -13,8 +13,6 @@ pub struct SessionConfig {
     pub max_window_budget: f64,
     #[serde(rename = "windowBudgetPct")]
     pub window_budget_pct: f64,
-    #[serde(rename = "cheaperSideRatio")]
-    pub cheaper_side_ratio: f64,
 }
 
 #[derive(Debug, Deserialize, Clone)]

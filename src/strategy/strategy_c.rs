@@ -1,7 +1,9 @@
 use crate::client::{MarketWindow, PricesState};
-use crate::trader::WindowState;
 use crate::config::Config;
-use crate::strategy::{OrderSignal, StrategyState, TradeStrategy};
+use crate::strategy::{
+    EntrySignal, OrderSignal, StrategyState, TradeStrategy, LEGACY_CHEAPER_SIDE_RATIO,
+};
+use crate::trader::WindowState;
 use std::collections::HashMap;
 
 // ─── СТРАТЕГИЯ Ц: Динамический Безубыток (Dynamic Break-Even Strategy) ───
@@ -31,7 +33,7 @@ impl TradeStrategy for DynamicBreakEvenStrategy {
         window_number: usize,
         secs_to_start: i64,
         _current_btc_atr: f64,
-    ) -> Option<(f64, f64)> {
+    ) -> Option<EntrySignal> {
         if !config.pre_start_entry.enabled {
             return None;
         }
@@ -59,7 +61,13 @@ impl TradeStrategy for DynamicBreakEvenStrategy {
         }
 
         self.entered_windows.insert(window_number);
-        Some((up_ask, dn_ask))
+        Some(EntrySignal {
+            up_ask,
+            down_ask: dn_ask,
+            budget_multiplier: 1.0,
+            cheaper_side_ratio: LEGACY_CHEAPER_SIDE_RATIO,
+            reason: "dynamic_breakeven_balanced_pre_start".to_string(),
+        })
     }
 
     /**
@@ -74,6 +82,7 @@ impl TradeStrategy for DynamicBreakEvenStrategy {
         win_state: &WindowState,
         secs_to_end: i64,
         _current_atr: f64,
+        _spot_signal: crate::strategy::SpotSignalSnapshot,
     ) -> Vec<OrderSignal> {
         let mut signals = vec![];
         let window_number = win_state.window_number;
@@ -154,21 +163,35 @@ impl TradeStrategy for DynamicBreakEvenStrategy {
         if let Some(ref first_sold) = state.first_sold_side {
             let second_side = if first_sold == "UP" { "DOWN" } else { "UP" };
             let second_bid = if second_side == "UP" { up_bid } else { dn_bid };
-            let second_shares = if second_side == "UP" { win_state.up_shares } else { win_state.down_shares };
-            let second_sold = if second_side == "UP" { state.up_sold } else { state.down_sold };
+            let second_shares = if second_side == "UP" {
+                win_state.up_shares
+            } else {
+                win_state.down_shares
+            };
+            let second_sold = if second_side == "UP" {
+                state.up_sold
+            } else {
+                state.down_sold
+            };
 
             if second_shares > 0.0 && !second_sold {
                 // Инициализируем бейслайн спота к страйку при первой продаже
                 if state.ptb_baseline.is_none() {
                     if let (Some(spot), Some(ptb)) = (spot_price, market.price_to_beat) {
-                        let rel = if spot < ptb { "BELOW".to_string() } else { "ABOVE".to_string() };
+                        let rel = if spot < ptb {
+                            "BELOW".to_string()
+                        } else {
+                            "ABOVE".to_string()
+                        };
                         state.ptb_baseline = Some(rel);
                     }
                 }
 
                 // Мониторим пересечение спот-курсом уровня страйка
                 if !state.ptb_crossed {
-                    if let (Some(spot), Some(ptb), Some(ref baseline)) = (spot_price, market.price_to_beat, &state.ptb_baseline) {
+                    if let (Some(spot), Some(ptb), Some(ref baseline)) =
+                        (spot_price, market.price_to_beat, &state.ptb_baseline)
+                    {
                         if first_sold == "UP" {
                             if baseline == "ABOVE" && spot < ptb {
                                 state.ptb_crossed = true;
@@ -189,10 +212,16 @@ impl TradeStrategy for DynamicBreakEvenStrategy {
 
                 // Если спот совершил пересечение страйка обратно, вычисляем Динамический Тейк!
                 if state.ptb_crossed {
-                    let slippage_buffer = config.dynamic_breakeven.as_ref().map(|db| db.slippage_buffer).unwrap_or(0.02);
-                    
+                    let slippage_buffer = config
+                        .dynamic_breakeven
+                        .as_ref()
+                        .map(|db| db.slippage_buffer)
+                        .unwrap_or(0.02);
+
                     // Формула: Min_Safe_Price = (Spent - Cash_Returned) / Remaining_Shares + Buffer
-                    let min_safe_price = (win_state.spent - win_state.cash_returned) / second_shares + slippage_buffer;
+                    let min_safe_price = (win_state.spent - win_state.cash_returned)
+                        / second_shares
+                        + slippage_buffer;
 
                     // Если текущий Bid слабой стороны покрывает динамический порог безубыточности — продаем!
                     if second_bid >= min_safe_price {

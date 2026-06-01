@@ -1,10 +1,10 @@
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use futures_util::{SinkExt, StreamExt};
 
 const GAMMA_API: &str = "https://gamma-api.polymarket.com";
 const CLOB_REST: &str = "https://clob.polymarket.com";
@@ -109,10 +109,15 @@ pub fn get_now_ms() -> i64 {
  * Sync clock offset with Polymarket Gamma HTTP date header on process startup.
  */
 pub async fn fetch_time_offset() -> anyhow::Result<i64> {
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(5)).build()?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
     // Query fast events endpoint with limit 1
-    let res = client.get(format!("{}/events?limit=1", GAMMA_API)).send().await?;
-    
+    let res = client
+        .get(format!("{}/events?limit=1", GAMMA_API))
+        .send()
+        .await?;
+
     if let Some(date_header) = res.headers().get(reqwest::header::DATE) {
         if let Ok(date_str) = date_header.to_str() {
             if let Ok(server_time) = chrono::DateTime::parse_from_rfc2822(date_str) {
@@ -122,7 +127,7 @@ pub async fn fetch_time_offset() -> anyhow::Result<i64> {
             }
         }
     }
-    
+
     anyhow::bail!("Failed to read server Date header")
 }
 
@@ -131,7 +136,10 @@ pub async fn fetch_time_offset() -> anyhow::Result<i64> {
  * similar to the implementation in proto_v08_Rust's polymarket connector.
  */
 pub async fn find_upcoming_markets(asset: &str, interval: &str) -> Vec<MarketWindow> {
-    let client = match reqwest::Client::builder().timeout(Duration::from_secs(8)).build() {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+    {
         Ok(c) => c,
         Err(_) => return vec![],
     };
@@ -147,7 +155,7 @@ pub async fn find_upcoming_markets(asset: &str, interval: &str) -> Vec<MarketWin
         let target_sec = current_bucket + i * bucket_sec;
         let slug = format!("{}-{}", slug_prefix, target_sec);
         let url = format!("{}/markets/slug/{}", GAMMA_API, slug);
-        
+
         if let Ok(res) = client.get(&url).send().await {
             if let Ok(val) = res.json::<Value>().await {
                 // Parse either as single object or array
@@ -169,15 +177,17 @@ pub async fn find_upcoming_markets(asset: &str, interval: &str) -> Vec<MarketWin
     // Fallback: broad search by slug_contains if exact slug matches returned 0 results (crucial for 15m intervals!)
     if results.is_empty() {
         let fallback_url = format!("{}/events", GAMMA_API);
-        if let Ok(res) = client.get(&fallback_url)
+        if let Ok(res) = client
+            .get(&fallback_url)
             .query(&[
                 ("slug_contains", &slug_prefix),
                 ("closed", &"false".to_string()),
                 ("limit", &"20".to_string()),
                 ("order", &"startDate".to_string()),
-                ("ascending", &"true".to_string())
+                ("ascending", &"true".to_string()),
             ])
-            .send().await 
+            .send()
+            .await
         {
             if let Ok(events) = res.json::<Value>().await {
                 if let Some(events_arr) = events.as_array() {
@@ -205,7 +215,10 @@ pub async fn find_active_market(asset: &str, interval: &str) -> Option<MarketWin
     let now_ms = get_now_ms();
 
     for m in markets {
-        if let (Ok(start), Ok(end)) = (chrono::DateTime::parse_from_rfc3339(&m.start_time), chrono::DateTime::parse_from_rfc3339(&m.end_time)) {
+        if let (Ok(start), Ok(end)) = (
+            chrono::DateTime::parse_from_rfc3339(&m.start_time),
+            chrono::DateTime::parse_from_rfc3339(&m.end_time),
+        ) {
             let start_ms = start.timestamp_millis();
             let end_ms = end.timestamp_millis();
             if now_ms >= start_ms && now_ms < end_ms {
@@ -216,7 +229,12 @@ pub async fn find_active_market(asset: &str, interval: &str) -> Option<MarketWin
     None
 }
 
-pub async fn find_next_market(asset: &str, interval: &str, after_time_ms: i64, exclude_slugs: &[String]) -> Option<MarketWindow> {
+pub async fn find_next_market(
+    asset: &str,
+    interval: &str,
+    after_time_ms: i64,
+    exclude_slugs: &[String],
+) -> Option<MarketWindow> {
     let markets = find_upcoming_markets(asset, interval).await;
 
     for m in markets {
@@ -234,7 +252,10 @@ pub async fn find_next_market(asset: &str, interval: &str, after_time_ms: i64, e
  * Fetch orderbook snapshot for a token via CLOB REST.
  */
 pub async fn get_book_snapshot(token_id: &str) -> (f64, f64) {
-    let client = match reqwest::Client::builder().timeout(Duration::from_secs(5)).build() {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
         Ok(c) => c,
         Err(_) => return (0.0, 0.0),
     };
@@ -247,7 +268,10 @@ pub async fn get_book_snapshot(token_id: &str) -> (f64, f64) {
 
             if let Some(bids_arr) = book.get("bids").and_then(|v| v.as_array()) {
                 for b in bids_arr {
-                    if let (Some(px), Some(sz)) = (b.get("price").and_then(|v| v.as_str()), b.get("size").and_then(|v| v.as_str())) {
+                    if let (Some(px), Some(sz)) = (
+                        b.get("price").and_then(|v| v.as_str()),
+                        b.get("size").and_then(|v| v.as_str()),
+                    ) {
                         if let (Ok(price), Ok(_)) = (px.parse::<f64>(), sz.parse::<f64>()) {
                             bids.push(price);
                         }
@@ -257,7 +281,10 @@ pub async fn get_book_snapshot(token_id: &str) -> (f64, f64) {
 
             if let Some(asks_arr) = book.get("asks").and_then(|v| v.as_array()) {
                 for a in asks_arr {
-                    if let (Some(px), Some(sz)) = (a.get("price").and_then(|v| v.as_str()), a.get("size").and_then(|v| v.as_str())) {
+                    if let (Some(px), Some(sz)) = (
+                        a.get("price").and_then(|v| v.as_str()),
+                        a.get("size").and_then(|v| v.as_str()),
+                    ) {
                         if let (Ok(price), Ok(_)) = (px.parse::<f64>(), sz.parse::<f64>()) {
                             asks.push(price);
                         }
@@ -280,8 +307,14 @@ pub async fn get_market_snapshot(market: &MarketWindow) -> PricesState {
     let (up_bid, up_ask) = get_book_snapshot(&market.tokens.up.token_id).await;
     let (dn_bid, dn_ask) = get_book_snapshot(&market.tokens.down.token_id).await;
     PricesState {
-        up: ContractPrices { bid: up_bid, ask: up_ask },
-        down: ContractPrices { bid: dn_bid, ask: dn_ask },
+        up: ContractPrices {
+            bid: up_bid,
+            ask: up_ask,
+        },
+        down: ContractPrices {
+            bid: dn_bid,
+            ask: dn_ask,
+        },
     }
 }
 
@@ -299,18 +332,30 @@ pub fn subscribe_prices(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            tx.send(MarketEvent::Log(format!("Connecting to CLOB WS for Window #{} [{}]...", window_number, role))).unwrap_or_default();
-            
+            tx.send(MarketEvent::Log(format!(
+                "Connecting to CLOB WS for Window #{} [{}]...",
+                window_number, role
+            )))
+            .unwrap_or_default();
+
             let (mut ws, _) = match connect_async(CLOB_WS).await {
                 Ok(conn) => conn,
                 Err(e) => {
-                    tx.send(MarketEvent::Log(format!("CLOB WS connection failed: {}. Retrying...", e))).unwrap_or_default();
+                    tx.send(MarketEvent::Log(format!(
+                        "CLOB WS connection failed: {}. Retrying...",
+                        e
+                    )))
+                    .unwrap_or_default();
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     continue;
                 }
             };
 
-            tx.send(MarketEvent::Log(format!("CLOB WS Connected for Window #{} [{}]", window_number, role))).unwrap_or_default();
+            tx.send(MarketEvent::Log(format!(
+                "CLOB WS Connected for Window #{} [{}]",
+                window_number, role
+            )))
+            .unwrap_or_default();
 
             // Subscribe to both tokens
             let sub_msg = json!({
@@ -329,7 +374,8 @@ pub fn subscribe_prices(
                 market: market.clone(),
                 prices: prices.clone(),
                 timestamp: get_now_ms(),
-            }).unwrap_or_default();
+            })
+            .unwrap_or_default();
 
             // Price updates receiver loop
             while let Some(msg) = ws.next().await {
@@ -343,9 +389,10 @@ pub fn subscribe_prices(
 
                         let mut updated = false;
                         for m in msgs {
-                            let event_type = m.get("event_type").and_then(|v| v.as_str()).unwrap_or("");
+                            let event_type =
+                                m.get("event_type").and_then(|v| v.as_str()).unwrap_or("");
                             let asset_id = m.get("asset_id").and_then(|v| v.as_str()).unwrap_or("");
-                            
+
                             let side = if asset_id == market.tokens.up.token_id {
                                 Some("UP")
                             } else if asset_id == market.tokens.down.token_id {
@@ -358,7 +405,7 @@ pub fn subscribe_prices(
                                 if event_type == "book" {
                                     let bids = m.get("bids").and_then(|v| v.as_array());
                                     let asks = m.get("asks").and_then(|v| v.as_array());
-                                    
+
                                     let mut up_bid = prices.up.bid;
                                     let mut up_ask = prices.up.ask;
                                     let mut dn_bid = prices.down.bid;
@@ -366,44 +413,107 @@ pub fn subscribe_prices(
 
                                     if side == "UP" {
                                         if let Some(b) = bids {
-                                            let mut parsed: Vec<f64> = b.iter().filter_map(|v| v.get("price").and_then(|p| p.as_str()).and_then(|p| p.parse().ok())).collect();
-                                            parsed.sort_by(|x, y| y.partial_cmp(x).unwrap_or(std::cmp::Ordering::Equal));
-                                            if let Some(best) = parsed.first() { up_bid = *best; }
+                                            let mut parsed: Vec<f64> = b
+                                                .iter()
+                                                .filter_map(|v| {
+                                                    v.get("price")
+                                                        .and_then(|p| p.as_str())
+                                                        .and_then(|p| p.parse().ok())
+                                                })
+                                                .collect();
+                                            parsed.sort_by(|x, y| {
+                                                y.partial_cmp(x)
+                                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                            });
+                                            if let Some(best) = parsed.first() {
+                                                up_bid = *best;
+                                            }
                                         }
                                         if let Some(a) = asks {
-                                            let mut parsed: Vec<f64> = a.iter().filter_map(|v| v.get("price").and_then(|p| p.as_str()).and_then(|p| p.parse().ok())).collect();
-                                            parsed.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
-                                            if let Some(best) = parsed.first() { up_ask = *best; }
+                                            let mut parsed: Vec<f64> = a
+                                                .iter()
+                                                .filter_map(|v| {
+                                                    v.get("price")
+                                                        .and_then(|p| p.as_str())
+                                                        .and_then(|p| p.parse().ok())
+                                                })
+                                                .collect();
+                                            parsed.sort_by(|x, y| {
+                                                x.partial_cmp(y)
+                                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                            });
+                                            if let Some(best) = parsed.first() {
+                                                up_ask = *best;
+                                            }
                                         }
                                     } else {
                                         if let Some(b) = bids {
-                                            let mut parsed: Vec<f64> = b.iter().filter_map(|v| v.get("price").and_then(|p| p.as_str()).and_then(|p| p.parse().ok())).collect();
-                                            parsed.sort_by(|x, y| y.partial_cmp(x).unwrap_or(std::cmp::Ordering::Equal));
-                                            if let Some(best) = parsed.first() { dn_bid = *best; }
+                                            let mut parsed: Vec<f64> = b
+                                                .iter()
+                                                .filter_map(|v| {
+                                                    v.get("price")
+                                                        .and_then(|p| p.as_str())
+                                                        .and_then(|p| p.parse().ok())
+                                                })
+                                                .collect();
+                                            parsed.sort_by(|x, y| {
+                                                y.partial_cmp(x)
+                                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                            });
+                                            if let Some(best) = parsed.first() {
+                                                dn_bid = *best;
+                                            }
                                         }
                                         if let Some(a) = asks {
-                                            let mut parsed: Vec<f64> = a.iter().filter_map(|v| v.get("price").and_then(|p| p.as_str()).and_then(|p| p.parse().ok())).collect();
-                                            parsed.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
-                                            if let Some(best) = parsed.first() { dn_ask = *best; }
+                                            let mut parsed: Vec<f64> = a
+                                                .iter()
+                                                .filter_map(|v| {
+                                                    v.get("price")
+                                                        .and_then(|p| p.as_str())
+                                                        .and_then(|p| p.parse().ok())
+                                                })
+                                                .collect();
+                                            parsed.sort_by(|x, y| {
+                                                x.partial_cmp(y)
+                                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                            });
+                                            if let Some(best) = parsed.first() {
+                                                dn_ask = *best;
+                                            }
                                         }
                                     }
 
                                     prices = PricesState {
-                                        up: ContractPrices { bid: up_bid, ask: up_ask },
-                                        down: ContractPrices { bid: dn_bid, ask: dn_ask },
+                                        up: ContractPrices {
+                                            bid: up_bid,
+                                            ask: up_ask,
+                                        },
+                                        down: ContractPrices {
+                                            bid: dn_bid,
+                                            ask: dn_ask,
+                                        },
                                     };
                                     updated = true;
-                                } else if event_type == "price_change" || event_type == "tick_size_change" || event_type == "last_trade_price" {
-                                    if let Some(px_val) = m.get("price").or_else(|| m.get("last_trade_price")) {
+                                } else if event_type == "price_change"
+                                    || event_type == "tick_size_change"
+                                    || event_type == "last_trade_price"
+                                {
+                                    if let Some(px_val) =
+                                        m.get("price").or_else(|| m.get("last_trade_price"))
+                                    {
                                         let px_str = px_val.as_str().unwrap_or("0");
                                         if let Ok(price) = px_str.parse::<f64>() {
                                             if price > 0.0 {
                                                 if side == "UP" {
                                                     prices.up.bid = price;
-                                                    if prices.up.ask <= price { prices.up.ask = price + 0.01; }
+                                                    if prices.up.ask <= price {
+                                                        prices.up.ask = price + 0.01;
+                                                    }
                                                 } else {
                                                     prices.down.bid = price;
-                                                    if prices.down.ask <= price { prices.down.ask = price + 0.01; }
+                                                    if prices.down.ask <= price {
+                                                        prices.down.ask = price + 0.01;
+                                                    }
                                                 }
                                                 updated = true;
                                             }
@@ -420,12 +530,17 @@ pub fn subscribe_prices(
                                 market: market.clone(),
                                 prices: prices.clone(),
                                 timestamp: get_now_ms(),
-                            }).unwrap_or_default();
+                            })
+                            .unwrap_or_default();
                         }
                     }
                 }
             }
-            tx.send(MarketEvent::Log(format!("CLOB WS connection closed for Window #{} [{}]. Reconnecting in 3s...", window_number, role))).unwrap_or_default();
+            tx.send(MarketEvent::Log(format!(
+                "CLOB WS connection closed for Window #{} [{}]. Reconnecting in 3s...",
+                window_number, role
+            )))
+            .unwrap_or_default();
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
     })
@@ -434,21 +549,36 @@ pub fn subscribe_prices(
 /**
  * Subscribe to the Polymarket public spot price feed WebSocket with automatic reconnect.
  */
-pub fn subscribe_chainlink(asset: String, tx: mpsc::UnboundedSender<MarketEvent>) -> tokio::task::JoinHandle<()> {
+pub fn subscribe_chainlink(
+    asset: String,
+    tx: mpsc::UnboundedSender<MarketEvent>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            tx.send(MarketEvent::Log(format!("Connecting to Chainlink Spot WS for {}...", asset))).unwrap_or_default();
+            tx.send(MarketEvent::Log(format!(
+                "Connecting to Chainlink Spot WS for {}...",
+                asset
+            )))
+            .unwrap_or_default();
 
             let (mut ws, _) = match connect_async(CHAINLINK_WS).await {
                 Ok(conn) => conn,
                 Err(e) => {
-                    tx.send(MarketEvent::Log(format!("Chainlink WS connection failed: {}. Retrying...", e))).unwrap_or_default();
+                    tx.send(MarketEvent::Log(format!(
+                        "Chainlink WS connection failed: {}. Retrying...",
+                        e
+                    )))
+                    .unwrap_or_default();
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     continue;
                 }
             };
 
-            tx.send(MarketEvent::Log(format!("Chainlink Spot WS Connected for {}", asset))).unwrap_or_default();
+            tx.send(MarketEvent::Log(format!(
+                "Chainlink Spot WS Connected for {}",
+                asset
+            )))
+            .unwrap_or_default();
 
             let symbol = format!("{}/usd", asset.to_lowercase());
             let sub_msg = json!({
@@ -515,7 +645,10 @@ pub fn subscribe_chainlink(asset: String, tx: mpsc::UnboundedSender<MarketEvent>
                 }
             }
 
-            tx.send(MarketEvent::Log(format!("Chainlink Spot WS disconnected. Reconnecting in 3s..."))).unwrap_or_default();
+            tx.send(MarketEvent::Log(format!(
+                "Chainlink Spot WS disconnected. Reconnecting in 3s..."
+            )))
+            .unwrap_or_default();
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
     })
@@ -525,19 +658,24 @@ pub fn subscribe_chainlink(asset: String, tx: mpsc::UnboundedSender<MarketEvent>
 
 fn parse_market(m: &Value, asset: &str, interval: &str) -> Option<MarketWindow> {
     let slug = m.get("slug")?.as_str()?.to_string();
-    
+
     // Parse times
     let bucket_sec = if interval == "15m" { 900 } else { 300 };
     let slug_parts: Vec<&str> = slug.split('-').collect();
-    let slug_timestamp = slug_parts.last().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
-    
+    let slug_timestamp = slug_parts
+        .last()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
+
     let (start_ms, end_ms) = if slug_timestamp > 1000000000 {
         let s = slug_timestamp * 1000;
         (s, s + bucket_sec * 1000)
     } else if let Some(start_date) = m.get("startDate").and_then(|v| v.as_str()) {
         if let Ok(start) = chrono::DateTime::parse_from_rfc3339(start_date) {
             let s = start.timestamp_millis();
-            let e = m.get("endDate").and_then(|v| v.as_str())
+            let e = m
+                .get("endDate")
+                .and_then(|v| v.as_str())
                 .and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok())
                 .map(|t| t.timestamp_millis())
                 .unwrap_or(s + bucket_sec * 1000);
@@ -551,7 +689,11 @@ fn parse_market(m: &Value, asset: &str, interval: &str) -> Option<MarketWindow> 
 
     let clob_token_ids = m.get("clobTokenIds")?;
     let clob_token_ids_parsed: Vec<String> = if clob_token_ids.is_array() {
-        clob_token_ids.as_array()?.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+        clob_token_ids
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect()
     } else {
         let s = clob_token_ids.as_str()?;
         serde_json::from_str(s).ok()?
@@ -559,7 +701,11 @@ fn parse_market(m: &Value, asset: &str, interval: &str) -> Option<MarketWindow> 
 
     let outcomes_val = m.get("outcomes")?;
     let outcomes_parsed: Vec<String> = if outcomes_val.is_array() {
-        outcomes_val.as_array()?.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+        outcomes_val
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect()
     } else {
         let s = outcomes_val.as_str()?;
         serde_json::from_str(s).ok()?
@@ -569,15 +715,21 @@ fn parse_market(m: &Value, asset: &str, interval: &str) -> Option<MarketWindow> 
         return None;
     }
 
-    let up_index = outcomes_parsed.iter().position(|label| {
-        let l = label.to_lowercase();
-        l == "up" || l == "yes"
-    }).unwrap_or(0);
+    let up_index = outcomes_parsed
+        .iter()
+        .position(|label| {
+            let l = label.to_lowercase();
+            l == "up" || l == "yes"
+        })
+        .unwrap_or(0);
 
-    let dn_index = outcomes_parsed.iter().position(|label| {
-        let l = label.to_lowercase();
-        l == "down" || l == "no"
-    }).unwrap_or(if up_index == 0 { 1 } else { 0 });
+    let dn_index = outcomes_parsed
+        .iter()
+        .position(|label| {
+            let l = label.to_lowercase();
+            l == "down" || l == "no"
+        })
+        .unwrap_or(if up_index == 0 { 1 } else { 0 });
 
     let up_token_id = clob_token_ids_parsed.get(up_index)?.to_string();
     let dn_token_id = clob_token_ids_parsed.get(dn_index)?.to_string();
@@ -605,28 +757,38 @@ fn parse_market(m: &Value, asset: &str, interval: &str) -> Option<MarketWindow> 
     Some(MarketWindow {
         id: m.get("id")?.to_string().trim_matches('"').to_string(),
         slug,
-        question: m.get("question").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        question: m
+            .get("question")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         asset: asset.to_string(),
         interval: interval.to_string(),
         start_time: chrono::DateTime::from_timestamp(start_ms / 1000, 0)?.to_rfc3339(),
         end_time: chrono::DateTime::from_timestamp(end_ms / 1000, 0)?.to_rfc3339(),
         price_to_beat,
         tokens: TokensMap {
-            up: TokenInfo { token_id: up_token_id, outcome_name: "Up".to_string() },
-            down: TokenInfo { token_id: dn_token_id, outcome_name: "Down".to_string() },
+            up: TokenInfo {
+                token_id: up_token_id,
+                outcome_name: "Up".to_string(),
+            },
+            down: TokenInfo {
+                token_id: dn_token_id,
+                outcome_name: "Down".to_string(),
+            },
         },
     })
 }
 
 fn parse_strike_from_text(text: &str, asset: &str) -> Option<f64> {
     let asset_upper = asset.to_uppercase();
-    
+
     // Extract all numbers, keeping track of whether they are preceded by '$'
     let mut candidates = vec![];
     let mut current = String::new();
     let mut is_after_dollar = false;
     let mut has_decimal = false;
-    
+
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
     while i < chars.len() {
@@ -676,7 +838,8 @@ fn parse_strike_from_text(text: &str, asset: &str) -> Option<f64> {
         _ => 0.0,
     };
 
-    let mut filtered: Vec<(f64, bool)> = candidates.into_iter()
+    let mut filtered: Vec<(f64, bool)> = candidates
+        .into_iter()
         .filter(|&(val, _)| val >= min_allowed)
         .collect();
 

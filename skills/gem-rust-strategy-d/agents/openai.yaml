@@ -1,0 +1,4 @@
+interface:
+  display_name: "GEM Rust Strategy D"
+  short_description: "Work on GEM_RUST Dynamic Grid strategy D."
+  default_prompt: "Analyze or modify GEM_RUST Strategy D with ATR-aware window logic."
