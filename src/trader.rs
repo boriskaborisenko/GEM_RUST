@@ -325,6 +325,7 @@ impl Portfolio {
 
     pub fn close_window(&mut self, window_number: usize, status: &str, spot_price: Option<f64>) {
         let mut redeemed = false;
+        let mut terminal_trades: Vec<(String, TradeRecord)> = vec![];
 
         let mut win_market = None;
         if let Some(w) = self.windows.get(&window_number) {
@@ -346,7 +347,7 @@ impl Portfolio {
                             if let Some(win) = self.windows.get_mut(&window_number) {
                                 win.cash_returned += val;
                                 win.up_shares = 0.0;
-                                win.trades.push(TradeRecord {
+                                let trade = TradeRecord {
                                     timestamp: get_now_ms(),
                                     trade_type: "REDEEM".to_string(),
                                     side: "UP".to_string(),
@@ -355,14 +356,16 @@ impl Portfolio {
                                     shares: up_shares,
                                     usd_value: val,
                                     available_cash_after: cash_after,
-                                });
+                                };
+                                win.trades.push(trade.clone());
+                                terminal_trades.push((win.market.slug.clone(), trade));
                             }
                         }
                         if down_shares > 0.0 {
                             let cash_after = self.available_cash;
                             if let Some(win) = self.windows.get_mut(&window_number) {
                                 win.down_shares = 0.0;
-                                win.trades.push(TradeRecord {
+                                let trade = TradeRecord {
                                     timestamp: get_now_ms(),
                                     trade_type: "EXPIRED".to_string(),
                                     side: "DOWN".to_string(),
@@ -371,7 +374,9 @@ impl Portfolio {
                                     shares: down_shares,
                                     usd_value: 0.00,
                                     available_cash_after: cash_after,
-                                });
+                                };
+                                win.trades.push(trade.clone());
+                                terminal_trades.push((win.market.slug.clone(), trade));
                             }
                         }
                     } else {
@@ -383,7 +388,7 @@ impl Portfolio {
                             if let Some(win) = self.windows.get_mut(&window_number) {
                                 win.cash_returned += val;
                                 win.down_shares = 0.0;
-                                win.trades.push(TradeRecord {
+                                let trade = TradeRecord {
                                     timestamp: get_now_ms(),
                                     trade_type: "REDEEM".to_string(),
                                     side: "DOWN".to_string(),
@@ -392,14 +397,16 @@ impl Portfolio {
                                     shares: down_shares,
                                     usd_value: val,
                                     available_cash_after: cash_after,
-                                });
+                                };
+                                win.trades.push(trade.clone());
+                                terminal_trades.push((win.market.slug.clone(), trade));
                             }
                         }
                         if up_shares > 0.0 {
                             let cash_after = self.available_cash;
                             if let Some(win) = self.windows.get_mut(&window_number) {
                                 win.up_shares = 0.0;
-                                win.trades.push(TradeRecord {
+                                let trade = TradeRecord {
                                     timestamp: get_now_ms(),
                                     trade_type: "EXPIRED".to_string(),
                                     side: "UP".to_string(),
@@ -408,13 +415,19 @@ impl Portfolio {
                                     shares: up_shares,
                                     usd_value: 0.00,
                                     available_cash_after: cash_after,
-                                });
+                                };
+                                win.trades.push(trade.clone());
+                                terminal_trades.push((win.market.slug.clone(), trade));
                             }
                         }
                     }
                     redeemed = true;
                 }
             }
+        }
+
+        for (slug, trade) in &terminal_trades {
+            Self::append_trade_event(&self.log_dir, window_number, slug, trade);
         }
 
         // Если не удалось точно определить победителя (нет спота или страйка) - делаем обычный экстренный сброс по Bid

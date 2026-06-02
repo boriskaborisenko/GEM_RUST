@@ -4,18 +4,18 @@
 
 Improve expectancy for 15m BTC UP/DOWN windows. The old run shown by the user had positive winrate but negative realized PnL, so v3 prioritizes loss size, controlled add-ons, PTB-aware exits, and winner runner retention over raw winrate.
 
-Current status: ready for first paper test. Do not keep layering indicators before fresh logs exist. The next useful work is observation, not theoretical optimization.
+Current status: first logs showed the old Dynamic BUY was too frequent and usually fired after the strong side was fully sold. It has been replaced by experimental WeakScalp. The next useful work is observation, not theoretical optimization.
 
 ## Coupled-System Principle
 
 Strategy D is a coupled control system, not a pile of independent thresholds. Every rule must be evaluated against the full lifecycle:
 
-- ATR regime changes entry frequency, budget size, split, grid targets, Dynamic BUY reach, and weak-side patience.
+- ATR regime changes entry frequency, budget size, split, grid targets, WeakScalp reach, and weak-side patience.
 - Time decay changes whether a low bid is a temporary mark or a real loss that should be salvaged.
-- PTB deviation changes winner conviction, weak-side reversal probability, Dynamic BUY safety, and redeem-hold confidence.
+- PTB deviation changes winner conviction, weak-side reversal probability, WeakScalp safety, and redeem-hold confidence.
 - Spot velocity changes whether a PTB deviation is likely still expanding or already mean-reverting.
 - Strong-side grid sells reduce risk but can destroy expected value if they sell a clear ITM winner before redeem.
-- Dynamic BUY can improve weak-side average price, but it also increases max loss if used during far/runaway moves.
+- WeakScalp can harvest weak-side rebounds, but it must not become averaging down or naked re-entry after the strong side is gone.
 - Emergency exits preserve cash on losers, but must not liquidate a clear ITM redeem runner too cheaply.
 
 When changing one parameter, explicitly check the effects on entry count, average position size, average win, average loss, weak-side exposure, runner retention, and redeem probability.
@@ -54,7 +54,7 @@ Important: `OrderSignal.amount` has mixed historical semantics:
 - Buy: USD amount passed to `Portfolio::execute_buy`.
 - Sell: share amount passed to `Portfolio::execute_sell`.
 
-Dynamic BUY must therefore compute `buy_usd = target_shares * ask`, then cap it as a fraction of total spent.
+WeakScalp buy signals must use USD amount. Sell signals still use share amount.
 
 ## Live Management
 
@@ -76,7 +76,7 @@ PTB deviation:
 
 - Use both absolute USD distance and percentage distance.
 - BTC zones: near <= $25, moderate <= $100, far <= $250, runaway above that, with percent fallbacks.
-- Use zones in strong-grid target expansion, Dynamic BUY reach, and weak-side TVDS exits.
+- Use zones in strong-grid target expansion, WeakScalp reach, and weak-side TVDS exits.
 
 Redeem hold:
 
@@ -85,14 +85,16 @@ Redeem hold:
 - If release bid is reached, sell only a small partial and leave the runner for close-window redeem.
 - Emergency time stop is blocked for the held ITM winner while redeem-hold conditions remain true.
 
-Dynamic BUY:
+WeakScalp:
 
-- Only before 60% elapsed.
-- Only once per window.
-- Requires known PTB deviation.
-- Requires spot to be within the ATR-derived reversal reach.
-- Blocks buys when smoothed spot velocity is even moderately moving against the weak side being bought.
-- Uses small USD sizing, capped by `DYNAMIC_BUY_MAX_USD_FRACTION_OF_SPENT`.
+- Replaces the old Dynamic BUY after logs showed Dynamic BUY was usually not a hedge.
+- Only before 55% elapsed.
+- Max two tranches per side/window, but only one active tranche per side at a time.
+- Requires known PTB deviation, near/moderate zone, and ATR-derived deviation cap.
+- Requires live strong-side inventory: at least 20% of initial strong-side shares remain.
+- Requires weak ask below ATR-derived cap and spot velocity in favor of the weak side.
+- Uses tiny USD sizing: 3.5% of window spent per tranche.
+- Sells only the active scalp shares at an ATR-derived target above average entry.
 
 Weak exit:
 
@@ -111,11 +113,11 @@ Files:
 - `lifecycle_events.csv`: one row per window promotion, including skipped/entered state, ATR, prices, spot/PTB.
 - `entry_events.csv`: accepted pre-start entries and ATR regime reasons.
 - `strategy_signals.csv`: live strategy signals, execution status, time, prices, PTB distance, position, and mark-to-market PnL.
-- `strategy_signals.csv` also includes raw/smoothed spot velocity and acceleration so Dynamic BUY / redeem-hold decisions can be audited.
+- `strategy_signals.csv` also includes raw/smoothed spot velocity and acceleration so WeakScalp / redeem-hold decisions can be audited.
 - `trade_events.csv`: executed paper buys/sells.
 - `window_summary.csv`: closed entered windows, realized PnL, close spot, PTB, and winner.
 
-## First Test Protocol
+## Next Test Protocol
 
 Run from `GEM_RUST` in two terminals:
 
@@ -129,18 +131,19 @@ Recommended sample before tuning:
 - 5m: 40-50 windows.
 - 15m: 15-25 windows.
 - No parameter tuning during the first 5-10 windows unless there is a clear bug.
+- Compare WeakScalp runs against the old `20260601_103616` logs where Dynamic BUY was too frequent.
 
 Review order:
 
 1. `window_summary.csv`: final PnL, winner, close spot/PTB, redeem behavior.
 2. `entry_events.csv`: entry regimes, ATR, split, accepted windows.
-3. `strategy_signals.csv`: Dynamic BUY, SELL-grid, weak exits, velocity bias, execution status.
+3. `strategy_signals.csv`: WeakScalp, SELL-grid, weak exits, velocity bias, execution status.
 4. `trade_events.csv`: accounting trail.
 5. `lifecycle_events.csv`: skipped/entered lifecycle sanity.
 
 Key review questions:
 
-- Is Dynamic BUY rare enough and profitable enough to justify added exposure?
+- Is WeakScalp rare enough and profitable enough to justify added exposure?
 - Are strong winners sold too early, or is redeem-hold capturing enough upside?
 - Are weak exits saving cash before decay kills the side?
 - Does spot velocity help by soft-adjusting decisions, or does it overfilter good opportunities?

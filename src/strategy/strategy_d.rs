@@ -9,24 +9,38 @@ const ATR_LOW_MAX: f64 = 18.0;
 const ATR_HIGH_MIN: f64 = 45.0;
 const ATR_EXTREME_MIN: f64 = 90.0;
 
-const ENTRY_MAX_ASK_SPREAD: f64 = 0.03;
+const ENTRY_MAX_ASK_SPREAD: f64 = 0.16;
 const ENTRY_ULTRA_LOW_ATR_MAX_COMBINED_ASK: f64 = 1.00;
 const ENTRY_LOW_ATR_MAX_COMBINED_ASK: f64 = 1.01;
 const ENTRY_HIGH_ATR_MAX_COMBINED_ASK: f64 = 1.04;
 const ENTRY_EXTREME_ATR_MAX_COMBINED_ASK: f64 = 1.02;
+const ENTRY_DIRECTIONAL_MAX_COMBINED_ASK: f64 = 1.02;
 
-const DYNAMIC_BUY_WEAK_SHARE_FRACTION: f64 = 0.35;
-const DYNAMIC_BUY_MAX_USD_FRACTION_OF_SPENT: f64 = 0.12;
-const DYNAMIC_BUY_COUNTER_SOFT_FACTOR: f64 = 0.35;
+const WEAK_SCALP_MAX_TRANCHES_PER_SIDE: usize = 2;
+const WEAK_SCALP_USD_FRACTION_OF_SPENT: f64 = 0.035;
+const WEAK_SCALP_MIN_USD: f64 = 0.35;
+const WEAK_SCALP_MIN_STRONG_REMAINING_FRACTION: f64 = 0.20;
+const WEAK_SCALP_MIN_RECOVERED_RATIO: f64 = 0.40;
 const REDEEM_HOLD_RELEASE_BID: f64 = 0.90;
+const STRONG_GRID_STEP_SELL_FRACTION: f64 = 0.25;
+const STRONG_GRID_RUNNER_FRACTION: f64 = 0.35;
+const CAPITAL_PROTECTED_RATIO: f64 = 0.70;
+const PAIRED_FLOOR_MAX_SACRIFICE_RATIO: f64 = 0.08;
+const PAIRED_FLOOR_PROTECTED_MAX_SACRIFICE_RATIO: f64 = 0.12;
+const WEAK_EXIT_MIN_INSURANCE_FRACTION: f64 = 0.08;
+const WEAK_EXIT_NEAR_INSURANCE_FRACTION: f64 = 0.30;
+const WEAK_EXIT_MODERATE_INSURANCE_FRACTION: f64 = 0.25;
+const WEAK_EXIT_FAR_INSURANCE_FRACTION: f64 = 0.14;
 
-// ─── СТРАТЕГИЯ Д: Dynamic Grid + Dynamic BUY + Time-Decay Crossover Block ───
+// ─── СТРАТЕГИЯ Д: Dynamic Grid + WeakScalp + Time-Decay Crossover Block ───
 pub struct DynamicGridStrategy {
     pub entered_windows: std::collections::HashSet<usize>,
     pub states: HashMap<usize, StrategyState>,
     pub up_steps_hit: HashMap<usize, usize>, // Ступени сетки UP (0..3)
     pub dn_steps_hit: HashMap<usize, usize>, // Ступени сетки DOWN (0..3)
-    pub buy_triggered: HashMap<usize, bool>, // Флаг срабатывания Dynamic BUY на окно
+    pub scalp_tranches: HashMap<(usize, String), usize>,
+    pub scalp_active_shares: HashMap<(usize, String), f64>,
+    pub scalp_active_cost: HashMap<(usize, String), f64>,
 }
 
 impl DynamicGridStrategy {
@@ -36,7 +50,9 @@ impl DynamicGridStrategy {
             states: HashMap::new(),
             up_steps_hit: HashMap::new(),
             dn_steps_hit: HashMap::new(),
-            buy_triggered: HashMap::new(),
+            scalp_tranches: HashMap::new(),
+            scalp_active_shares: HashMap::new(),
+            scalp_active_cost: HashMap::new(),
         }
     }
 }
@@ -202,28 +218,8 @@ fn spot_velocity(spot_signal: SpotSignalSnapshot) -> Option<f64> {
         .or(spot_signal.raw_velocity_usd_per_sec)
 }
 
-fn dynamic_buy_counter_velocity_limit(current_atr: f64) -> f64 {
-    (current_atr / 15.0).clamp(0.75, 6.0)
-}
-
 fn redeem_hold_counter_velocity_limit(current_atr: f64) -> f64 {
     (current_atr / 12.0).clamp(1.0, 8.0)
-}
-
-fn counter_velocity_blocks_side(
-    side_to_buy: &str,
-    spot_signal: SpotSignalSnapshot,
-    current_atr: f64,
-) -> bool {
-    let Some(velocity) = spot_velocity(spot_signal) else {
-        return false;
-    };
-    let limit = dynamic_buy_counter_velocity_limit(current_atr) * DYNAMIC_BUY_COUNTER_SOFT_FACTOR;
-    match side_to_buy {
-        "UP" => velocity < -limit,
-        "DOWN" => velocity > limit,
-        _ => false,
-    }
 }
 
 fn velocity_bias_for_side(
@@ -282,6 +278,182 @@ fn adjust_weak_exit_target(base: f64, velocity_bias: i8, time_pct: f64) -> f64 {
         _ => 0.0,
     };
     (base + adjustment).clamp(0.06, 0.70)
+}
+
+fn capital_protected_weak_exit_target(base: f64, time_pct: f64) -> f64 {
+    let cap = if time_pct < 30.0 {
+        0.42
+    } else if time_pct < 60.0 {
+        0.28
+    } else {
+        0.18
+    };
+    base.min(cap).clamp(0.06, 0.70)
+}
+
+fn terminal_floor(cash_returned: f64, up_shares: f64, down_shares: f64) -> f64 {
+    cash_returned + up_shares.min(down_shares)
+}
+
+fn max_paired_floor_sacrifice(spent: f64, cash_returned: f64) -> f64 {
+    if spent <= 0.0 {
+        return 0.0;
+    }
+    let recovered_ratio = cash_returned / spent;
+    let sacrifice_ratio = if recovered_ratio >= CAPITAL_PROTECTED_RATIO {
+        PAIRED_FLOOR_PROTECTED_MAX_SACRIFICE_RATIO
+    } else {
+        PAIRED_FLOOR_MAX_SACRIFICE_RATIO
+    };
+    spent * sacrifice_ratio
+}
+
+fn strong_grid_sell_amount(
+    initial_shares: f64,
+    current_shares: f64,
+    other_side_shares: f64,
+    step_idx: usize,
+    redeem_hold_active: bool,
+    bid: f64,
+    cash_returned: f64,
+    spent: f64,
+) -> f64 {
+    if current_shares <= 0.0 {
+        return 0.0;
+    }
+
+    if redeem_hold_active && step_idx >= 1 {
+        return (initial_shares * 0.20).min(current_shares);
+    }
+
+    match step_idx {
+        0 | 1 => (initial_shares * STRONG_GRID_STEP_SELL_FRACTION).min(current_shares),
+        _ if bid >= REDEEM_HOLD_RELEASE_BID => current_shares,
+        _ => {
+            let reserve = initial_shares * STRONG_GRID_RUNNER_FRACTION;
+            let proposed_sell = (current_shares - reserve).max(0.0);
+            if proposed_sell <= 0.0 {
+                return 0.0;
+            }
+
+            let surplus_sell = proposed_sell.min((current_shares - other_side_shares).max(0.0));
+            let paired_sell = proposed_sell - surplus_sell;
+            if paired_sell <= 0.0 || spent <= 0.0 {
+                return proposed_sell;
+            }
+
+            let floor_before = terminal_floor(cash_returned, current_shares, other_side_shares);
+            let current_after = (current_shares - proposed_sell).max(0.0);
+            let floor_after = terminal_floor(
+                cash_returned + proposed_sell * bid,
+                current_after,
+                other_side_shares,
+            );
+
+            if floor_after >= spent || floor_after >= floor_before {
+                proposed_sell
+            } else {
+                let max_floor_loss = max_paired_floor_sacrifice(spent, cash_returned);
+                let floor_loss_per_share = (1.0 - bid).max(0.01);
+                let paired_allowed_by_floor = (max_floor_loss / floor_loss_per_share).max(0.0);
+                (surplus_sell + paired_sell.min(paired_allowed_by_floor)).min(proposed_sell)
+            }
+        }
+    }
+}
+
+fn weak_exit_insurance_fraction(
+    dev_zone: DeviationZone,
+    time_pct: f64,
+    capital_protected: bool,
+) -> f64 {
+    if time_pct >= 90.0 || dev_zone == DeviationZone::Runaway {
+        return 0.0;
+    }
+
+    let zone_fraction = match dev_zone {
+        DeviationZone::Near => WEAK_EXIT_NEAR_INSURANCE_FRACTION,
+        DeviationZone::Moderate => WEAK_EXIT_MODERATE_INSURANCE_FRACTION,
+        DeviationZone::Far => WEAK_EXIT_FAR_INSURANCE_FRACTION,
+        DeviationZone::Unknown => WEAK_EXIT_MODERATE_INSURANCE_FRACTION,
+        DeviationZone::Runaway => 0.0,
+    };
+
+    let time_cap: f64 = if time_pct < 30.0 {
+        0.35
+    } else if time_pct < 60.0 {
+        0.30
+    } else if time_pct < 80.0 {
+        0.18
+    } else {
+        0.10
+    };
+
+    let protection_cap: f64 = if capital_protected { 0.18 } else { 0.35 };
+    zone_fraction
+        .min(time_cap)
+        .min(protection_cap)
+        .max(WEAK_EXIT_MIN_INSURANCE_FRACTION)
+}
+
+fn weak_exit_sell_plan(
+    initial_shares: f64,
+    current_shares: f64,
+    dev_zone: DeviationZone,
+    time_pct: f64,
+    capital_protected: bool,
+) -> (f64, f64, f64) {
+    if current_shares <= 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+
+    let reserve_fraction = weak_exit_insurance_fraction(dev_zone, time_pct, capital_protected);
+    let reserve_base = if initial_shares > 0.0 {
+        initial_shares
+    } else {
+        current_shares
+    };
+    let reserve_shares = (reserve_base * reserve_fraction).min(current_shares);
+    let sell_amount = (current_shares - reserve_shares).max(0.0);
+
+    (sell_amount, reserve_shares, reserve_fraction)
+}
+
+fn weak_scalp_ask_cap(current_atr: f64) -> f64 {
+    if current_atr >= ATR_EXTREME_MIN {
+        0.18
+    } else if current_atr >= ATR_HIGH_MIN {
+        0.20
+    } else if current_atr >= ATR_LOW_MAX {
+        0.22
+    } else {
+        0.12
+    }
+}
+
+fn weak_scalp_max_deviation_pct(current_atr: f64) -> f64 {
+    if current_atr >= ATR_EXTREME_MIN {
+        0.06
+    } else if current_atr >= ATR_HIGH_MIN {
+        0.08
+    } else if current_atr >= ATR_LOW_MAX {
+        0.06
+    } else {
+        0.025
+    }
+}
+
+fn weak_scalp_exit_target(avg_entry_price: f64, current_atr: f64) -> f64 {
+    let profit_step = if current_atr >= ATR_HIGH_MIN {
+        0.08
+    } else {
+        0.06
+    };
+    (avg_entry_price + profit_step).clamp(0.14, 0.42)
+}
+
+fn scalp_key(window_number: usize, side: &str) -> (usize, String) {
+    (window_number, side.to_string())
 }
 
 fn velocity_blocks_redeem_hold(
@@ -368,19 +540,55 @@ impl TradeStrategy for DynamicGridStrategy {
 
         let ask_spread = (up_ask - dn_ask).abs();
         let combined_ask = up_ask + dn_ask;
-        if ask_spread > ENTRY_MAX_ASK_SPREAD || combined_ask > regime.max_combined_ask {
+        let directional_entry = ask_spread > 0.04;
+        let max_combined_ask = if directional_entry {
+            regime
+                .max_combined_ask
+                .min(ENTRY_DIRECTIONAL_MAX_COMBINED_ASK)
+        } else {
+            regime.max_combined_ask
+        };
+        if ask_spread > ENTRY_MAX_ASK_SPREAD || combined_ask > max_combined_ask {
             return None;
         }
+        if directional_entry && current_btc_atr < 30.0 {
+            return None;
+        }
+
+        let directional_budget_multiplier = if !directional_entry {
+            1.0
+        } else if ask_spread >= 0.12 {
+            0.55
+        } else if ask_spread >= 0.08 {
+            0.70
+        } else {
+            0.85
+        };
+        let entry_budget_multiplier = regime.budget_multiplier * directional_budget_multiplier;
+        let entry_cheaper_side_ratio = if directional_entry {
+            0.50
+        } else {
+            regime.cheaper_side_ratio
+        };
 
         self.entered_windows.insert(window_number);
         Some(EntrySignal {
             up_ask,
             down_ask: dn_ask,
-            budget_multiplier: regime.budget_multiplier,
-            cheaper_side_ratio: regime.cheaper_side_ratio,
+            budget_multiplier: entry_budget_multiplier,
+            cheaper_side_ratio: entry_cheaper_side_ratio,
             reason: format!(
-                "{}_atr_{:.2}_combined_{:.2}_spread_{:.2}",
-                regime.reason, current_btc_atr, combined_ask, ask_spread
+                "{}{}_atr_{:.2}_combined_{:.2}_spread_{:.2}_budget_mult_{:.2}",
+                regime.reason,
+                if directional_entry {
+                    "_directional"
+                } else {
+                    ""
+                },
+                current_btc_atr,
+                combined_ask,
+                ask_spread,
+                entry_budget_multiplier
             ),
         })
     }
@@ -406,6 +614,8 @@ impl TradeStrategy for DynamicGridStrategy {
         let dn_bid = prices.down.bid;
         let up_ask = prices.up.ask;
         let dn_ask = prices.down.ask;
+        let mut projected_up_shares = win_state.up_shares;
+        let mut projected_down_shares = win_state.down_shares;
 
         // Рассчитываем временной фильтр в процентах (0.0% - 100.0%)
         let duration_ms = match (
@@ -438,6 +648,13 @@ impl TradeStrategy for DynamicGridStrategy {
             initial_dn > initial_up
         };
 
+        let recovered_ratio = if win_state.spent > 0.0 {
+            win_state.cash_returned / win_state.spent
+        } else {
+            0.0
+        };
+        let capital_protected = recovered_ratio >= CAPITAL_PROTECTED_RATIO;
+
         let strong_bid = if is_up_strong { up_bid } else { dn_bid };
         let redeem_hold_active = should_hold_winner_for_redeem(
             is_up_strong,
@@ -468,6 +685,11 @@ impl TradeStrategy for DynamicGridStrategy {
                 && !(redeem_hold_active && is_up_strong)
             {
                 state.up_sold = true;
+                self.scalp_active_shares
+                    .insert(scalp_key(window_number, "UP"), 0.0);
+                self.scalp_active_cost
+                    .insert(scalp_key(window_number, "UP"), 0.0);
+                projected_up_shares = 0.0;
                 signals.push(OrderSignal {
                     side: "UP".to_string(),
                     is_buy: false,
@@ -482,6 +704,11 @@ impl TradeStrategy for DynamicGridStrategy {
                 && !(redeem_hold_active && !is_up_strong)
             {
                 state.down_sold = true;
+                self.scalp_active_shares
+                    .insert(scalp_key(window_number, "DOWN"), 0.0);
+                self.scalp_active_cost
+                    .insert(scalp_key(window_number, "DOWN"), 0.0);
+                projected_down_shares = 0.0;
                 signals.push(OrderSignal {
                     side: "DOWN".to_string(),
                     is_buy: false,
@@ -552,46 +779,60 @@ impl TradeStrategy for DynamicGridStrategy {
                             && *current_step >= 1
                             && up_bid < REDEEM_HOLD_RELEASE_BID;
                         if !hold_blocks_mid_exit {
-                            let sell_amount = if redeem_hold_active && *current_step >= 1 {
-                                (win_state.initial_up_shares * 0.20).min(win_state.up_shares)
-                            } else {
-                                match *current_step {
-                                    0 => (win_state.initial_up_shares * 0.30)
-                                        .min(win_state.up_shares),
-                                    1 => (win_state.initial_up_shares * 0.30)
-                                        .min(win_state.up_shares),
-                                    _ => win_state.up_shares,
+                            let sell_amount = strong_grid_sell_amount(
+                                win_state.initial_up_shares,
+                                win_state.up_shares,
+                                win_state.down_shares,
+                                *current_step,
+                                redeem_hold_active,
+                                up_bid,
+                                win_state.cash_returned,
+                                win_state.spent,
+                            );
+
+                            if sell_amount > 0.0 {
+                                if redeem_hold_active && *current_step >= 1 {
+                                    *current_step = strong_grid.len();
+                                } else {
+                                    *current_step += 1;
                                 }
-                            };
+                                projected_up_shares = (projected_up_shares - sell_amount).max(0.0);
+                                if !redeem_hold_active && *current_step >= strong_grid.len() {
+                                    state.up_sold = true;
+                                }
+                                if state.first_sold_side.is_none() {
+                                    state.first_sold_side = Some("UP".to_string());
+                                }
 
-                            if redeem_hold_active && *current_step >= 1 {
-                                *current_step = strong_grid.len();
-                            } else {
-                                *current_step += 1;
+                                signals.push(OrderSignal {
+                                    side: "UP".to_string(),
+                                    is_buy: false,
+                                    amount: sell_amount,
+                                    price: up_bid,
+                                    reason: format!(
+                                        "tvds_strong_grid_exit_step_{}_{:.2}_zone_{}_usd_{:.2}_pct_{:.4}{}{}_vel_{}",
+                                        *current_step,
+                                        target,
+                                        dev.zone.as_str(),
+                                        dev.abs_usd,
+                                        dev.pct_abs,
+                                        if redeem_hold_active { "_redeem_hold_runner" } else { "" },
+                                        if *current_step >= strong_grid.len()
+                                            && up_bid < REDEEM_HOLD_RELEASE_BID
+                                            && sell_amount
+                                                < (win_state.up_shares
+                                                    - win_state.initial_up_shares
+                                                        * STRONG_GRID_RUNNER_FRACTION)
+                                                    .max(0.0)
+                                        {
+                                            "_paired_floor_protected"
+                                        } else {
+                                            ""
+                                        },
+                                        strong_velocity_label
+                                    ),
+                                });
                             }
-                            if !redeem_hold_active && *current_step >= strong_grid.len() {
-                                state.up_sold = true;
-                            }
-                            if state.first_sold_side.is_none() {
-                                state.first_sold_side = Some("UP".to_string());
-                            }
-
-                            signals.push(OrderSignal {
-                                side: "UP".to_string(),
-                                is_buy: false,
-                                amount: sell_amount,
-                                price: up_bid,
-                                reason: format!(
-                                    "tvds_strong_grid_exit_step_{}_{:.2}_zone_{}_usd_{:.2}_pct_{:.4}{}_vel_{}",
-                                    *current_step,
-                                    target,
-                                    dev.zone.as_str(),
-                                    dev.abs_usd,
-                                    dev.pct_abs,
-                                    if redeem_hold_active { "_redeem_hold_runner" } else { "" },
-                                    strong_velocity_label
-                                ),
-                            });
                         }
                     }
                 }
@@ -607,129 +848,151 @@ impl TradeStrategy for DynamicGridStrategy {
                             && *current_step >= 1
                             && dn_bid < REDEEM_HOLD_RELEASE_BID;
                         if !hold_blocks_mid_exit {
-                            let sell_amount = if redeem_hold_active && *current_step >= 1 {
-                                (win_state.initial_down_shares * 0.20).min(win_state.down_shares)
-                            } else {
-                                match *current_step {
-                                    0 => (win_state.initial_down_shares * 0.30)
-                                        .min(win_state.down_shares),
-                                    1 => (win_state.initial_down_shares * 0.30)
-                                        .min(win_state.down_shares),
-                                    _ => win_state.down_shares,
+                            let sell_amount = strong_grid_sell_amount(
+                                win_state.initial_down_shares,
+                                win_state.down_shares,
+                                win_state.up_shares,
+                                *current_step,
+                                redeem_hold_active,
+                                dn_bid,
+                                win_state.cash_returned,
+                                win_state.spent,
+                            );
+
+                            if sell_amount > 0.0 {
+                                if redeem_hold_active && *current_step >= 1 {
+                                    *current_step = strong_grid.len();
+                                } else {
+                                    *current_step += 1;
                                 }
-                            };
+                                projected_down_shares =
+                                    (projected_down_shares - sell_amount).max(0.0);
+                                if !redeem_hold_active && *current_step >= strong_grid.len() {
+                                    state.down_sold = true;
+                                }
+                                if state.first_sold_side.is_none() {
+                                    state.first_sold_side = Some("DOWN".to_string());
+                                }
 
-                            if redeem_hold_active && *current_step >= 1 {
-                                *current_step = strong_grid.len();
-                            } else {
-                                *current_step += 1;
+                                signals.push(OrderSignal {
+                                    side: "DOWN".to_string(),
+                                    is_buy: false,
+                                    amount: sell_amount,
+                                    price: dn_bid,
+                                    reason: format!(
+                                        "tvds_strong_grid_exit_step_{}_{:.2}_zone_{}_usd_{:.2}_pct_{:.4}{}{}_vel_{}",
+                                        *current_step,
+                                        target,
+                                        dev.zone.as_str(),
+                                        dev.abs_usd,
+                                        dev.pct_abs,
+                                        if redeem_hold_active { "_redeem_hold_runner" } else { "" },
+                                        if *current_step >= strong_grid.len()
+                                            && dn_bid < REDEEM_HOLD_RELEASE_BID
+                                            && sell_amount
+                                                < (win_state.down_shares
+                                                    - win_state.initial_down_shares
+                                                        * STRONG_GRID_RUNNER_FRACTION)
+                                                    .max(0.0)
+                                        {
+                                            "_paired_floor_protected"
+                                        } else {
+                                            ""
+                                        },
+                                        strong_velocity_label
+                                    ),
+                                });
                             }
-                            if !redeem_hold_active && *current_step >= strong_grid.len() {
-                                state.down_sold = true;
-                            }
-                            if state.first_sold_side.is_none() {
-                                state.first_sold_side = Some("DOWN".to_string());
-                            }
-
-                            signals.push(OrderSignal {
-                                side: "DOWN".to_string(),
-                                is_buy: false,
-                                amount: sell_amount,
-                                price: dn_bid,
-                                reason: format!(
-                                    "tvds_strong_grid_exit_step_{}_{:.2}_zone_{}_usd_{:.2}_pct_{:.4}{}_vel_{}",
-                                    *current_step,
-                                    target,
-                                    dev.zone.as_str(),
-                                    dev.abs_usd,
-                                    dev.pct_abs,
-                                    if redeem_hold_active { "_redeem_hold_runner" } else { "" },
-                                    strong_velocity_label
-                                ),
-                            });
                         }
                     }
                 }
             }
         }
 
-        // ─── 2. МОДУЛЬ DYNAMIC BUY (ДОКУПКА ПРИ СИЛЬНОМ ТРЕНДЕ) ───
-        let buy_flag = self.buy_triggered.entry(window_number).or_insert(false);
-        if time_pct <= 60.0 && !*buy_flag {
-            // Определяем порог допустимого отклонения спота от страйка на основе волатильности (ATR)
-            let max_allowed_deviation = if current_atr >= 30.0 {
-                0.12 // Высокая волатильность: разрешаем докупку при отклонении до 0.12%
-            } else if current_atr < 15.0 {
-                0.03 // Тухляк: только до 0.03% (почти на страйке)
-            } else {
-                0.08 // Нормальный рынок: до 0.08% отклонения
-            };
+        // ─── 2. WEAKSCALP: микро-докупка слабой стороны только на реальном отскоке ───
+        let weak_side = if is_up_strong { "DOWN" } else { "UP" };
+        let weak_is_up = weak_side == "UP";
+        let weak_bid = if weak_is_up { up_bid } else { dn_bid };
+        let weak_ask = if weak_is_up { up_ask } else { dn_ask };
+        let strong_remaining = if is_up_strong {
+            projected_up_shares
+        } else {
+            projected_down_shares
+        };
+        let strong_initial = if is_up_strong {
+            win_state.initial_up_shares
+        } else {
+            win_state.initial_down_shares
+        };
+        let weak_velocity_bias = velocity_bias_for_side(weak_is_up, spot_signal, current_atr);
+        let weak_velocity_label = velocity_bias_label(weak_velocity_bias);
+        let weak_key = scalp_key(window_number, weak_side);
+        let active_scalp_shares = *self.scalp_active_shares.get(&weak_key).unwrap_or(&0.0);
+        let active_scalp_cost = *self.scalp_active_cost.get(&weak_key).unwrap_or(&0.0);
+        let mut scalp_exit_side: Option<String> = None;
 
-            // Допускаем закуп только если спот находится в пределах досягаемости для потенциального разворота
-            let is_spot_within_reach = dev.known && dev.pct_abs <= max_allowed_deviation;
-
-            if is_spot_within_reach {
-                // ─── ПОЛНОСТЬЮ АВТОНОМНЫЙ ДИНАМИЧЕСКИЙ ПОРОГ ПО ATR ───
-                let dynamic_max_ask = if current_atr >= 30.0 {
-                    0.24 // При высокой волатильности готовы брать слабую ногу до 24 центов
-                } else if current_atr < 15.0 {
-                    0.10 // В боковике/тухляке берем только по ультра-скидке до 10 центов
-                } else {
-                    // Плавная математическая интерполяция между 0.10$ и 0.24$ под живой ATR!
-                    let range = 30.0 - 15.0;
-                    let factor = (current_atr - 15.0) / range;
-                    0.10 + factor * 0.14
-                };
-                let spot_velocity_for_reason = spot_velocity(spot_signal)
-                    .map(|v| format!("{:+.2}", v))
-                    .unwrap_or_else(|| "na".to_string());
-
-                if is_up_strong
-                    && up_bid >= 0.75
-                    && dn_ask <= dynamic_max_ask
-                    && dn_ask > 0.0
-                    && !counter_velocity_blocks_side("DOWN", spot_signal, current_atr)
-                {
-                    let target_shares =
-                        win_state.initial_down_shares * DYNAMIC_BUY_WEAK_SHARE_FRACTION;
-                    let max_usd = win_state.spent * DYNAMIC_BUY_MAX_USD_FRACTION_OF_SPENT;
-                    let buy_usd = (target_shares * dn_ask).min(max_usd);
-                    if buy_usd > 0.0 {
-                        *buy_flag = true;
-                        signals.push(OrderSignal {
-                            side: "DOWN".to_string(),
-                            is_buy: true,
-                            amount: buy_usd,
-                            price: dn_ask,
-                            reason: format!(
-                                "dynamic_buy_weak_down_deviation_ok_atr_limit_{:.2}_vel_{}",
-                                dynamic_max_ask, spot_velocity_for_reason
-                            ),
-                        });
-                    }
-                } else if !is_up_strong
-                    && dn_bid >= 0.75
-                    && up_ask <= dynamic_max_ask
-                    && up_ask > 0.0
-                    && !counter_velocity_blocks_side("UP", spot_signal, current_atr)
-                {
-                    let target_shares =
-                        win_state.initial_up_shares * DYNAMIC_BUY_WEAK_SHARE_FRACTION;
-                    let max_usd = win_state.spent * DYNAMIC_BUY_MAX_USD_FRACTION_OF_SPENT;
-                    let buy_usd = (target_shares * up_ask).min(max_usd);
-                    if buy_usd > 0.0 {
-                        *buy_flag = true;
-                        signals.push(OrderSignal {
-                            side: "UP".to_string(),
-                            is_buy: true,
-                            amount: buy_usd,
-                            price: up_ask,
-                            reason: format!(
-                                "dynamic_buy_weak_up_deviation_ok_atr_limit_{:.2}_vel_{}",
-                                dynamic_max_ask, spot_velocity_for_reason
-                            ),
-                        });
-                    }
+        if active_scalp_shares > 0.0 && active_scalp_cost > 0.0 {
+            let avg_entry_price = active_scalp_cost / active_scalp_shares;
+            let scalp_target = weak_scalp_exit_target(avg_entry_price, current_atr);
+            if weak_bid >= scalp_target {
+                self.scalp_active_shares.insert(weak_key.clone(), 0.0);
+                self.scalp_active_cost.insert(weak_key.clone(), 0.0);
+                scalp_exit_side = Some(weak_side.to_string());
+                signals.push(OrderSignal {
+                    side: weak_side.to_string(),
+                    is_buy: false,
+                    amount: active_scalp_shares.min(if weak_is_up {
+                        win_state.up_shares
+                    } else {
+                        win_state.down_shares
+                    }),
+                    price: weak_bid,
+                    reason: format!(
+                        "weak_scalp_exit_{}_target_{:.2}_avg_{:.2}_vel_{}",
+                        weak_side.to_lowercase(),
+                        scalp_target,
+                        avg_entry_price,
+                        weak_velocity_label
+                    ),
+                });
+            }
+        } else if time_pct <= 55.0
+            && !capital_protected
+            && recovered_ratio >= WEAK_SCALP_MIN_RECOVERED_RATIO
+            && dev.known
+            && matches!(dev.zone, DeviationZone::Near | DeviationZone::Moderate)
+            && dev.pct_abs <= weak_scalp_max_deviation_pct(current_atr)
+            && weak_ask > 0.0
+            && weak_ask <= weak_scalp_ask_cap(current_atr)
+            && strong_initial > 0.0
+            && strong_remaining / strong_initial >= WEAK_SCALP_MIN_STRONG_REMAINING_FRACTION
+            && weak_velocity_bias == 1
+        {
+            let tranche_count = *self.scalp_tranches.get(&weak_key).unwrap_or(&0);
+            if tranche_count < WEAK_SCALP_MAX_TRANCHES_PER_SIDE {
+                let buy_usd = win_state.spent * WEAK_SCALP_USD_FRACTION_OF_SPENT;
+                if buy_usd >= WEAK_SCALP_MIN_USD {
+                    let buy_shares = buy_usd / weak_ask;
+                    self.scalp_tranches
+                        .insert(weak_key.clone(), tranche_count + 1);
+                    self.scalp_active_shares
+                        .insert(weak_key.clone(), buy_shares);
+                    self.scalp_active_cost.insert(weak_key.clone(), buy_usd);
+                    signals.push(OrderSignal {
+                        side: weak_side.to_string(),
+                        is_buy: true,
+                        amount: buy_usd,
+                        price: weak_ask,
+                        reason: format!(
+                            "weak_scalp_buy_{}_tranche_{}_askcap_{:.2}_devpct_{:.4}_recovered_{:.2}_vel_{}",
+                            weak_side.to_lowercase(),
+                            tranche_count + 1,
+                            weak_scalp_ask_cap(current_atr),
+                            dev.pct_abs,
+                            recovered_ratio,
+                            weak_velocity_label
+                        ),
+                    });
                 }
             }
         }
@@ -737,19 +1000,32 @@ impl TradeStrategy for DynamicGridStrategy {
         // ─── 3. ТРИГГЕР ПЕРЕСЕЧЕНИЯ ЛИНИИ СТАРТА (CROSSOVER БЛОК) ───
         if let Some(ref first_sold) = state.first_sold_side {
             let second_side = if first_sold == "UP" { "DOWN" } else { "UP" };
+            let second_is_up = second_side == "UP";
             let second_bid = if second_side == "UP" { up_bid } else { dn_bid };
-            let second_shares = if second_side == "UP" {
-                win_state.up_shares
+            let second_shares = if second_is_up {
+                projected_up_shares
             } else {
-                win_state.down_shares
+                projected_down_shares
             };
-            let second_sold = if second_side == "UP" {
+            let second_initial_shares = if second_is_up {
+                win_state.initial_up_shares
+            } else {
+                win_state.initial_down_shares
+            };
+            let second_sold = if second_is_up {
                 state.up_sold
             } else {
                 state.down_sold
             };
+            let second_is_current_strong = second_is_up == is_up_strong;
+            let second_is_itm = strong_side_is_itm(second_is_up, dev);
 
-            if second_shares > 0.0 && !second_sold {
+            if second_shares > 0.0
+                && !second_sold
+                && !second_is_current_strong
+                && !second_is_itm
+                && scalp_exit_side.as_deref() != Some(second_side)
+            {
                 // Инициализируем бейслайн спота к страйку при первой продаже
                 if state.ptb_baseline.is_none() {
                     if let (Some(spot), Some(ptb)) = (spot_price, market.price_to_beat) {
@@ -839,19 +1115,27 @@ impl TradeStrategy for DynamicGridStrategy {
                 let weak_velocity_bias =
                     velocity_bias_for_side(second_side == "UP", spot_signal, current_atr);
                 let weak_velocity_label = velocity_bias_label(weak_velocity_bias);
-                let weak_target =
+                let mut weak_target =
                     adjust_weak_exit_target(weak_target, weak_velocity_bias, time_pct);
+                if capital_protected {
+                    weak_target = capital_protected_weak_exit_target(weak_target, time_pct);
+                }
 
                 if second_bid >= weak_target {
                     should_sell = true;
                     reason_str = format!(
-                        "tvds_weak_exit_{}_bid_ge_{:.2}_zone_{}_usd_{:.2}_pct_{:.4}_vel_{}",
+                        "tvds_weak_exit_{}_bid_ge_{:.2}_zone_{}_usd_{:.2}_pct_{:.4}_vel_{}{}",
                         zone_desc,
                         weak_target,
                         dev.zone.as_str(),
                         dev.abs_usd,
                         dev.pct_abs,
-                        weak_velocity_label
+                        weak_velocity_label,
+                        if capital_protected {
+                            format!("_capital_protected_{:.2}", recovered_ratio)
+                        } else {
+                            String::new()
+                        }
                     );
                 }
 
@@ -868,17 +1152,53 @@ impl TradeStrategy for DynamicGridStrategy {
                 }
 
                 if should_sell {
-                    if second_side == "UP" {
-                        state.up_sold = true;
-                    } else {
-                        state.down_sold = true;
+                    let (sell_amount, reserve_shares, reserve_fraction) = weak_exit_sell_plan(
+                        second_initial_shares,
+                        second_shares,
+                        dev.zone,
+                        time_pct,
+                        capital_protected,
+                    );
+
+                    if sell_amount <= 0.000001 {
+                        return signals;
                     }
+
+                    let sold_all_second = sell_amount >= second_shares - 0.000001;
+                    if sold_all_second {
+                        if second_side == "UP" {
+                            state.up_sold = true;
+                        } else {
+                            state.down_sold = true;
+                        }
+                    }
+
+                    let second_key = scalp_key(window_number, second_side);
+                    let active_shares = *self.scalp_active_shares.get(&second_key).unwrap_or(&0.0);
+                    let active_cost = *self.scalp_active_cost.get(&second_key).unwrap_or(&0.0);
+                    if active_shares > 0.0 {
+                        let new_active_shares = (active_shares - sell_amount)
+                            .max(0.0)
+                            .min((second_shares - sell_amount).max(0.0));
+                        let new_active_cost = if new_active_shares > 0.0 {
+                            active_cost * (new_active_shares / active_shares)
+                        } else {
+                            0.0
+                        };
+                        self.scalp_active_shares
+                            .insert(second_key.clone(), new_active_shares);
+                        self.scalp_active_cost.insert(second_key, new_active_cost);
+                    }
+
                     signals.push(OrderSignal {
                         side: second_side.to_string(),
                         is_buy: false,
-                        amount: second_shares,
+                        amount: sell_amount,
                         price: second_bid,
-                        reason: reason_str,
+                        reason: format!(
+                            "{}_sell_{:.4}_reserve_{:.4}_insurance_{:.2}",
+                            reason_str, sell_amount, reserve_shares, reserve_fraction
+                        ),
                     });
                 }
             }

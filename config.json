@@ -11,8 +11,8 @@
     "enabled": true,
     "minSecondsBeforeStart": 5,
     "maxSecondsBeforeStart": 120,
-    "minSideAsk": 0.48,
-    "maxSideAsk": 0.52
+    "minSideAsk": 0.42,
+    "maxSideAsk": 0.58
   },
   "sellStrategy": {
     "exitBid": 0.65

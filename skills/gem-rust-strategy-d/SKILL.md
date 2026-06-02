@@ -1,6 +1,6 @@
 ---
 name: gem-rust-strategy-d
-description: Work on the GEM_RUST Dynamic Grid Strategy D sub-project. Use when Codex is asked to analyze, tune, redesign, debug, or implement ATR-aware pre-start entry, UP/DOWN capital split, strong-side sell ladders, weak-side exits, Dynamic BUY, per-run logging, or 5m/15m behavior inside /Users/boriskaborisenko/Desktop/poly/GEM_RUST.
+description: Work on the GEM_RUST Dynamic Grid Strategy D sub-project. Use when Codex is asked to analyze, tune, redesign, debug, or implement ATR-aware pre-start entry, UP/DOWN capital split, strong-side sell ladders, weak-side exits, WeakScalp, per-run logging, or 5m/15m behavior inside /Users/boriskaborisenko/Desktop/poly/GEM_RUST.
 ---
 
 # GEM_RUST Strategy D
@@ -27,14 +27,14 @@ For current Strategy D v3 invariants, read `references/strategy-d-v3.md`.
 
 - Pre-start buy must happen only before the window starts, with both asks near parity.
 - Buy signal `amount` means USD. Sell signal `amount` means shares. Do not send shares as buy amount.
-- Treat Strategy D as a coupled control system. ATR, time decay, PTB deviation, bid/ask spread, entry sizing, strong-side grid, weak-side exit, Dynamic BUY, emergency stop, and redeem-hold all affect each other.
+- Treat Strategy D as a coupled control system. ATR, time decay, PTB deviation, bid/ask spread, entry sizing, strong-side grid, weak-side exit, WeakScalp, emergency stop, and redeem-hold all affect each other.
 - Do not add a local rule that fixes one symptom without checking its second-order effects on the full window lifecycle.
 - ATR should tune aggression, not hard-cut entries by itself. Low ATR should micro/scout small; normal ATR may use full size; high ATR should avoid directional over-concentration.
-- Spot velocity is a guardrail, not a standalone signal. Use it to avoid Dynamic BUY against a hard impulse, release/avoid redeem-hold when the winner starts reversing sharply, and softly adjust SELL-grid targets.
+- Spot velocity is a guardrail, not a standalone signal. Use it to allow WeakScalp only on a real weak-side reversal, release/avoid redeem-hold when the winner starts reversing sharply, and softly adjust SELL-grid targets.
 - PTB deviation must use both absolute USD distance and percentage distance.
 - Clear ITM winners can be held as runners for close-window redeem instead of being dumped too early.
 - Strong side should be based on live bid leadership when possible, not only initial shares.
-- Dynamic BUY is optional insurance, not revenge sizing. It must require known PTB deviation, a tight deviation cap, an ask cap, and a small USD cap.
+- WeakScalp is experimental micro-scalping, not revenge sizing or averaging down. It must require known PTB deviation, a tight deviation cap, an ask cap, favorable velocity, live strong-side inventory, and a small USD cap.
 - 15m is the priority timeframe, but 5m must still compile and run with the same code path.
 - Keep per-run logs separated under `logs/runs/<run_id>_<asset>_<interval>_<strategy>/`.
 
@@ -50,7 +50,7 @@ For current Strategy D v3 invariants, read `references/strategy-d-v3.md`.
 
 ## Current Handoff
 
-The current Strategy D contour is ready for the first paper test. Before proposing more math, inspect fresh logs unless the user reports a concrete bug.
+The current Strategy D contour is ready for a WeakScalp paper test. Before proposing more math, inspect fresh logs unless the user reports a concrete bug.
 
 Use two terminal runs:
 
@@ -68,7 +68,7 @@ Target sample:
 First review should focus on expectancy, not winrate:
 
 - entry frequency and skipped-window reasons,
-- Dynamic BUY rarity/usefulness and loss-size impact,
+- WeakScalp rarity/usefulness and loss-size impact compared with the old `dynamic_buy_*` logs,
 - whether velocity-aware SELL-grid changes improved exits,
 - whether weak exits preserve cash,
 - whether redeem-hold captures real 1.00 redeems without ignoring reversals.
@@ -81,8 +81,8 @@ Before accepting a strategy change, answer:
 - Does it increase average loss size when wrong?
 - Does it accidentally sell an ITM winner that should be held for redeem?
 - Does it block weak-side exits that are needed to preserve cash?
-- Does it allow Dynamic BUY during a far/runaway PTB move?
-- Does it allow Dynamic BUY against even a moderate current spot impulse?
+- Does it allow WeakScalp during a far/runaway PTB move?
+- Does it allow WeakScalp without favorable current spot impulse?
 - Does it keep redeem-hold active while spot velocity is sharply reversing?
 - Does the SELL-grid adjust only softly, without overriding ATR/PTB/time decay?
 - Does it make 5m behavior pathological even though 15m is priority?

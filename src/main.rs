@@ -142,6 +142,37 @@ fn normalize_event_timestamp_ms(timestamp: i64) -> i64 {
     }
 }
 
+fn allocate_entry_usd(
+    budget: f64,
+    up_ask: f64,
+    down_ask: f64,
+    cheaper_side_ratio: f64,
+) -> (f64, f64) {
+    if budget <= 0.0 || up_ask <= 0.0 || down_ask <= 0.0 {
+        return (0.0, 0.0);
+    }
+
+    if (up_ask - down_ask).abs() < 0.0001 {
+        return (budget / 2.0, budget / 2.0);
+    }
+
+    let surplus_fraction = ((cheaper_side_ratio.clamp(0.50, 0.70) - 0.50) * 2.0).clamp(0.0, 0.20);
+    let core_budget = budget * (1.0 - surplus_fraction);
+    let core_shares = core_budget / (up_ask + down_ask);
+
+    let mut buy_up_usd = core_shares * up_ask;
+    let mut buy_down_usd = core_shares * down_ask;
+    let surplus_usd = budget - buy_up_usd - buy_down_usd;
+
+    if up_ask < down_ask {
+        buy_up_usd += surplus_usd;
+    } else {
+        buy_down_usd += surplus_usd;
+    }
+
+    (buy_up_usd, buy_down_usd)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // ─── 1. CLI Arguments & Config ─────────────────────────────────────────
@@ -482,7 +513,6 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
                 let min_b = app.config.session.min_window_budget;
                 let max_b = app.config.session.max_window_budget;
                 let pct_b = app.config.session.window_budget_pct;
-                let ratio = entry_signal.cheaper_side_ratio.clamp(0.50, 0.70);
 
                 // Бюджет на базе % от Equity
                 let mut budget = port.equity * (pct_b / 100.0);
@@ -504,17 +534,12 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
                 }
 
                 if budget > 0.0 {
-                    // Распределяем сплит: на большую часть (ratio) покупаем более дешевую сторону
-                    if up_ask_val < dn_ask_val {
-                        // UP дешевле
-                        (budget * ratio, budget * (1.0 - ratio))
-                    } else if dn_ask_val < up_ask_val {
-                        // DOWN дешевле
-                        (budget * (1.0 - ratio), budget * ratio)
-                    } else {
-                        // Равны
-                        (budget / 2.0, budget / 2.0)
-                    }
+                    allocate_entry_usd(
+                        budget,
+                        up_ask_val,
+                        dn_ask_val,
+                        entry_signal.cheaper_side_ratio,
+                    )
                 } else {
                     (0.0, 0.0)
                 }
@@ -522,9 +547,26 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
 
             let total_cost = buy_up_usd + buy_down_usd;
             if total_cost > 0.0 && port.available_cash >= total_cost {
+                let buy_up_shares = if up_ask_val > 0.0 {
+                    buy_up_usd / up_ask_val
+                } else {
+                    0.0
+                };
+                let buy_down_shares = if dn_ask_val > 0.0 {
+                    buy_down_usd / dn_ask_val
+                } else {
+                    0.0
+                };
                 app.system_logs.push(format!(
-                    "[STRATEGY] Pre-start entry triggered for Window #{}. Budget: ${:.2} (UP: ${:.2}, DOWN: ${:.2}). UP Ask: ${:.2} | DOWN Ask: ${:.2}",
-                    window_num, total_cost, buy_up_usd, buy_down_usd, up_ask_val, dn_ask_val
+                    "[STRATEGY] Pre-start entry Window #{}: total ${:.2} | UP ${:.2} -> {:.4} sh @ ${:.2} | DOWN ${:.2} -> {:.4} sh @ ${:.2}",
+                    window_num,
+                    total_cost,
+                    buy_up_usd,
+                    buy_up_shares,
+                    up_ask_val,
+                    buy_down_usd,
+                    buy_down_shares,
+                    dn_ask_val
                 ));
                 append_entry_event(
                     &app.run_log_dir,
@@ -805,7 +847,7 @@ async fn process_event(
                             executed,
                             current_atr,
                             app.spot_price,
-                            &market,
+                            &win_state.market,
                             &prices,
                             &win_state,
                             secs_to_end,
@@ -871,13 +913,15 @@ fn render_dashboard(app: &AppState) {
     );
 
     let runtime = format_runtime(get_now_ms() - app.started_at);
-    let win_pct = if p.entered_windows > 0 {
-        (p.wins as f64 / p.entered_windows as f64) * 100.0
+    let settled_windows = p.wins + p.losses;
+    let open_windows = p.entered_windows.saturating_sub(p.closed_windows);
+    let win_pct = if settled_windows > 0 {
+        (p.wins as f64 / settled_windows as f64) * 100.0
     } else {
         0.0
     };
-    let loss_pct = if p.entered_windows > 0 {
-        (p.losses as f64 / p.entered_windows as f64) * 100.0
+    let loss_pct = if settled_windows > 0 {
+        (p.losses as f64 / settled_windows as f64) * 100.0
     } else {
         0.0
     };
@@ -898,13 +942,15 @@ fn render_dashboard(app: &AppState) {
 
     let total_windows = p.entered_windows + p.skipped_windows;
     println!(
-        "  Total Windows: {} | Entered: {} | Skipped: {}",
+        "  Windows: Total {} | Entered {} | Closed {} | Open {} | Skipped {}",
         paint(&total_windows.to_string(), "bold"),
         paint(&p.entered_windows.to_string(), "cyan"),
+        paint(&p.closed_windows.to_string(), "green"),
+        paint(&open_windows.to_string(), "yellow"),
         paint(&p.skipped_windows.to_string(), "yellow")
     );
     println!(
-        "  Wins: {} ({:.1}%) | Losses: {} ({:.1}%)",
+        "  Results (closed only): Wins {} ({:.1}%) | Losses {} ({:.1}%)",
         paint(&p.wins.to_string(), "green"),
         win_pct,
         paint(&p.losses.to_string(), "red"),
@@ -1142,6 +1188,17 @@ fn render_window_block(
         paint(&format!("{:.4}", win.up_shares), "green"),
         paint(&format!("{:.4}", win.down_shares), "red")
     ));
+    let paired_shares = win.up_shares.min(win.down_shares);
+    let terminal_floor = returned + paired_shares;
+    let floor_gap = terminal_floor - spent;
+    let floor_tone = if floor_gap >= 0.0 { "green" } else { "yellow" };
+    lines.push(format!(
+        "Paired floor: ${:.2} = returned ${:.2} + paired {:.4} sh | BE gap: {}",
+        terminal_floor,
+        returned,
+        paired_shares,
+        paint(&format!("{:+.2}", floor_gap), floor_tone)
+    ));
     lines.push(paint("--------------------------------------", "dim"));
 
     // Strategy status
@@ -1158,6 +1215,25 @@ fn render_window_block(
             } else {
                 "UP"
             };
+            let live_leader = if UP.bid >= DN.bid + 0.02 {
+                "UP"
+            } else if DN.bid >= UP.bid + 0.02 {
+                "DOWN"
+            } else {
+                "TIE"
+            };
+            let itm_side = match (spot_price, m.price_to_beat) {
+                (Some(spot), Some(ptb)) if ptb > 0.0 && spot > ptb => Some("UP"),
+                (Some(_), Some(ptb)) if ptb > 0.0 => Some("DOWN"),
+                _ => None,
+            };
+            let weak_exit_blocked =
+                live_leader == second || itm_side.map(|side| side == second).unwrap_or(false);
+            let weak_exit_status = if weak_exit_blocked {
+                paint("blocked: second is live-strong/ITM", "green")
+            } else {
+                paint("armed: partial sell, insurance tail kept", "yellow")
+            };
             let crossed = if strat.ptb_crossed {
                 paint("PTB Crossed! Active!", "green")
             } else {
@@ -1168,9 +1244,28 @@ fn render_window_block(
                 paint(strat.first_sold_side.as_ref().unwrap(), "green")
             ));
             lines.push(format!(
-                "Second Target ({}): {}",
+                "Live Leader: {} | ITM: {}",
+                paint(
+                    live_leader,
+                    match live_leader {
+                        "UP" => "green",
+                        "DOWN" => "red",
+                        _ => "yellow",
+                    }
+                ),
+                paint(
+                    itm_side.unwrap_or("N/A"),
+                    match itm_side.unwrap_or("N/A") {
+                        "UP" => "green",
+                        "DOWN" => "red",
+                        _ => "dim",
+                    }
+                ),
+            ));
+            lines.push(format!(
+                "Crossover Weak Exit ({}): {}",
                 paint(second, "yellow"),
-                paint("0.65", "bold")
+                weak_exit_status
             ));
             lines.push(format!("Cross Status: {}", crossed));
         }
@@ -1185,19 +1280,25 @@ fn render_window_block(
     let start_tr_idx = trades.len().saturating_sub(max_trades_vis);
     for t in &trades[start_tr_idx..] {
         let ts_str = format_timestamp(t.timestamp);
-        let trade_tone = if t.trade_type == "BUY" {
-            "green"
-        } else {
-            "yellow"
+        let trade_tone = match t.trade_type.as_str() {
+            "BUY" => "green",
+            "SELL" => "yellow",
+            "REDEEM" => "green",
+            "EXPIRED" => "red",
+            _ => "dim",
         };
         let side_tone = if t.side == "UP" { "green" } else { "red" };
         lines.push(format!(
-            "[{}] {} {} @${:.2}",
+            "[{}] {} {} {:.4} sh @ ${:.2} = ${:.2} | cash ${:.2}",
             paint(&ts_str, "dim"),
             paint(&t.trade_type, trade_tone),
             paint(&t.side, side_tone),
-            t.price
+            t.shares,
+            t.price,
+            t.usd_value,
+            t.available_cash_after
         ));
+        lines.push(format!("      {}", paint(&t.reason, "dim")));
     }
 
     lines
@@ -1240,9 +1341,9 @@ fn append_entry_event(
     append_csv_row(
         log_dir,
         "entry_events.csv",
-        "timestamp,window_id,slug,reason,current_atr,up_ask,down_ask,budget_multiplier,cheaper_side_ratio,total_budget,buy_up_usd,buy_down_usd",
+        "timestamp,window_id,slug,reason,current_atr,up_ask,down_ask,budget_multiplier,cheaper_side_ratio,total_budget,buy_up_usd,buy_up_shares,buy_down_usd,buy_down_shares",
         &format!(
-            "{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
+            "{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.8},{:.4},{:.8}",
             get_now_ms(),
             window_number,
             slug,
@@ -1254,7 +1355,17 @@ fn append_entry_event(
             entry.cheaper_side_ratio,
             total_budget,
             buy_up_usd,
-            buy_down_usd
+            if entry.up_ask > 0.0 {
+                buy_up_usd / entry.up_ask
+            } else {
+                0.0
+            },
+            buy_down_usd,
+            if entry.down_ask > 0.0 {
+                buy_down_usd / entry.down_ask
+            } else {
+                0.0
+            }
         ),
     );
 }
@@ -1292,6 +1403,19 @@ fn append_signal_event(
     };
     let mtm = win_state.up_shares * prices.up.bid + win_state.down_shares * prices.down.bid;
     let unrealized_pnl = win_state.cash_returned + mtm - win_state.spent;
+    let paired_shares = win_state.up_shares.min(win_state.down_shares);
+    let terminal_floor = win_state.cash_returned + paired_shares;
+    let terminal_floor_gap = terminal_floor - win_state.spent;
+    let (signal_amount_kind, signal_shares, signal_usd_value) = if sig.is_buy {
+        let shares = if sig.price > 0.0 {
+            sig.amount / sig.price
+        } else {
+            0.0
+        };
+        ("usd", shares, sig.amount)
+    } else {
+        ("shares", sig.amount, sig.amount * sig.price)
+    };
     let spot_velocity = spot_signal
         .raw_velocity_usd_per_sec
         .map(|v| format!("{:.6}", v))
@@ -1308,15 +1432,18 @@ fn append_signal_event(
     append_csv_row(
         log_dir,
         "strategy_signals.csv",
-        "timestamp,window_id,slug,action,side,amount,price,reason,executed,current_atr,secs_to_end,time_pct,spot_price,spot_velocity_usd_per_sec,spot_smoothed_velocity_usd_per_sec,spot_acceleration_usd_per_sec2,ptb,ptb_delta_usd,ptb_delta_pct,up_bid,up_ask,down_bid,down_ask,up_shares,down_shares,spent,returned,mtm,unrealized_pnl",
+        "timestamp,window_id,slug,action,side,amount,amount_kind,signal_shares,signal_usd_value,price,reason,executed,current_atr,secs_to_end,time_pct,spot_price,spot_velocity_usd_per_sec,spot_smoothed_velocity_usd_per_sec,spot_acceleration_usd_per_sec2,ptb,ptb_delta_usd,ptb_delta_pct,up_bid,up_ask,down_bid,down_ask,up_shares,down_shares,paired_shares,spent,returned,terminal_floor,terminal_floor_gap,mtm,unrealized_pnl",
         &format!(
-            "{},{},{},{},{},{:.8},{:.4},{},{},{:.4},{},{:.2},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.8},{:.8},{:.4},{:.4},{:.4},{:.4}",
+            "{},{},{},{},{},{:.8},{},{:.8},{:.4},{:.4},{},{},{:.4},{},{:.2},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.8},{:.8},{:.8},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
             get_now_ms(),
             window_number,
             slug,
             if sig.is_buy { "BUY" } else { "SELL" },
             sig.side,
             sig.amount,
+            signal_amount_kind,
+            signal_shares,
+            signal_usd_value,
             sig.price,
             sig.reason,
             executed,
@@ -1345,8 +1472,11 @@ fn append_signal_event(
             prices.down.ask,
             win_state.up_shares,
             win_state.down_shares,
+            paired_shares,
             win_state.spent,
             win_state.cash_returned,
+            terminal_floor,
+            terminal_floor_gap,
             mtm,
             unrealized_pnl
         ),

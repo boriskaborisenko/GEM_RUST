@@ -1,7 +1,0 @@
-timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
-1780310279015,1,btc-updown-5m-1780310400,BUY,UP,pre_start_entry_dynamic,0.5200,25.38461538,13.2000,86.8000
-1780310279016,1,btc-updown-5m-1780310400,BUY,DOWN,pre_start_entry_dynamic,0.5000,33.60000000,16.8000,70.0000
-1780310404155,1,btc-updown-5m-1780310400,SELL,UP,tvds_strong_grid_exit_step_1_0.62_zone_near_usd_5.02_pct_0.0069_vel_neutral,0.6200,7.61538462,4.7215,74.7215
-1780310441440,1,btc-updown-5m-1780310400,SELL,UP,tvds_strong_grid_exit_step_2_0.72_zone_near_usd_12.80_pct_0.0176_vel_neutral,0.7200,7.61538462,5.4831,80.2046
-1780310478464,1,btc-updown-5m-1780310400,SELL,UP,tvds_strong_grid_exit_step_3_0.75_zone_near_usd_23.73_pct_0.0327_vel_neutral,0.7500,10.15384615,7.6154,87.8200
-1780310483120,1,btc-updown-5m-1780310400,BUY,DOWN,dynamic_buy_weak_down_deviation_ok_atr_limit_0.24_vel_+0.31,0.2300,11.76000000,2.7048,85.1152

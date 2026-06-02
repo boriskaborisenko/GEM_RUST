@@ -45,7 +45,7 @@ CURRENT/NEXT lifecycle:
 - `src/strategy/strategy_a.rs`: Simple Both.
 - `src/strategy/strategy_b.rs`: Asymmetric Ladder.
 - `src/strategy/strategy_c.rs`: Dynamic Break-Even.
-- `src/strategy/strategy_d.rs`: Dynamic Grid / TVDS / Dynamic BUY.
+- `src/strategy/strategy_d.rs`: Dynamic Grid / TVDS / WeakScalp.
 - `src/volatility.rs`: Bybit BTC ATR(14), currently BTC-only even when asset CLI is ETH/SOL.
 - `src/analytics.rs`: optional Vertex AI log analysis helper; not wired into `main.rs` yet.
 
@@ -84,7 +84,7 @@ Strategies do not directly mutate the portfolio. They emit `EntrySignal` / `Orde
 
 `EntrySignal` carries pre-start ask prices plus `budget_multiplier`, `cheaper_side_ratio`, and a reason string. Strategy D uses this for ATR-regime entry sizing.
 
-`SpotSignalSnapshot` carries raw 20s spot velocity, smoothed spot velocity, and acceleration. `main.rs` computes it from Chainlink spot ticks. A/B/C ignore it; Strategy D uses it as a guardrail for Dynamic BUY and redeem-hold.
+`SpotSignalSnapshot` carries raw 20s spot velocity, smoothed spot velocity, and acceleration. `main.rs` computes it from Chainlink spot ticks. A/B/C ignore it; Strategy D uses it as a guardrail for WeakScalp, SELL-grid adjustment, and redeem-hold.
 
 ## Current Config
 
@@ -95,7 +95,7 @@ Strategies do not directly mutate the portfolio. They emit `EntrySignal` / `Orde
 - `minWindowBudget`: `30`
 - `maxWindowBudget`: `150`
 - `windowBudgetPct`: `10`
-- `preStartEntry`: enabled, 5 to 120 seconds before start, asks in `[0.48, 0.52]`
+- `preStartEntry`: enabled, 5 to 120 seconds before start, asks in `[0.42, 0.58]`
 - `minBtcAtr`: `0.0`
 
 Budget logic in `main.rs`:
@@ -104,7 +104,7 @@ Budget logic in `main.rs`:
 - Clamped to `[minWindowBudget, maxWindowBudget]`.
 - If cash is below target but at least min, budget is clipped to available cash.
 - If cash is below min, entry is rejected.
-- Split ratio comes from `EntrySignal`. Strategy D sets it by ATR regime; A/B/C use the internal legacy default `0.60`.
+- Entry allocation builds an equal-shares paired core first, then spends only a bounded surplus on the cheaper side according to `EntrySignal.cheaper_side_ratio`. This allows asymmetric exposure without destroying the terminal paired floor. Strategy D sets the ratio by ATR regime; A/B/C use the internal legacy default `0.60`.
 
 ## Strategy Notes
 
@@ -137,15 +137,20 @@ Strategy C:
 
 Strategy D:
 
-- Treat Strategy D as a coupled control system. ATR, time decay, PTB deviation, bid/ask spread, sizing, grid exits, Dynamic BUY, emergency stop, and redeem-hold must be changed together consciously.
+- Treat Strategy D as a coupled control system. ATR, time decay, PTB deviation, bid/ask spread, sizing, grid exits, WeakScalp, emergency stop, and redeem-hold must be changed together consciously.
 - Pre-start entry uses internal ATR regimes in `src/strategy/strategy_d.rs`: ultra-low ATR micro sizing, low ATR scout sizing, full-size normal ATR, reduced neutral high ATR, and micro neutral extreme ATR. ATR does not hard-skip by itself.
+- Strategy D now allows directional pre-start entries up to a wider ask spread, while still rejecting too-wide or overpriced pairs through spread and combined-ask caps. Directional entries are skipped in low ATR and use reduced, neutral sizing by spread.
 - Strong grid uses live bid leadership with a small tie band instead of only initial share dominance.
 - PTB deviation is classified using both USD distance and percentage distance, so `$5` and `$300` around BTC are not treated the same.
-- Dynamic BUY can add to weak side before 60% elapsed if strong bid >= 0.75, PTB deviation is known and within ATR-derived reach, and weak ask is under the ATR-derived cap.
-- Dynamic BUY also blocks if spot velocity is moderately/strongly moving against the weak side being bought.
-- Dynamic BUY amount is USD, computed from target shares times ask and capped as a fraction of total spent.
+- Old Dynamic BUY was too frequent in the first logs and often fired after the strong side was already fully sold. It has been replaced by experimental WeakScalp.
+- WeakScalp can buy a tiny weak-side tranche only after the window has recovered at least 40% of spent cash, while the strong side still has at least 20% of its initial shares, PTB is near/moderate, weak ask is capped, and spot velocity favors the weak side.
+- WeakScalp uses one active tranche per side at a time, max two tranches per side/window. A new buy is allowed only after the previous scalp tranche has been sold or cleared.
+- WeakScalp amount is USD, currently 3.5% of window spent with a small minimum.
+- Strategy D has a capital-protected mode once returned cash reaches 70% of window spent: new WeakScalp buys are blocked and weak-side exit targets are capped lower to prioritize keeping recovered capital.
 - Clear ITM winners can enter redeem-hold: mid-grid exits are blocked below `0.90`, a small partial can be released at high bid, and the remaining runner is left for `close_window` redeem if conditions persist. A sharp counter-velocity move disables the hold.
-- Weak side exits through TVDS target matrix plus late break-even fallback.
+- Strong grid now sells smaller early tranches and keeps a baseline runner unless the strong side reaches the high release bid.
+- Paired-floor protection applies to strong-grid step3/rest: surplus shares can still sell, and paired-core shares can sell with a bounded floor-sacrifice budget instead of waiting only for a high 0.90 release. The guard limits damage to `cash_returned + min(up_shares, down_shares)` while still allowing partial risk reduction below 0.90. The marker is `_paired_floor_protected` when the proposed sell is cut.
+- Weak side exits through TVDS target matrix plus late break-even fallback, but they are no longer full-liquidation by default. They sell the cash-preservation portion and keep an insurance tail based on initial shares, PTB zone, time decay, and capital-protected mode. The crossover weak-exit block must not dump the second side if that side has become current live-strong or ITM after a PTB cross; it now uses projected shares after earlier same-tick strong-grid signals. Weak-exit reasons include `_sell_..._reserve_..._insurance_...`.
 - SELL-grid targets are spot-velocity-aware: favorable velocity slightly raises targets, adverse velocity slightly lowers them. The adjustment is intentionally small so ATR/PTB/time decay still dominate.
 
 ## Strategy D Skill
@@ -156,21 +161,25 @@ Use it for future Strategy D design, tuning, logging, or 5m/15m run analysis. De
 
 ## Current Test Handoff
 
-As of the latest Strategy D work, the code is ready for the first real paper run. Do not restart strategy design from scratch before seeing logs unless there is an obvious compile/runtime bug.
+Important user workflow rule: do not start runtime tests or trading runs unless the user explicitly asks for that exact run. The user starts 5m/15m tests themselves.
 
-Current intended test:
+As of the latest Strategy D work, old Dynamic BUY has been replaced by WeakScalp after log review. The next run is an A/B-style behavioral comparison against `logs/runs/20260601_103616_btc_5m_dynamic_grid` and `logs/runs/20260601_103616_btc_15m_dynamic_grid`.
 
-- Run `cargo run -- BTC 5m` in one terminal.
-- Run `cargo run -- BTC 15m` in a second terminal.
+Current intended user-run test:
+
+- User starts `cargo run -- BTC 5m` in one terminal.
+- User starts `cargo run -- BTC 15m` in a second terminal.
 - 15m is the priority signal; 5m is mainly a faster behavioral smoke test.
 - Let 5m collect roughly 40-50 windows if possible.
 - Let 15m collect roughly 15-25 windows if possible.
 - Do not tune parameters during the first 5-10 windows unless the behavior is clearly broken.
+- Expect `weak_scalp_buy_*` to be much rarer than old `dynamic_buy_*`.
 
 Primary questions for the first log review:
 
 - Entry: are too many windows skipped, or is the ATR/parity regime allowing enough entries?
-- Dynamic BUY: is it rare and useful, or does it add loss size? Check velocity, PTB distance, weak ask, and later window result.
+- ATR hypothesis to test, not yet a rule: 5m may perform better in the 30-40/30-45 ATR band and degrade at 40+ ATR; avoid hard-filtering until a fresh wider-entry run confirms whether this is causal or sample noise.
+- WeakScalp: is it rare and useful, or does it still add loss size? Check velocity, PTB distance, weak ask, strong remaining shares, and later window result.
 - Strong grid: does velocity-aware target adjustment avoid selling good winners too early, or does it wait too long?
 - Weak exit: does it preserve cash when the weak side remains under pressure?
 - Redeem-hold: does it hold real ITM winners into redeem, and does counter-velocity disable it when the move reverses?
@@ -185,10 +194,16 @@ Each process creates a separated run directory:
 Files:
 
 - `lifecycle_events.csv`
-- `entry_events.csv`
-- `strategy_signals.csv` includes spot velocity, smoothed velocity, and acceleration columns for impulse-aware audit.
-- `trade_events.csv`
+- `entry_events.csv` includes accepted pre-start entries, ATR regime reasons, USD allocation, and resulting shares per side.
+- `strategy_signals.csv` includes spot velocity, smoothed velocity, acceleration, normalized `amount_kind`, `signal_shares`, and `signal_usd_value` columns for impulse-aware and BUY/SELL audit. Buy signal `amount` is USD; sell signal `amount` is shares.
+- `trade_events.csv` includes executed paper BUY/SELL plus terminal REDEEM/EXPIRED records, with price, shares, USD value, and cash-after.
 - `window_summary.csv`
+
+Terminal display notes:
+
+- Window result percentages are calculated from closed/settled windows only; open entered windows are shown separately.
+- Trade log lines show side, shares, price, USD value, cash-after, and reason.
+- CURRENT window display shows the paired terminal floor (`returned + min(up_shares, down_shares)`), break-even gap, live bid leader, ITM side, and whether crossover weak exit is armed or blocked because the second side has become live-strong/ITM.
 
 Recommended first-pass log order:
 
@@ -214,5 +229,6 @@ From `GEM_RUST`:
 
 ```bash
 cargo check
-cargo run -- BTC 5m
 ```
+
+Do not run `cargo run` yourself unless the user explicitly asks for that exact runtime run.

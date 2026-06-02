@@ -1,2 +1,0 @@
-timestamp,window_id,slug,reason,current_atr,up_ask,down_ask,budget_multiplier,cheaper_side_ratio,total_budget,buy_up_usd,buy_down_usd
-1780310279014,1,btc-updown-5m-1780310400,d_v3_entry_normal_atr_balanced_atr_42.99_combined_1.02_spread_0.02,42.9929,0.5200,0.5000,1.0000,0.5600,30.0000,13.2000,16.8000

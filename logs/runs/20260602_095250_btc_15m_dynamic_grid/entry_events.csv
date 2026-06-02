@@ -1,0 +1,11 @@
+timestamp,window_id,slug,reason,current_atr,up_ask,down_ask,budget_multiplier,cheaper_side_ratio,total_budget,buy_up_usd,buy_up_shares,buy_down_usd,buy_down_shares
+1780394279039,1,btc-updown-15m-1780394400,d_v3_entry_high_atr_delta_neutral_directional_atr_59.15_combined_1.02_spread_0.08_budget_mult_0.59,59.1500,0.5500,0.4700,0.5950,0.5000,17.8500,8.9250,16.22727273,8.9250,18.98936170
+1780395179042,2,btc-updown-15m-1780395300,d_v3_entry_high_atr_delta_neutral_directional_atr_59.35_combined_1.02_spread_0.06_budget_mult_0.72,59.3500,0.4800,0.5400,0.7225,0.5000,21.6750,10.8375,22.57812500,10.8375,20.06944444
+1780396079044,3,btc-updown-15m-1780396200,d_v3_entry_high_atr_delta_neutral_atr_51.71_combined_1.02_spread_0.00_budget_mult_0.85,51.7143,0.5100,0.5100,0.8500,0.5000,25.5000,12.7500,25.00000000,12.7500,25.00000000
+1780396979047,4,btc-updown-15m-1780397100,d_v3_entry_high_atr_delta_neutral_directional_atr_49.06_combined_1.02_spread_0.08_budget_mult_0.59,49.0643,0.5500,0.4700,0.5950,0.5000,17.8500,8.9250,16.22727273,8.9250,18.98936170
+1780397879050,5,btc-updown-15m-1780398000,d_v3_entry_normal_atr_balanced_atr_42.43_combined_1.02_spread_0.02_budget_mult_1.00,42.4286,0.5200,0.5000,1.0000,0.5600,30.0000,13.2000,25.38461538,16.8000,33.60000000
+1780398779054,6,btc-updown-15m-1780398900,d_v3_entry_normal_atr_balanced_atr_34.09_combined_1.02_spread_0.02_budget_mult_1.00,34.0929,0.5200,0.5000,1.0000,0.5600,30.0000,13.2000,25.38461538,16.8000,33.60000000
+1780399679057,7,btc-updown-15m-1780399800,d_v3_entry_normal_atr_balanced_atr_40.79_combined_1.02_spread_0.02_budget_mult_1.00,40.7857,0.5200,0.5000,1.0000,0.5600,30.0000,13.2000,25.38461538,16.8000,33.60000000
+1780400579061,8,btc-updown-15m-1780400700,d_v3_entry_normal_atr_balanced_atr_38.97_combined_1.02_spread_0.02_budget_mult_1.00,38.9714,0.5200,0.5000,1.0000,0.5600,30.0000,13.2000,25.38461538,16.8000,33.60000000
+1780401479067,9,btc-updown-15m-1780401600,d_v3_entry_normal_atr_balanced_atr_33.71_combined_1.03_spread_0.01_budget_mult_1.00,33.7143,0.5200,0.5100,1.0000,0.5600,30.0000,13.2000,25.38461538,16.8000,32.94117647
+1780402379071,10,btc-updown-15m-1780402500,d_v3_entry_high_atr_delta_neutral_directional_atr_68.01_combined_1.02_spread_0.08_budget_mult_0.59,68.0143,0.5500,0.4700,0.5950,0.5000,17.8500,8.9250,16.22727273,8.9250,18.98936170
