@@ -46,6 +46,7 @@ CURRENT/NEXT lifecycle:
 - `src/strategy/strategy_b.rs`: Asymmetric Ladder.
 - `src/strategy/strategy_c.rs`: Dynamic Break-Even.
 - `src/strategy/strategy_d.rs`: Dynamic Grid / TVDS / WeakScalp.
+- `src/strategy/strategy_d1.rs`: D1 one-leg pair-builder experiment.
 - `src/volatility.rs`: Bybit BTC ATR(14), currently BTC-only even when asset CLI is ETH/SOL.
 - `src/analytics.rs`: optional Vertex AI log analysis helper; not wired into `main.rs` yet.
 
@@ -68,8 +69,9 @@ CURRENT/NEXT lifecycle:
 `Portfolio`:
 
 - cash, equity, realized PnL, wins/losses/skips.
-- `execute_buy` takes USD amount and ask price.
-- `execute_sell` takes share amount and bid price.
+- `execute_buy` takes USD amount and ask price; runtime BUYs below `$1.00` are rejected.
+- `execute_sell` takes share amount and bid price; SELL can be any USD value so dust/tails can be cleared.
+- If a current window was promoted as `SKIPPED` but later receives a live BUY, `execute_buy` converts it to `LIVE`, decrements `skipped_windows`, and increments `entered_windows`. This supports post-open D1 conviction entries without corrupting terminal stats.
 - `close_window` redeems ITM residual shares at 1.00 if spot/PTB are known, otherwise sells all at cached bids.
 
 ## Strategy Interface
@@ -82,7 +84,7 @@ All strategies implement:
 
 Strategies do not directly mutate the portfolio. They emit `EntrySignal` / `OrderSignal`; `main.rs` applies them through `Portfolio`.
 
-`EntrySignal` carries pre-start ask prices plus `budget_multiplier`, `cheaper_side_ratio`, and a reason string. Strategy D uses this for ATR-regime entry sizing.
+`EntrySignal` carries pre-start ask prices plus `budget_multiplier`, `cheaper_side_ratio`, `mode`, and a reason string. `mode = Both` uses the paired-core allocator; `mode = OneSide("UP"/"DOWN")` spends the full entry budget on only that side. Strategy D uses `Both`; D1 uses `OneSide`.
 
 `SpotSignalSnapshot` carries raw 20s spot velocity, smoothed spot velocity, and acceleration. `main.rs` computes it from Chainlink spot ticks. A/B/C ignore it; Strategy D uses it as a guardrail for WeakScalp, SELL-grid adjustment, and redeem-hold.
 
@@ -148,10 +150,26 @@ Strategy D:
 - WeakScalp amount is USD, currently 3.5% of window spent with a small minimum.
 - Strategy D has a capital-protected mode once returned cash reaches 70% of window spent: new WeakScalp buys are blocked and weak-side exit targets are capped lower to prioritize keeping recovered capital.
 - Clear ITM winners can enter redeem-hold: mid-grid exits are blocked below `0.90`, a small partial can be released at high bid, and the remaining runner is left for `close_window` redeem if conditions persist. A sharp counter-velocity move disables the hold.
-- Strong grid now sells smaller early tranches and keeps a baseline runner unless the strong side reaches the high release bid.
+- Strong grid now sells smaller layers and is gated by window-progress percentage plus probability edge. The bid target alone is not enough: the market price must be better than the model's win probability, unless the edge is unusually large early. This prevents 15m windows from dumping most inventory in the first few minutes.
 - Paired-floor protection applies to strong-grid step3/rest: surplus shares can still sell, and paired-core shares can sell with a bounded floor-sacrifice budget instead of waiting only for a high 0.90 release. The guard limits damage to `cash_returned + min(up_shares, down_shares)` while still allowing partial risk reduction below 0.90. The marker is `_paired_floor_protected` when the proposed sell is cut.
-- Weak side exits through TVDS target matrix plus late break-even fallback, but they are no longer full-liquidation by default. They sell the cash-preservation portion and keep an insurance tail based on initial shares, PTB zone, time decay, and capital-protected mode. The crossover weak-exit block must not dump the second side if that side has become current live-strong or ITM after a PTB cross; it now uses projected shares after earlier same-tick strong-grid signals. Weak-exit reasons include `_sell_..._reserve_..._insurance_...`.
+- Weak side exits through TVDS target matrix plus late break-even fallback, but targets are only a minimum price floor; probability decides whether the sale is worth taking. Weak-exit separates surplus from paired core. Surplus can be sold when bid overpays win probability; paired core is preserved unless the edge is clearly favorable or the side is very unlikely late. The crossover weak-exit block must not dump the second side if that side has become current live-strong or ITM after a PTB cross; it now uses projected shares/cash after earlier same-tick signals. Weak-exit reasons include `_p_..._edge_..._sell_..._reserve_..._insurance_...`; strong-grid reasons include `_p_..._edge_...` and `_insurance_tail_kept` when the tail blocks a sell.
+- Emergency 15%-time salvage sells only OTM surplus above the paired core. It must not liquidate `min(up_shares, down_shares)`, because that paired core has guaranteed redeem value on one side. OTM surplus/tail selling is probability-based: estimate the held side's win probability from PTB distance, ATR, seconds left, and spot velocity, then sell only when current bid is better than that probability. Example: if holding DOWN, `UP +300 with 50s left` implies low DOWN probability and is a sell; `UP +9 with 30s left` implies meaningful DOWN probability and should be kept if bid underpays it. Emergency reasons include `_otm_surplus_..._p_..._keep_paired_...`.
 - SELL-grid targets are spot-velocity-aware: favorable velocity slightly raises targets, adverse velocity slightly lowers them. The adjustment is intentionally small so ATR/PTB/time decay still dominate.
+
+Strategy D1:
+
+- Activate with `strategy: "dynamic_grid_d1"` in `config.json`.
+- D1 is a separate one-leg pair-builder experiment in `src/strategy/strategy_d1.rs`; it does not reuse D's sell grid.
+- Pre-start entry buys only one side near parity, currently ask in `[0.48, 0.52]`. Full D1 one-leg size requires directional fair probability at least `0.54`; neutral cheap-side scout is smaller and is allowed on any real ATR, but volatile/storm ATR requires a bigger price discount and uses reduced sizing instead of hard-skipping the window. `ATR=0` is treated as uninitialized/warmup data and D1 pre-start entry is skipped until ATR is valid. Other strategies keep two-sided entry through `EntryMode::Both`.
+- D1 chooses the first side by a micro-edge score (`fair_probability - ask`) instead of only cheapest ask. Fair probability uses PTB distance, ATR-scaled expected move over the upcoming full window horizon, and spot velocity drift, following the proto_v08 idea of gap/z-score plus velocity confirmation using only data currently available in GEM_RUST.
+- If pre-start scout is skipped, D1 can still enter after the window opens via `d1_live_conviction_entry_*`. This is a small, careful port of proto_v08 EDGE directionality: once PTB is known, side comes from `gap_z = (spot - PTB) / ATR_expected_move` (`UP` for positive, `DOWN` for negative), while `fair - ask`, entry price, elapsed/window phase, and velocity/acceleration confirmations are quality gates. It does not import proto_v08 Markov/confluence/depth yet because GEM_RUST does not currently collect those streams.
+- D1 has an initial sleep mode: for `max(25 seconds, 5% of window duration)` after window start it does not buy the opposite side, insurance, or repair. This preserves the one-leg x2 upside and lets early z-score/velocity noise settle before paying for protection.
+- D1 divides the live window into time phases: `opening` (`0-25%`), `mid` (`25-60%`), `late` (`60-85%`), and `final` (`85-100%`). ATR regimes are `calm` (`<20`), `normal` (`20-45`), `volatile` (`45-90`), and `storm` (`>=90`). Phase plus ATR adjusts how patient D1 is before buying insurance.
+- Live logic can buy the opposite side when `first_leg_price + opposite_ask` is below the phase lock threshold, but it does not automatically equal-hedge a strong first leg. D1 now uses a target hedge ratio instead of one-shot full lock: `target_hedge_ratio(phase, ATR regime, pair_cost, first_p, first_otm_z)` minus the current opposite/first share ratio. `first_otm_z` is the first side's distance against PTB divided by ATR-scaled expected move to window end. Opening-phase full lock is forbidden; near break-even `pair_cost ~0.99` with only mildly weak first probability or no real PTB distance against the first side should not buy the second side.
+- Target hedge also protects correct runners: cheap `pair_cost` alone is no longer enough to buy the opposite side when the first leg is strongly ITM (`first_otm_z ~= 0` and high `first_p`). Opposite-side buying now needs either a very cheap pair, real PTB distance against the first side, or a materially deteriorating first-side probability.
+- D1 target-hedge BUY signals smaller than `$1.00` are suppressed. This prevents repeated geometric micro-locking from slowly eating the one-leg runner while still allowing the target hedge to increase later if the first leg genuinely deteriorates or the pair gets cheap.
+- If the first leg is crushed in a rare one-way move, D1 buys opposite-side insurance by formula instead of a hard threshold: `hedge_fraction = risk_pressure * insurance_quality`. `risk_pressure` uses first-side win probability, explicit PTB-distance pressure (`first_otm_z`), time phase, ATR regime, and first-side bid damage. `insurance_quality` is based on `first_avg + opposite_ask - 1.00`, so expensive insurance self-throttles. Reasons use `d1_insurance_grid_buy_*` with `first_p`, `first_otm_z`, `risk`, `ins_cost`, `quality`, and `hedge`.
+- After a loss-cap hedge, if current `UP ask + DOWN ask` is cheap enough for the phase, D1 can start a staged repair pair. It emits only one BUY per tick: `d1_repair_pair_stage1_*` stores a pending second leg, and `d1_repair_pair_stage2_*` completes it only if the staged pair cost is still acceptable. This models the fact that both sides cannot be assumed fillable in the same tick.
 
 ## Strategy D Skill
 

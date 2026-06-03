@@ -9,6 +9,8 @@ description: Work on the GEM_RUST Dynamic Grid Strategy D sub-project. Use when 
 
 Work inside `/Users/boriskaborisenko/Desktop/poly/GEM_RUST`.
 
+This skill is mandatory for every GEM_RUST / Strategy D turn: log analysis, tuning, code review, strategy redesign, terminal display, CSV logging, probability/redeem math, and any 5m/15m behavior discussion.
+
 Prefer keeping strategy math in `src/strategy/strategy_d.rs`. Touch other files when the strategy interface, execution semantics, config, logging, or asset-aware ATR requires it.
 
 ## First Reads
@@ -25,7 +27,7 @@ For current Strategy D v3 invariants, read `references/strategy-d-v3.md`.
 
 ## Core Invariants
 
-- Pre-start buy must happen only before the window starts, with both asks near parity.
+- Pre-start buy must happen only before the window starts. Strategy D buys both sides near parity; Strategy D1 intentionally buys one side near parity and later tries to build/repair a pair.
 - Buy signal `amount` means USD. Sell signal `amount` means shares. Do not send shares as buy amount.
 - Treat Strategy D as a coupled control system. ATR, time decay, PTB deviation, bid/ask spread, entry sizing, strong-side grid, weak-side exit, WeakScalp, emergency stop, and redeem-hold all affect each other.
 - Do not add a local rule that fixes one symptom without checking its second-order effects on the full window lifecycle.
@@ -48,16 +50,11 @@ For current Strategy D v3 invariants, read `references/strategy-d-v3.md`.
 6. Run `cargo check` from `GEM_RUST`.
 7. Update `CODEX_CONTEXT.md` or `references/strategy-d-v3.md` when behavior changes.
 
+Never start runtime trading/test processes yourself. The user runs `cargo run -- BTC 5m` and `cargo run -- BTC 15m`; Codex reads their logs afterward. `cargo check` and `cargo fmt` are allowed.
+
 ## Current Handoff
 
-The current Strategy D contour is ready for a WeakScalp paper test. Before proposing more math, inspect fresh logs unless the user reports a concrete bug.
-
-Use two terminal runs:
-
-```bash
-cargo run -- BTC 5m
-cargo run -- BTC 15m
-```
+The current Strategy D contour should be reviewed from user-generated paper-test logs. Before proposing more math, inspect fresh logs unless the user reports a concrete bug.
 
 Target sample:
 
@@ -96,7 +93,7 @@ Use:
 cargo check
 ```
 
-For runtime comparisons, run two terminal sessions from `GEM_RUST`:
+For runtime comparisons, the user runs two terminal sessions from `GEM_RUST`:
 
 ```bash
 cargo run -- BTC 5m

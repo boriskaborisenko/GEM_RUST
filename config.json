@@ -1,5 +1,5 @@
 {
-  "strategy": "dynamic_grid",
+  "strategy": "dynamic_grid_d1",
   "minBtcAtr": 0.0,
   "session": {
     "startingBank": 100,

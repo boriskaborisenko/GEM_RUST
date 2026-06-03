@@ -1,6 +1,8 @@
 use crate::client::{get_now_ms, MarketWindow, PricesState};
 use std::collections::HashMap;
 
+const MIN_TRADE_USD: f64 = 1.0;
+
 #[derive(Debug, Clone)]
 pub struct TradeRecord {
     pub timestamp: i64,
@@ -184,16 +186,28 @@ impl Portfolio {
         if ask_price <= 0.0 || usd_amount <= 0.0 {
             return None;
         }
+        if usd_amount < MIN_TRADE_USD {
+            return None;
+        }
         if self.available_cash < usd_amount {
             return None;
         }
+        let market = self.windows.get(&window_number)?.market.clone();
+        let converts_skipped_to_live = self
+            .windows
+            .get(&window_number)
+            .map(|win| win.status == "SKIPPED" && win.spent <= 0.0)
+            .unwrap_or(false);
 
         self.available_cash -= usd_amount;
+        if converts_skipped_to_live {
+            self.skipped_windows = self.skipped_windows.saturating_sub(1);
+            self.entered_windows += 1;
+        }
 
         // Evaluate and freeze cash_after to avoid borrow conflict later
         let available_cash_after = self.available_cash;
 
-        let market = self.windows.get(&window_number)?.market.clone();
         let (trade, slug) = {
             let win = self.get_or_create_window_state(window_number, "", &market);
 
@@ -210,6 +224,8 @@ impl Portfolio {
 
             if win.status == "WAITING_ENTRY" {
                 win.status = "ENTERED_PRE_START".to_string();
+            } else if win.status == "SKIPPED" {
+                win.status = "LIVE".to_string();
             }
 
             let trade = TradeRecord {

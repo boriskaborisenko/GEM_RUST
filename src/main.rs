@@ -16,7 +16,8 @@ mod volatility;
 use client::{get_now_ms, MarketEvent, MarketWindow, PricesState};
 use config::Config;
 use strategy::{
-    EntrySignal, OrderSignal, SpotSignalSnapshot, StrategyEngine, LEGACY_CHEAPER_SIDE_RATIO,
+    EntryMode, EntrySignal, OrderSignal, SpotSignalSnapshot, StrategyEngine,
+    LEGACY_CHEAPER_SIDE_RATIO,
 };
 use trader::{Portfolio, WindowState};
 use volatility::VolatilityManager;
@@ -474,9 +475,12 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
                         if let Some(entry) = strat.check_pre_start_entry(
                             &app.config,
                             &prices,
+                            &next.market,
+                            app.spot_price,
                             next.window_number,
                             secs_to_start,
                             current_atr,
+                            app.spot_series.snapshot(),
                         ) {
                             trigger_buy = true;
                             up_ask_val = entry.up_ask;
@@ -505,6 +509,7 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
                 down_ask: dn_ask_val,
                 budget_multiplier: 1.0,
                 cheaper_side_ratio: LEGACY_CHEAPER_SIDE_RATIO,
+                mode: EntryMode::Both,
                 reason: "fallback_entry_signal".to_string(),
             });
 
@@ -534,12 +539,17 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
                 }
 
                 if budget > 0.0 {
-                    allocate_entry_usd(
-                        budget,
-                        up_ask_val,
-                        dn_ask_val,
-                        entry_signal.cheaper_side_ratio,
-                    )
+                    match &entry_signal.mode {
+                        EntryMode::Both => allocate_entry_usd(
+                            budget,
+                            up_ask_val,
+                            dn_ask_val,
+                            entry_signal.cheaper_side_ratio,
+                        ),
+                        EntryMode::OneSide(side) if side == "UP" => (budget, 0.0),
+                        EntryMode::OneSide(side) if side == "DOWN" => (0.0, budget),
+                        EntryMode::OneSide(_) => (0.0, 0.0),
+                    }
                 } else {
                     (0.0, 0.0)
                 }
@@ -584,14 +594,14 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
                     "UP",
                     buy_up_usd,
                     up_ask_val,
-                    "pre_start_entry_dynamic",
+                    &entry_signal.reason,
                 );
                 port.execute_buy(
                     window_num,
                     "DOWN",
                     buy_down_usd,
                     dn_ask_val,
-                    "pre_start_entry_dynamic",
+                    &entry_signal.reason,
                 );
 
                 let updated = port.get_or_create_window_state(window_num, "", &next_market);
@@ -1338,16 +1348,22 @@ fn append_entry_event(
     buy_up_usd: f64,
     buy_down_usd: f64,
 ) {
+    let (entry_mode, entry_side) = match &entry.mode {
+        EntryMode::Both => ("both", ""),
+        EntryMode::OneSide(side) => ("one_side", side.as_str()),
+    };
     append_csv_row(
         log_dir,
         "entry_events.csv",
-        "timestamp,window_id,slug,reason,current_atr,up_ask,down_ask,budget_multiplier,cheaper_side_ratio,total_budget,buy_up_usd,buy_up_shares,buy_down_usd,buy_down_shares",
+        "timestamp,window_id,slug,reason,entry_mode,entry_side,current_atr,up_ask,down_ask,budget_multiplier,cheaper_side_ratio,total_budget,buy_up_usd,buy_up_shares,buy_down_usd,buy_down_shares",
         &format!(
-            "{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.8},{:.4},{:.8}",
+            "{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.8},{:.4},{:.8}",
             get_now_ms(),
             window_number,
             slug,
             entry.reason,
+            entry_mode,
+            entry_side,
             current_atr,
             entry.up_ask,
             entry.down_ask,

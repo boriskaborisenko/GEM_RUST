@@ -1,6 +1,8 @@
 use crate::client::{MarketWindow, PricesState};
 use crate::config::Config;
-use crate::strategy::{EntrySignal, OrderSignal, SpotSignalSnapshot, StrategyState, TradeStrategy};
+use crate::strategy::{
+    EntryMode, EntrySignal, OrderSignal, SpotSignalSnapshot, StrategyState, TradeStrategy,
+};
 use crate::trader::WindowState;
 use std::collections::HashMap;
 
@@ -31,6 +33,21 @@ const WEAK_EXIT_MIN_INSURANCE_FRACTION: f64 = 0.08;
 const WEAK_EXIT_NEAR_INSURANCE_FRACTION: f64 = 0.30;
 const WEAK_EXIT_MODERATE_INSURANCE_FRACTION: f64 = 0.25;
 const WEAK_EXIT_FAR_INSURANCE_FRACTION: f64 = 0.14;
+const INSURANCE_TAIL_RELEASE_TIME_PCT: f64 = 90.0;
+const WIN_PROB_SELL_EDGE: f64 = 0.01;
+const SPOT_VELOCITY_PROB_DRIFT_FRACTION: f64 = 0.35;
+const STRONG_STEP_1_MIN_TIME_PCT: f64 = 20.0;
+const STRONG_STEP_2_MIN_TIME_PCT: f64 = 45.0;
+const STRONG_STEP_3_MIN_TIME_PCT: f64 = 75.0;
+const STRONG_STEP_1_EARLY_EDGE: f64 = 0.12;
+const STRONG_STEP_2_EARLY_EDGE: f64 = 0.18;
+const STRONG_STEP_3_EARLY_EDGE: f64 = 0.24;
+const STRONG_STEP_1_MIN_EDGE: f64 = 0.02;
+const STRONG_STEP_2_MIN_EDGE: f64 = 0.04;
+const STRONG_STEP_3_MIN_EDGE: f64 = 0.06;
+const WEAK_CORE_SELL_MIN_TIME_PCT: f64 = 60.0;
+const WEAK_CORE_SELL_EDGE: f64 = 0.08;
+const WEAK_CORE_PANIC_PROB: f64 = 0.10;
 
 // ─── СТРАТЕГИЯ Д: Dynamic Grid + WeakScalp + Time-Decay Crossover Block ───
 pub struct DynamicGridStrategy {
@@ -41,6 +58,7 @@ pub struct DynamicGridStrategy {
     pub scalp_tranches: HashMap<(usize, String), usize>,
     pub scalp_active_shares: HashMap<(usize, String), f64>,
     pub scalp_active_cost: HashMap<(usize, String), f64>,
+    pub weak_exit_insurance_reserve: HashMap<(usize, String), f64>,
 }
 
 impl DynamicGridStrategy {
@@ -53,6 +71,7 @@ impl DynamicGridStrategy {
             scalp_tranches: HashMap::new(),
             scalp_active_shares: HashMap::new(),
             scalp_active_cost: HashMap::new(),
+            weak_exit_insurance_reserve: HashMap::new(),
         }
     }
 }
@@ -256,6 +275,80 @@ fn velocity_bias_label(bias: i8) -> &'static str {
     }
 }
 
+fn normal_cdf(x: f64) -> f64 {
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs() / std::f64::consts::SQRT_2;
+    let t = 1.0 / (1.0 + 0.3275911 * x);
+    let a1 = 0.254829592;
+    let a2 = -0.284496736;
+    let a3 = 1.421413741;
+    let a4 = -1.453152027;
+    let a5 = 1.061405429;
+    let erf = sign * (1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp());
+    ((1.0 + erf) * 0.5).clamp(0.0, 1.0)
+}
+
+fn side_win_probability(
+    is_up_side: bool,
+    dev: PtbDeviation,
+    current_atr: f64,
+    secs_to_end: i64,
+    spot_signal: SpotSignalSnapshot,
+) -> f64 {
+    if !dev.known {
+        return 0.50;
+    }
+
+    let secs_left = (secs_to_end as f64).max(1.0);
+    let expected_move = current_atr.max(1.0) * (secs_left / 60.0).sqrt();
+    let velocity_drift =
+        spot_velocity(spot_signal).unwrap_or(0.0) * secs_left * SPOT_VELOCITY_PROB_DRIFT_FRACTION;
+    let effective_delta = dev.signed_usd + velocity_drift;
+    let up_probability = normal_cdf(effective_delta / expected_move);
+
+    if is_up_side {
+        up_probability
+    } else {
+        1.0 - up_probability
+    }
+}
+
+fn should_sell_by_probability(bid: f64, win_probability: f64) -> bool {
+    bid >= (win_probability + WIN_PROB_SELL_EDGE).clamp(0.0, 1.0)
+}
+
+fn sell_edge(bid: f64, win_probability: f64) -> f64 {
+    bid - win_probability
+}
+
+fn strong_grid_step_allowed(
+    step_idx: usize,
+    time_pct: f64,
+    bid: f64,
+    win_probability: f64,
+) -> bool {
+    let edge = sell_edge(bid, win_probability);
+    let (min_time_pct, early_edge, min_edge) = match step_idx {
+        0 => (
+            STRONG_STEP_1_MIN_TIME_PCT,
+            STRONG_STEP_1_EARLY_EDGE,
+            STRONG_STEP_1_MIN_EDGE,
+        ),
+        1 => (
+            STRONG_STEP_2_MIN_TIME_PCT,
+            STRONG_STEP_2_EARLY_EDGE,
+            STRONG_STEP_2_MIN_EDGE,
+        ),
+        _ => (
+            STRONG_STEP_3_MIN_TIME_PCT,
+            STRONG_STEP_3_EARLY_EDGE,
+            STRONG_STEP_3_MIN_EDGE,
+        ),
+    };
+
+    (time_pct >= min_time_pct && edge >= min_edge) || edge >= early_edge
+}
+
 fn adjust_strong_grid_target(base: f64, step_idx: usize, velocity_bias: i8, time_pct: f64) -> f64 {
     let adjustment = match (velocity_bias, step_idx) {
         (1, 0) if time_pct < 70.0 => 0.01,
@@ -399,9 +492,14 @@ fn weak_exit_insurance_fraction(
 fn weak_exit_sell_plan(
     initial_shares: f64,
     current_shares: f64,
+    other_side_shares: f64,
+    bid: f64,
+    side_win_probability: f64,
     dev_zone: DeviationZone,
     time_pct: f64,
     capital_protected: bool,
+    spent: f64,
+    cash_returned: f64,
 ) -> (f64, f64, f64) {
     if current_shares <= 0.0 {
         return (0.0, 0.0, 0.0);
@@ -413,10 +511,90 @@ fn weak_exit_sell_plan(
     } else {
         current_shares
     };
-    let reserve_shares = (reserve_base * reserve_fraction).min(current_shares);
-    let sell_amount = (current_shares - reserve_shares).max(0.0);
+    let insurance_reserve = (reserve_base * reserve_fraction).min(current_shares);
+    let paired_core = current_shares.min(other_side_shares.max(0.0));
+    let surplus = (current_shares - paired_core).max(0.0);
+    let edge = sell_edge(bid, side_win_probability);
+    let cash_gap = (spent - cash_returned).max(0.0);
+    let cash_gap_shares = if bid > 0.0 { cash_gap / bid } else { 0.0 };
+
+    // Preserve the redeem-capable paired core unless the market is clearly
+    // overpaying the side's win probability, or the side is very unlikely late.
+    let core_sell_fraction = if edge >= STRONG_STEP_3_EARLY_EDGE
+        || (time_pct >= 80.0 && side_win_probability <= WEAK_CORE_PANIC_PROB)
+    {
+        0.35
+    } else if time_pct >= WEAK_CORE_SELL_MIN_TIME_PCT && edge >= WEAK_CORE_SELL_EDGE {
+        0.20
+    } else if time_pct >= 80.0 && edge >= 0.04 {
+        0.12
+    } else {
+        0.0
+    };
+    let core_sell = paired_core
+        .min(cash_gap_shares)
+        .min(paired_core * core_sell_fraction);
+
+    let planned_sell = (surplus + core_sell).min(current_shares);
+    let sell_amount = planned_sell.min((current_shares - insurance_reserve).max(0.0));
+    let reserve_shares = (current_shares - sell_amount).max(0.0);
 
     (sell_amount, reserve_shares, reserve_fraction)
+}
+
+fn insurance_tail_release_allowed(
+    bid: f64,
+    time_pct: f64,
+    side_is_itm: bool,
+    side_win_probability: f64,
+) -> bool {
+    !side_is_itm
+        && (bid >= REDEEM_HOLD_RELEASE_BID
+            || (time_pct >= INSURANCE_TAIL_RELEASE_TIME_PCT
+                && should_sell_by_probability(bid, side_win_probability)))
+}
+
+fn cap_sell_by_insurance_tail(
+    proposed_sell: f64,
+    current_shares: f64,
+    reserve_shares: f64,
+    bid: f64,
+    time_pct: f64,
+    side_is_itm: bool,
+    side_win_probability: f64,
+) -> (f64, bool) {
+    if proposed_sell <= 0.0 || current_shares <= 0.0 || reserve_shares <= 0.0 {
+        return (proposed_sell.max(0.0), false);
+    }
+
+    if insurance_tail_release_allowed(bid, time_pct, side_is_itm, side_win_probability) {
+        return (proposed_sell.min(current_shares), false);
+    }
+
+    let max_sell_without_tail = (current_shares - reserve_shares).max(0.0);
+    let capped_sell = proposed_sell.min(max_sell_without_tail);
+    (capped_sell, capped_sell + 0.000001 < proposed_sell)
+}
+
+fn emergency_surplus_sell_amount(
+    side_shares: f64,
+    other_side_shares: f64,
+    side_is_itm: bool,
+    side_bid: f64,
+    side_win_probability: f64,
+) -> f64 {
+    if side_shares <= 0.0
+        || side_is_itm
+        || !should_sell_by_probability(side_bid, side_win_probability)
+    {
+        return 0.0;
+    }
+
+    if other_side_shares <= 0.0 {
+        side_shares
+    } else {
+        (side_shares - other_side_shares).max(0.0)
+    }
 }
 
 fn weak_scalp_ask_cap(current_atr: f64) -> f64 {
@@ -500,9 +678,12 @@ impl TradeStrategy for DynamicGridStrategy {
         &mut self,
         config: &Config,
         prices: &PricesState,
+        _market: &MarketWindow,
+        _spot_price: Option<f64>,
         window_number: usize,
         secs_to_start: i64,
         current_btc_atr: f64,
+        _spot_signal: SpotSignalSnapshot,
     ) -> Option<EntrySignal> {
         if !config.pre_start_entry.enabled {
             return None;
@@ -577,6 +758,7 @@ impl TradeStrategy for DynamicGridStrategy {
             down_ask: dn_ask,
             budget_multiplier: entry_budget_multiplier,
             cheaper_side_ratio: entry_cheaper_side_ratio,
+            mode: EntryMode::Both,
             reason: format!(
                 "{}{}_atr_{:.2}_combined_{:.2}_spread_{:.2}_budget_mult_{:.2}",
                 regime.reason,
@@ -616,6 +798,7 @@ impl TradeStrategy for DynamicGridStrategy {
         let dn_ask = prices.down.ask;
         let mut projected_up_shares = win_state.up_shares;
         let mut projected_down_shares = win_state.down_shares;
+        let mut projected_cash_returned = win_state.cash_returned;
 
         // Рассчитываем временной фильтр в процентах (0.0% - 100.0%)
         let duration_ms = match (
@@ -656,6 +839,10 @@ impl TradeStrategy for DynamicGridStrategy {
         let capital_protected = recovered_ratio >= CAPITAL_PROTECTED_RATIO;
 
         let strong_bid = if is_up_strong { up_bid } else { dn_bid };
+        let up_win_probability =
+            side_win_probability(true, dev, current_atr, secs_to_end, spot_signal);
+        let down_win_probability =
+            side_win_probability(false, dev, current_atr, secs_to_end, spot_signal);
         let redeem_hold_active = should_hold_winner_for_redeem(
             is_up_strong,
             dev,
@@ -678,43 +865,77 @@ impl TradeStrategy for DynamicGridStrategy {
         let emergency_time_threshold = (duration_sec * 0.15) as i64; // 135s for 15m
 
         if secs_to_end <= emergency_time_threshold && secs_to_end > -10 {
-            // Sell whatever remains, if its bid price is at least 0.20
-            if win_state.up_shares > 0.0
+            // Late salvage sells only OTM surplus. Paired core stays for redeem.
+            let up_is_itm = strong_side_is_itm(true, dev);
+            let down_is_itm = strong_side_is_itm(false, dev);
+            let up_emergency_sell = emergency_surplus_sell_amount(
+                projected_up_shares,
+                projected_down_shares,
+                up_is_itm,
+                up_bid,
+                up_win_probability,
+            );
+            if up_emergency_sell > 0.000001
                 && up_bid >= 0.20
                 && !state.up_sold
                 && !(redeem_hold_active && is_up_strong)
             {
-                state.up_sold = true;
-                self.scalp_active_shares
-                    .insert(scalp_key(window_number, "UP"), 0.0);
-                self.scalp_active_cost
-                    .insert(scalp_key(window_number, "UP"), 0.0);
-                projected_up_shares = 0.0;
+                projected_up_shares = (projected_up_shares - up_emergency_sell).max(0.0);
+                projected_cash_returned += up_emergency_sell * up_bid;
+                if projected_up_shares <= 0.000001 {
+                    state.up_sold = true;
+                    self.weak_exit_insurance_reserve
+                        .insert(scalp_key(window_number, "UP"), 0.0);
+                    self.scalp_active_shares
+                        .insert(scalp_key(window_number, "UP"), 0.0);
+                    self.scalp_active_cost
+                        .insert(scalp_key(window_number, "UP"), 0.0);
+                }
                 signals.push(OrderSignal {
                     side: "UP".to_string(),
                     is_buy: false,
-                    amount: win_state.up_shares,
+                    amount: up_emergency_sell,
                     price: up_bid,
-                    reason: "emergency_15pct_time_stop_bid_ge_0.20".to_string(),
+                    reason: format!(
+                        "emergency_15pct_time_stop_otm_surplus_bid_ge_0.20_p_{:.2}_keep_paired_{:.4}",
+                        up_win_probability,
+                        projected_up_shares.min(projected_down_shares),
+                    ),
                 });
             }
-            if win_state.down_shares > 0.0
+            let down_emergency_sell = emergency_surplus_sell_amount(
+                projected_down_shares,
+                projected_up_shares,
+                down_is_itm,
+                dn_bid,
+                down_win_probability,
+            );
+            if down_emergency_sell > 0.000001
                 && dn_bid >= 0.20
                 && !state.down_sold
                 && !(redeem_hold_active && !is_up_strong)
             {
-                state.down_sold = true;
-                self.scalp_active_shares
-                    .insert(scalp_key(window_number, "DOWN"), 0.0);
-                self.scalp_active_cost
-                    .insert(scalp_key(window_number, "DOWN"), 0.0);
-                projected_down_shares = 0.0;
+                projected_down_shares = (projected_down_shares - down_emergency_sell).max(0.0);
+                projected_cash_returned += down_emergency_sell * dn_bid;
+                if projected_down_shares <= 0.000001 {
+                    state.down_sold = true;
+                    self.weak_exit_insurance_reserve
+                        .insert(scalp_key(window_number, "DOWN"), 0.0);
+                    self.scalp_active_shares
+                        .insert(scalp_key(window_number, "DOWN"), 0.0);
+                    self.scalp_active_cost
+                        .insert(scalp_key(window_number, "DOWN"), 0.0);
+                }
                 signals.push(OrderSignal {
                     side: "DOWN".to_string(),
                     is_buy: false,
-                    amount: win_state.down_shares,
+                    amount: down_emergency_sell,
                     price: dn_bid,
-                    reason: "emergency_15pct_time_stop_bid_ge_0.20".to_string(),
+                    reason: format!(
+                        "emergency_15pct_time_stop_otm_surplus_bid_ge_0.20_p_{:.2}_keep_paired_{:.4}",
+                        down_win_probability,
+                        projected_up_shares.min(projected_down_shares),
+                    ),
                 });
             }
         }
@@ -770,24 +991,45 @@ impl TradeStrategy for DynamicGridStrategy {
         // ─── 1. МОНИТОРИНГ СЕТКИ ПРОДАЖ ДЛЯ СИЛЬНОЙ СТОРОНЫ ───
         if is_up_strong {
             // UP - Сильная нога
-            if !state.up_sold && win_state.up_shares > 0.0 {
+            if !state.up_sold && projected_up_shares > 0.0 {
                 let current_step = self.up_steps_hit.entry(window_number).or_insert(0);
                 if *current_step < strong_grid.len() {
                     let target = strong_grid[*current_step];
-                    if up_bid >= target {
+                    if up_bid >= target
+                        && strong_grid_step_allowed(
+                            *current_step,
+                            time_pct,
+                            up_bid,
+                            up_win_probability,
+                        )
+                    {
                         let hold_blocks_mid_exit = redeem_hold_active
                             && *current_step >= 1
                             && up_bid < REDEEM_HOLD_RELEASE_BID;
                         if !hold_blocks_mid_exit {
-                            let sell_amount = strong_grid_sell_amount(
+                            let proposed_sell_amount = strong_grid_sell_amount(
                                 win_state.initial_up_shares,
-                                win_state.up_shares,
-                                win_state.down_shares,
+                                projected_up_shares,
+                                projected_down_shares,
                                 *current_step,
                                 redeem_hold_active,
                                 up_bid,
-                                win_state.cash_returned,
+                                projected_cash_returned,
                                 win_state.spent,
+                            );
+                            let up_reserve = *self
+                                .weak_exit_insurance_reserve
+                                .get(&scalp_key(window_number, "UP"))
+                                .unwrap_or(&0.0);
+                            let up_is_itm = strong_side_is_itm(true, dev);
+                            let (sell_amount, insurance_tail_capped) = cap_sell_by_insurance_tail(
+                                proposed_sell_amount,
+                                projected_up_shares,
+                                up_reserve,
+                                up_bid,
+                                time_pct,
+                                up_is_itm,
+                                up_win_probability,
                             );
 
                             if sell_amount > 0.0 {
@@ -797,7 +1039,11 @@ impl TradeStrategy for DynamicGridStrategy {
                                     *current_step += 1;
                                 }
                                 projected_up_shares = (projected_up_shares - sell_amount).max(0.0);
-                                if !redeem_hold_active && *current_step >= strong_grid.len() {
+                                projected_cash_returned += sell_amount * up_bid;
+                                if !redeem_hold_active
+                                    && *current_step >= strong_grid.len()
+                                    && projected_up_shares <= 0.000001
+                                {
                                     state.up_sold = true;
                                 }
                                 if state.first_sold_side.is_none() {
@@ -810,20 +1056,24 @@ impl TradeStrategy for DynamicGridStrategy {
                                     amount: sell_amount,
                                     price: up_bid,
                                     reason: format!(
-                                        "tvds_strong_grid_exit_step_{}_{:.2}_zone_{}_usd_{:.2}_pct_{:.4}{}{}_vel_{}",
+                                        "tvds_strong_grid_exit_step_{}_{:.2}_p_{:.2}_edge_{:.2}_zone_{}_usd_{:.2}_pct_{:.4}{}{}{}_vel_{}",
                                         *current_step,
                                         target,
+                                        up_win_probability,
+                                        sell_edge(up_bid, up_win_probability),
                                         dev.zone.as_str(),
                                         dev.abs_usd,
                                         dev.pct_abs,
                                         if redeem_hold_active { "_redeem_hold_runner" } else { "" },
+                                        if insurance_tail_capped {
+                                            "_insurance_tail_kept"
+                                        } else {
+                                            ""
+                                        },
                                         if *current_step >= strong_grid.len()
                                             && up_bid < REDEEM_HOLD_RELEASE_BID
-                                            && sell_amount
-                                                < (win_state.up_shares
-                                                    - win_state.initial_up_shares
-                                                        * STRONG_GRID_RUNNER_FRACTION)
-                                                    .max(0.0)
+                                            && !insurance_tail_capped
+                                            && sell_amount + 0.000001 < proposed_sell_amount
                                         {
                                             "_paired_floor_protected"
                                         } else {
@@ -839,24 +1089,45 @@ impl TradeStrategy for DynamicGridStrategy {
             }
         } else {
             // DOWN - Сильная нога
-            if !state.down_sold && win_state.down_shares > 0.0 {
+            if !state.down_sold && projected_down_shares > 0.0 {
                 let current_step = self.dn_steps_hit.entry(window_number).or_insert(0);
                 if *current_step < strong_grid.len() {
                     let target = strong_grid[*current_step];
-                    if dn_bid >= target {
+                    if dn_bid >= target
+                        && strong_grid_step_allowed(
+                            *current_step,
+                            time_pct,
+                            dn_bid,
+                            down_win_probability,
+                        )
+                    {
                         let hold_blocks_mid_exit = redeem_hold_active
                             && *current_step >= 1
                             && dn_bid < REDEEM_HOLD_RELEASE_BID;
                         if !hold_blocks_mid_exit {
-                            let sell_amount = strong_grid_sell_amount(
+                            let proposed_sell_amount = strong_grid_sell_amount(
                                 win_state.initial_down_shares,
-                                win_state.down_shares,
-                                win_state.up_shares,
+                                projected_down_shares,
+                                projected_up_shares,
                                 *current_step,
                                 redeem_hold_active,
                                 dn_bid,
-                                win_state.cash_returned,
+                                projected_cash_returned,
                                 win_state.spent,
+                            );
+                            let down_reserve = *self
+                                .weak_exit_insurance_reserve
+                                .get(&scalp_key(window_number, "DOWN"))
+                                .unwrap_or(&0.0);
+                            let down_is_itm = strong_side_is_itm(false, dev);
+                            let (sell_amount, insurance_tail_capped) = cap_sell_by_insurance_tail(
+                                proposed_sell_amount,
+                                projected_down_shares,
+                                down_reserve,
+                                dn_bid,
+                                time_pct,
+                                down_is_itm,
+                                down_win_probability,
                             );
 
                             if sell_amount > 0.0 {
@@ -867,7 +1138,11 @@ impl TradeStrategy for DynamicGridStrategy {
                                 }
                                 projected_down_shares =
                                     (projected_down_shares - sell_amount).max(0.0);
-                                if !redeem_hold_active && *current_step >= strong_grid.len() {
+                                projected_cash_returned += sell_amount * dn_bid;
+                                if !redeem_hold_active
+                                    && *current_step >= strong_grid.len()
+                                    && projected_down_shares <= 0.000001
+                                {
                                     state.down_sold = true;
                                 }
                                 if state.first_sold_side.is_none() {
@@ -880,20 +1155,24 @@ impl TradeStrategy for DynamicGridStrategy {
                                     amount: sell_amount,
                                     price: dn_bid,
                                     reason: format!(
-                                        "tvds_strong_grid_exit_step_{}_{:.2}_zone_{}_usd_{:.2}_pct_{:.4}{}{}_vel_{}",
+                                        "tvds_strong_grid_exit_step_{}_{:.2}_p_{:.2}_edge_{:.2}_zone_{}_usd_{:.2}_pct_{:.4}{}{}{}_vel_{}",
                                         *current_step,
                                         target,
+                                        down_win_probability,
+                                        sell_edge(dn_bid, down_win_probability),
                                         dev.zone.as_str(),
                                         dev.abs_usd,
                                         dev.pct_abs,
                                         if redeem_hold_active { "_redeem_hold_runner" } else { "" },
+                                        if insurance_tail_capped {
+                                            "_insurance_tail_kept"
+                                        } else {
+                                            ""
+                                        },
                                         if *current_step >= strong_grid.len()
                                             && dn_bid < REDEEM_HOLD_RELEASE_BID
-                                            && sell_amount
-                                                < (win_state.down_shares
-                                                    - win_state.initial_down_shares
-                                                        * STRONG_GRID_RUNNER_FRACTION)
-                                                    .max(0.0)
+                                            && !insurance_tail_capped
+                                            && sell_amount + 0.000001 < proposed_sell_amount
                                         {
                                             "_paired_floor_protected"
                                         } else {
@@ -935,17 +1214,24 @@ impl TradeStrategy for DynamicGridStrategy {
             let avg_entry_price = active_scalp_cost / active_scalp_shares;
             let scalp_target = weak_scalp_exit_target(avg_entry_price, current_atr);
             if weak_bid >= scalp_target {
+                let scalp_sell_amount = active_scalp_shares.min(if weak_is_up {
+                    projected_up_shares
+                } else {
+                    projected_down_shares
+                });
                 self.scalp_active_shares.insert(weak_key.clone(), 0.0);
                 self.scalp_active_cost.insert(weak_key.clone(), 0.0);
                 scalp_exit_side = Some(weak_side.to_string());
+                if weak_is_up {
+                    projected_up_shares = (projected_up_shares - scalp_sell_amount).max(0.0);
+                } else {
+                    projected_down_shares = (projected_down_shares - scalp_sell_amount).max(0.0);
+                }
+                projected_cash_returned += scalp_sell_amount * weak_bid;
                 signals.push(OrderSignal {
                     side: weak_side.to_string(),
                     is_buy: false,
-                    amount: active_scalp_shares.min(if weak_is_up {
-                        win_state.up_shares
-                    } else {
-                        win_state.down_shares
-                    }),
+                    amount: scalp_sell_amount,
                     price: weak_bid,
                     reason: format!(
                         "weak_scalp_exit_{}_target_{:.2}_avg_{:.2}_vel_{}",
@@ -1019,6 +1305,17 @@ impl TradeStrategy for DynamicGridStrategy {
             };
             let second_is_current_strong = second_is_up == is_up_strong;
             let second_is_itm = strong_side_is_itm(second_is_up, dev);
+            let other_shares = if second_is_up {
+                projected_down_shares
+            } else {
+                projected_up_shares
+            };
+            let second_win_probability = if second_is_up {
+                up_win_probability
+            } else {
+                down_win_probability
+            };
+            let second_edge = sell_edge(second_bid, second_win_probability);
 
             if second_shares > 0.0
                 && !second_sold
@@ -1121,12 +1418,16 @@ impl TradeStrategy for DynamicGridStrategy {
                     weak_target = capital_protected_weak_exit_target(weak_target, time_pct);
                 }
 
-                if second_bid >= weak_target {
+                if second_bid >= weak_target
+                    && should_sell_by_probability(second_bid, second_win_probability)
+                {
                     should_sell = true;
                     reason_str = format!(
-                        "tvds_weak_exit_{}_bid_ge_{:.2}_zone_{}_usd_{:.2}_pct_{:.4}_vel_{}{}",
+                        "tvds_weak_exit_{}_bid_ge_{:.2}_p_{:.2}_edge_{:.2}_zone_{}_usd_{:.2}_pct_{:.4}_vel_{}{}",
                         zone_desc,
                         weak_target,
+                        second_win_probability,
+                        second_edge,
                         dev.zone.as_str(),
                         dev.abs_usd,
                         dev.pct_abs,
@@ -1142,12 +1443,17 @@ impl TradeStrategy for DynamicGridStrategy {
                 // 2. Дополнительная страховка: Окупаемость раунда по формуле безубытка в поздней фазе (60% - 80%)
                 if !should_sell && time_pct >= 60.0 && time_pct < 80.0 {
                     let min_safe_price =
-                        (win_state.spent - win_state.cash_returned) / second_shares;
-                    if min_safe_price > 0.0 && min_safe_price < 0.65 && second_bid >= min_safe_price
+                        (win_state.spent - projected_cash_returned) / second_shares;
+                    if min_safe_price > 0.0
+                        && min_safe_price < 0.65
+                        && second_bid >= min_safe_price
+                        && should_sell_by_probability(second_bid, second_win_probability)
                     {
                         should_sell = true;
-                        reason_str =
-                            format!("tvds_late_exact_breakeven_bid_ge_{:.2}", min_safe_price);
+                        reason_str = format!(
+                            "tvds_late_exact_breakeven_bid_ge_{:.2}_p_{:.2}_edge_{:.2}",
+                            min_safe_price, second_win_probability, second_edge
+                        );
                     }
                 }
 
@@ -1155,9 +1461,14 @@ impl TradeStrategy for DynamicGridStrategy {
                     let (sell_amount, reserve_shares, reserve_fraction) = weak_exit_sell_plan(
                         second_initial_shares,
                         second_shares,
+                        other_shares,
+                        second_bid,
+                        second_win_probability,
                         dev.zone,
                         time_pct,
                         capital_protected,
+                        win_state.spent,
+                        projected_cash_returned,
                     );
 
                     if sell_amount <= 0.000001 {
@@ -1188,6 +1499,16 @@ impl TradeStrategy for DynamicGridStrategy {
                         self.scalp_active_shares
                             .insert(second_key.clone(), new_active_shares);
                         self.scalp_active_cost.insert(second_key, new_active_cost);
+                    }
+
+                    if sold_all_second || reserve_shares <= 0.000001 {
+                        self.weak_exit_insurance_reserve
+                            .insert(scalp_key(window_number, second_side), 0.0);
+                    } else {
+                        self.weak_exit_insurance_reserve.insert(
+                            scalp_key(window_number, second_side),
+                            reserve_shares.min((second_shares - sell_amount).max(0.0)),
+                        );
                     }
 
                     signals.push(OrderSignal {

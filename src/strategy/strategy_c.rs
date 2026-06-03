@@ -1,7 +1,7 @@
 use crate::client::{MarketWindow, PricesState};
 use crate::config::Config;
 use crate::strategy::{
-    EntrySignal, OrderSignal, StrategyState, TradeStrategy, LEGACY_CHEAPER_SIDE_RATIO,
+    EntryMode, EntrySignal, OrderSignal, StrategyState, TradeStrategy, LEGACY_CHEAPER_SIDE_RATIO,
 };
 use crate::trader::WindowState;
 use std::collections::HashMap;
@@ -30,9 +30,12 @@ impl TradeStrategy for DynamicBreakEvenStrategy {
         &mut self,
         config: &Config,
         prices: &PricesState,
+        _market: &MarketWindow,
+        _spot_price: Option<f64>,
         window_number: usize,
         secs_to_start: i64,
         _current_btc_atr: f64,
+        _spot_signal: crate::strategy::SpotSignalSnapshot,
     ) -> Option<EntrySignal> {
         if !config.pre_start_entry.enabled {
             return None;
@@ -66,6 +69,7 @@ impl TradeStrategy for DynamicBreakEvenStrategy {
             down_ask: dn_ask,
             budget_multiplier: 1.0,
             cheaper_side_ratio: LEGACY_CHEAPER_SIDE_RATIO,
+            mode: EntryMode::Both,
             reason: "dynamic_breakeven_balanced_pre_start".to_string(),
         })
     }

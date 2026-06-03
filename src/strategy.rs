@@ -2,6 +2,7 @@ pub mod strategy_a;
 pub mod strategy_b;
 pub mod strategy_c;
 pub mod strategy_d;
+pub mod strategy_d1;
 
 use crate::client::{MarketWindow, PricesState};
 use crate::config::Config;
@@ -19,11 +20,18 @@ pub struct OrderSignal {
 }
 
 #[derive(Debug, Clone)]
+pub enum EntryMode {
+    Both,
+    OneSide(String),
+}
+
+#[derive(Debug, Clone)]
 pub struct EntrySignal {
     pub up_ask: f64,
     pub down_ask: f64,
     pub budget_multiplier: f64,
     pub cheaper_side_ratio: f64,
+    pub mode: EntryMode,
     pub reason: String,
 }
 
@@ -49,9 +57,12 @@ pub trait TradeStrategy {
         &mut self,
         config: &Config,
         prices: &PricesState,
+        market: &MarketWindow,
+        spot_price: Option<f64>,
         window_number: usize,
         secs_to_start: i64,
         current_btc_atr: f64,
+        spot_signal: SpotSignalSnapshot,
     ) -> Option<EntrySignal>;
 
     fn process_live_tick(
@@ -80,6 +91,7 @@ impl StrategyEngine {
             "asymmetric_ladder" => Box::new(strategy_b::AsymmetricLadderStrategy::new()),
             "dynamic_breakeven" => Box::new(strategy_c::DynamicBreakEvenStrategy::new()),
             "dynamic_grid" => Box::new(strategy_d::DynamicGridStrategy::new()),
+            "dynamic_grid_d1" => Box::new(strategy_d1::DynamicGridD1Strategy::new()),
             _ => Box::new(strategy_a::SimpleBothStrategy::new()),
         };
         Self {
@@ -91,16 +103,22 @@ impl StrategyEngine {
         &mut self,
         config: &Config,
         prices: &PricesState,
+        market: &MarketWindow,
+        spot_price: Option<f64>,
         window_number: usize,
         secs_to_start: i64,
         current_btc_atr: f64,
+        spot_signal: SpotSignalSnapshot,
     ) -> Option<EntrySignal> {
         self.active_strategy.check_pre_start_entry(
             config,
             prices,
+            market,
+            spot_price,
             window_number,
             secs_to_start,
             current_btc_atr,
+            spot_signal,
         )
     }
 
