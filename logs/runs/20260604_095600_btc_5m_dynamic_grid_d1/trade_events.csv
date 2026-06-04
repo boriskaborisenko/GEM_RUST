@@ -1,3 +1,4 @@
 timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
 1780567082351,1,btc-updown-5m-1780567200,BUY,UP,d1_one_leg_up_ask_0.51_fair_0.500_edge_-0.010_source_momentum_no_ptb_conf_2_ptb_known_false_discount_0.000_discount_req_0.035_combined_1.02_atr_102.44_atr_regime_storm_budget_mult_0.10,0.5100,5.88235294,3.0000,97.0000
 1780567383697,2,btc-updown-5m-1780567500,BUY,DOWN,d1_one_leg_down_ask_0.50_fair_0.500_edge_+0.000_source_momentum_no_ptb_conf_3_ptb_known_false_discount_0.020_discount_req_0.035_combined_1.02_atr_102.44_atr_regime_storm_budget_mult_0.10,0.5000,6.00000000,3.0000,94.0000
+1780567499694,1,btc-updown-5m-1780567200,EXPIRED,UP,option_expired_otm_loss_0.00,0.0000,5.88235294,0.0000,94.0000
