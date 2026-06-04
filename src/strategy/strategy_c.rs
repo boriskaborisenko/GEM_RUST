@@ -36,6 +36,7 @@ impl TradeStrategy for DynamicBreakEvenStrategy {
         secs_to_start: i64,
         _current_btc_atr: f64,
         _spot_signal: crate::strategy::SpotSignalSnapshot,
+        _llm_forecast: Option<crate::strategy::LlmForecast>,
     ) -> Option<EntrySignal> {
         if !config.pre_start_entry.enabled {
             return None;

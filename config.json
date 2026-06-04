@@ -1,5 +1,9 @@
 {
   "strategy": "dynamic_grid_d1",
+  "llm": {
+    "enabled": true,
+    "model": "gemini-3.5-flash"
+  },
   "minBtcAtr": 0.0,
   "session": {
     "startingBank": 100,

@@ -42,6 +42,16 @@ pub struct SpotSignalSnapshot {
     pub acceleration_usd_per_sec2: Option<f64>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct LlmForecast {
+    pub side: String,
+    pub confidence: f64,
+    pub signal_strength: String,
+    pub reason_short: String,
+    pub key_drivers: Vec<String>,
+    pub risk_note: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct StrategyState {
     pub up_sold: bool,
@@ -63,6 +73,7 @@ pub trait TradeStrategy {
         secs_to_start: i64,
         current_btc_atr: f64,
         spot_signal: SpotSignalSnapshot,
+        llm_forecast: Option<LlmForecast>,
     ) -> Option<EntrySignal>;
 
     fn process_live_tick(
@@ -109,6 +120,7 @@ impl StrategyEngine {
         secs_to_start: i64,
         current_btc_atr: f64,
         spot_signal: SpotSignalSnapshot,
+        llm_forecast: Option<LlmForecast>,
     ) -> Option<EntrySignal> {
         self.active_strategy.check_pre_start_entry(
             config,
@@ -119,6 +131,7 @@ impl StrategyEngine {
             secs_to_start,
             current_btc_atr,
             spot_signal,
+            llm_forecast,
         )
     }
 

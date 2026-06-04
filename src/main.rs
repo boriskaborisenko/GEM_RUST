@@ -9,20 +9,22 @@
 mod analytics;
 mod client;
 mod config;
+mod llm;
 mod strategy;
 mod trader;
 mod volatility;
 
 use client::{get_now_ms, MarketEvent, MarketWindow, PricesState};
 use config::Config;
+use llm::{LlmForecastRequest, LlmForecaster};
 use strategy::{
-    EntryMode, EntrySignal, OrderSignal, SpotSignalSnapshot, StrategyEngine,
+    EntryMode, EntrySignal, LlmForecast, OrderSignal, SpotSignalSnapshot, StrategyEngine,
     LEGACY_CHEAPER_SIDE_RATIO,
 };
 use trader::{Portfolio, WindowState};
 use volatility::VolatilityManager;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -46,6 +48,12 @@ struct AppState {
     shutdown_pending: bool,
     run_log_dir: String,
     spot_series: SpotSeries,
+    llm_forecaster: Option<Arc<LlmForecaster>>,
+    llm_forecasts: HashMap<usize, LlmForecast>,
+    llm_forecast_attempted: HashSet<usize>,
+    llm_forecast_scored: HashSet<usize>,
+    llm_correct: u32,
+    llm_wrong: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -252,6 +260,24 @@ async fn main() -> anyhow::Result<()> {
         run_log_dir.clone(),
     )));
     let strategy_engine = Arc::new(Mutex::new(StrategyEngine::new(&config.strategy)));
+    let llm_forecaster = if config.llm.enabled {
+        match LlmForecaster::new("llm.json", config.llm.model.clone()) {
+            Ok(forecaster) => {
+                println!(
+                    "[LLM] Vertex forecast enabled via llm.json | model: {}",
+                    config.llm.model
+                );
+                Some(Arc::new(forecaster))
+            }
+            Err(e) => {
+                println!("[LLM] Forecast disabled: {}", e);
+                None
+            }
+        }
+    } else {
+        println!("[LLM] Forecast disabled by config");
+        None
+    };
 
     let mut app_state = AppState {
         asset: asset.clone(),
@@ -272,6 +298,12 @@ async fn main() -> anyhow::Result<()> {
         shutdown_pending: false,
         run_log_dir,
         spot_series: SpotSeries::new(180, 12.0),
+        llm_forecaster,
+        llm_forecasts: HashMap::new(),
+        llm_forecast_attempted: HashSet::new(),
+        llm_forecast_scored: HashSet::new(),
+        llm_correct: 0,
+        llm_wrong: 0,
     };
 
     app_state
@@ -432,6 +464,173 @@ async fn find_and_subscribe_next(
     }
 }
 
+async fn get_or_request_llm_forecast(
+    app: &mut AppState,
+    next: &WindowState,
+    prices: &PricesState,
+    current_atr: f64,
+    secs_to_start: i64,
+) -> Option<LlmForecast> {
+    if !app.config.llm.enabled {
+        return None;
+    }
+    if let Some(existing) = app.llm_forecasts.get(&next.window_number) {
+        return Some(existing.clone());
+    }
+    if app.llm_forecast_attempted.contains(&next.window_number) {
+        return None;
+    }
+
+    app.llm_forecast_attempted.insert(next.window_number);
+    let Some(forecaster) = app.llm_forecaster.clone() else {
+        append_llm_forecast_event(
+            &app.run_log_dir,
+            next.window_number,
+            &next.market.slug,
+            None,
+            "disabled",
+            current_atr,
+            secs_to_start,
+            app.spot_price,
+            prices,
+            app.spot_series.snapshot(),
+            None,
+            None,
+        );
+        return None;
+    };
+
+    let request = LlmForecastRequest {
+        asset: app.asset.clone(),
+        interval: app.interval.clone(),
+        current_time_utc: chrono::Utc::now().to_rfc3339(),
+        current_spot: app.spot_price,
+        current_atr,
+        prices: prices.clone(),
+        market: next.market.clone(),
+        secs_to_start,
+        spot_signal: app.spot_series.snapshot(),
+    };
+
+    match tokio::time::timeout(Duration::from_secs(8), forecaster.forecast(request)).await {
+        Ok(Ok(forecast)) => {
+            app.system_logs.push(format!(
+                "[LLM] Forecast Window #{}: {} {:.2} ({})",
+                next.window_number, forecast.side, forecast.confidence, forecast.signal_strength
+            ));
+            append_llm_forecast_event(
+                &app.run_log_dir,
+                next.window_number,
+                &next.market.slug,
+                Some(&forecast),
+                "ok",
+                current_atr,
+                secs_to_start,
+                app.spot_price,
+                prices,
+                app.spot_series.snapshot(),
+                None,
+                None,
+            );
+            app.llm_forecasts
+                .insert(next.window_number, forecast.clone());
+            Some(forecast)
+        }
+        Ok(Err(err)) => {
+            let err_text = err.to_string();
+            app.system_logs.push(format!(
+                "[LLM] Forecast Window #{} failed: {}",
+                next.window_number, err_text
+            ));
+            append_llm_forecast_event(
+                &app.run_log_dir,
+                next.window_number,
+                &next.market.slug,
+                None,
+                &err_text,
+                current_atr,
+                secs_to_start,
+                app.spot_price,
+                prices,
+                app.spot_series.snapshot(),
+                None,
+                None,
+            );
+            None
+        }
+        Err(_) => {
+            let err_text = "timeout_8s";
+            app.system_logs.push(format!(
+                "[LLM] Forecast Window #{} failed: {}",
+                next.window_number, err_text
+            ));
+            append_llm_forecast_event(
+                &app.run_log_dir,
+                next.window_number,
+                &next.market.slug,
+                None,
+                err_text,
+                current_atr,
+                secs_to_start,
+                app.spot_price,
+                prices,
+                app.spot_series.snapshot(),
+                None,
+                None,
+            );
+            None
+        }
+    }
+}
+
+fn record_llm_result(
+    app: &mut AppState,
+    window_number: usize,
+    market: &MarketWindow,
+    spot_price: Option<f64>,
+    prices: &PricesState,
+) {
+    if app.llm_forecast_scored.contains(&window_number) {
+        return;
+    }
+    let Some(forecast) = app.llm_forecasts.get(&window_number).cloned() else {
+        return;
+    };
+    let winner = match (spot_price, market.price_to_beat) {
+        (Some(spot), Some(ptb)) if ptb > 0.0 && spot > ptb => "UP",
+        (Some(_), Some(ptb)) if ptb > 0.0 => "DOWN",
+        _ => return,
+    };
+    let correct = forecast.side == winner;
+    if correct {
+        app.llm_correct += 1;
+    } else {
+        app.llm_wrong += 1;
+    }
+    app.llm_forecast_scored.insert(window_number);
+    app.system_logs.push(format!(
+        "[LLM] Result Window #{}: forecast {} | winner {} | {}",
+        window_number,
+        forecast.side,
+        winner,
+        if correct { "RIGHT" } else { "WRONG" }
+    ));
+    append_llm_forecast_event(
+        &app.run_log_dir,
+        window_number,
+        &market.slug,
+        Some(&forecast),
+        "result",
+        app.volatility_mgr.get_current_atr(),
+        0,
+        spot_price,
+        prices,
+        app.spot_series.snapshot(),
+        Some(winner),
+        Some(correct),
+    );
+}
+
 /**
  * Monitor time boundaries: Time Stop, safety close, and NEXT window promotion.
  */
@@ -446,7 +645,7 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
     let mut next_market_opt = None;
     let mut entry_signal_opt: Option<EntrySignal> = None;
 
-    if let Some(next) = &app.next_window {
+    if let Some(next) = app.next_window.clone() {
         if next.status == "WAITING_ENTRY" {
             if let Ok(start) = chrono::DateTime::parse_from_rfc3339(&next.market.start_time) {
                 let secs_to_start = (start.timestamp_millis() - now) / 1000;
@@ -471,6 +670,14 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
                         }
                     } else {
                         let prices = next.prices.clone();
+                        let llm_forecast = get_or_request_llm_forecast(
+                            app,
+                            &next,
+                            &prices,
+                            current_atr,
+                            secs_to_start,
+                        )
+                        .await;
                         let mut strat = app.strategy.lock().unwrap();
                         if let Some(entry) = strat.check_pre_start_entry(
                             &app.config,
@@ -481,6 +688,7 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
                             secs_to_start,
                             current_atr,
                             app.spot_series.snapshot(),
+                            llm_forecast,
                         ) {
                             trigger_buy = true;
                             up_ask_val = entry.up_ask;
@@ -583,6 +791,7 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
                     window_num,
                     &next_market.slug,
                     &entry_signal,
+                    app.llm_forecasts.get(&window_num),
                     app.volatility_mgr.get_current_atr(),
                     total_cost,
                     buy_up_usd,
@@ -628,12 +837,20 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
                         "[SAFETY CLOSE] Window #{} past end time ({}s). Force closing.",
                         current.window_number, secs_to_end
                     ));
-                    let mut port = app.portfolio.lock().unwrap();
-                    port.close_window(current.window_number, "CLOSED_TIME", app.spot_price);
-
-                    let updated =
-                        port.get_or_create_window_state(current.window_number, "", &current.market);
-                    app.current_window = Some(updated.clone());
+                    let updated = {
+                        let mut port = app.portfolio.lock().unwrap();
+                        port.close_window(current.window_number, "CLOSED_TIME", app.spot_price);
+                        port.get_or_create_window_state(current.window_number, "", &current.market)
+                            .clone()
+                    };
+                    record_llm_result(
+                        app,
+                        current.window_number,
+                        &updated.market,
+                        app.spot_price,
+                        &updated.prices,
+                    );
+                    app.current_window = Some(updated);
                 }
             }
         }
@@ -653,14 +870,25 @@ async fn promote_next_to_current(
     };
 
     // Close old CURRENT window if still open
-    if let Some(curr) = &app.current_window {
+    if let Some(curr) = app.current_window.clone() {
         if curr.status == "LIVE" || curr.status == "SKIPPED" {
             app.system_logs.push(format!(
                 "[Lifecycle] Force closing overlapping CURRENT Window #{}",
                 curr.window_number
             ));
-            let mut port = app.portfolio.lock().unwrap();
-            port.close_window(curr.window_number, "CLOSED_TIME", app.spot_price);
+            let updated = {
+                let mut port = app.portfolio.lock().unwrap();
+                port.close_window(curr.window_number, "CLOSED_TIME", app.spot_price);
+                port.get_or_create_window_state(curr.window_number, "", &curr.market)
+                    .clone()
+            };
+            record_llm_result(
+                app,
+                curr.window_number,
+                &updated.market,
+                app.spot_price,
+                &updated.prices,
+            );
         }
     }
 
@@ -908,6 +1136,24 @@ fn render_dashboard(app: &AppState) {
         paint(&format!("Asset: {}", app.asset), "cyan"),
         paint(&format!("Interval: {}", app.interval), "cyan")
     );
+    let llm_total = app.llm_correct + app.llm_wrong;
+    let llm_accuracy = if llm_total > 0 {
+        (app.llm_correct as f64 / llm_total as f64) * 100.0
+    } else {
+        0.0
+    };
+    let llm_enabled = app.config.llm.enabled && app.llm_forecaster.is_some();
+    println!(
+        "  LLM-forecast: {} | Model: {} | Right {} | Wrong {} | Acc {:.1}%",
+        paint(
+            if llm_enabled { "enabled" } else { "disabled" },
+            if llm_enabled { "green" } else { "dim" }
+        ),
+        paint(&app.config.llm.model, "cyan"),
+        paint(&app.llm_correct.to_string(), "green"),
+        paint(&app.llm_wrong.to_string(), "red"),
+        llm_accuracy
+    );
     if app.shutdown_pending {
         println!(
             "  {}",
@@ -1009,14 +1255,27 @@ fn render_dashboard(app: &AppState) {
         }
     }
 
+    let current_llm = current_window
+        .as_ref()
+        .and_then(|win| app.llm_forecasts.get(&win.window_number));
+    let next_llm = next_window
+        .as_ref()
+        .and_then(|win| app.llm_forecasts.get(&win.window_number));
+
     let left_lines = render_window_block(
         &current_window,
         "CURRENT",
         app.spot_price,
         app.strategy.clone(),
+        current_llm,
     );
-    let right_lines =
-        render_window_block(&next_window, "NEXT", app.spot_price, app.strategy.clone());
+    let right_lines = render_window_block(
+        &next_window,
+        "NEXT",
+        app.spot_price,
+        app.strategy.clone(),
+        next_llm,
+    );
 
     // Render blocks vertically
     for line in left_lines {
@@ -1060,6 +1319,7 @@ fn render_window_block(
     label: &str,
     spot_price: Option<f64>,
     strategy: Arc<Mutex<StrategyEngine>>,
+    llm_forecast: Option<&LlmForecast>,
 ) -> Vec<String> {
     let mut lines = vec![];
 
@@ -1177,6 +1437,21 @@ fn render_window_block(
         "Combined Ask:    {}",
         paint(&format!("{:.2}", UP.ask + DN.ask), "bold")
     ));
+    if let Some(forecast) = llm_forecast {
+        let tone = if forecast.side == "UP" {
+            "green"
+        } else {
+            "red"
+        };
+        lines.push(format!(
+            "LLM Forecast: {} | conf {:.2} | {}",
+            paint(&forecast.side, tone),
+            forecast.confidence,
+            paint(&forecast.signal_strength, "yellow")
+        ));
+    } else {
+        lines.push(format!("LLM Forecast: {}", paint("N/A", "dim")));
+    }
     lines.push(paint("--------------------------------------", "dim"));
 
     // Display Account position
@@ -1338,11 +1613,21 @@ fn append_csv_row(log_dir: &str, file_name: &str, header: &str, row: &str) {
     }
 }
 
+fn csv_cell(value: &str) -> String {
+    let escaped = value.replace('"', "\"\"").replace('\n', " ");
+    if escaped.contains(',') || escaped.contains('"') || escaped.contains('\r') {
+        format!("\"{}\"", escaped)
+    } else {
+        escaped
+    }
+}
+
 fn append_entry_event(
     log_dir: &str,
     window_number: usize,
     slug: &str,
     entry: &EntrySignal,
+    llm_forecast: Option<&LlmForecast>,
     current_atr: f64,
     total_budget: f64,
     buy_up_usd: f64,
@@ -1355,15 +1640,29 @@ fn append_entry_event(
     append_csv_row(
         log_dir,
         "entry_events.csv",
-        "timestamp,window_id,slug,reason,entry_mode,entry_side,current_atr,up_ask,down_ask,budget_multiplier,cheaper_side_ratio,total_budget,buy_up_usd,buy_up_shares,buy_down_usd,buy_down_shares",
+        "timestamp,window_id,slug,reason,entry_mode,entry_side,llm_side,llm_confidence,llm_strength,llm_reason,current_atr,up_ask,down_ask,budget_multiplier,cheaper_side_ratio,total_budget,buy_up_usd,buy_up_shares,buy_down_usd,buy_down_shares",
         &format!(
-            "{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.8},{:.4},{:.8}",
+            "{},{},{},{},{},{},{},{:.4},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.8},{:.4},{:.8}",
             get_now_ms(),
             window_number,
             slug,
-            entry.reason,
+            csv_cell(&entry.reason),
             entry_mode,
             entry_side,
+            llm_forecast
+                .map(|forecast| forecast.side.as_str())
+                .unwrap_or(""),
+            llm_forecast
+                .map(|forecast| forecast.confidence)
+                .unwrap_or(0.0),
+            llm_forecast
+                .map(|forecast| forecast.signal_strength.as_str())
+                .unwrap_or(""),
+            csv_cell(
+                llm_forecast
+                    .map(|forecast| forecast.reason_short.as_str())
+                    .unwrap_or("")
+            ),
             current_atr,
             entry.up_ask,
             entry.down_ask,
@@ -1382,6 +1681,79 @@ fn append_entry_event(
             } else {
                 0.0
             }
+        ),
+    );
+}
+
+fn append_llm_forecast_event(
+    log_dir: &str,
+    window_number: usize,
+    slug: &str,
+    forecast: Option<&LlmForecast>,
+    status: &str,
+    current_atr: f64,
+    secs_to_start: i64,
+    spot_price: Option<f64>,
+    prices: &PricesState,
+    spot_signal: SpotSignalSnapshot,
+    result_winner: Option<&str>,
+    result_correct: Option<bool>,
+) {
+    append_csv_row(
+        log_dir,
+        "llm_forecasts.csv",
+        "timestamp,window_id,slug,status,llm_side,llm_confidence,llm_strength,llm_reason,llm_risk,key_drivers,result_winner,result_correct,current_atr,secs_to_start,spot_price,spot_velocity_usd_per_sec,spot_smoothed_velocity_usd_per_sec,spot_acceleration_usd_per_sec2,up_bid,up_ask,down_bid,down_ask",
+        &format!(
+            "{},{},{},{},{},{:.4},{},{},{},{},{},{},{:.4},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4}",
+            get_now_ms(),
+            window_number,
+            slug,
+            csv_cell(status),
+            forecast.map(|forecast| forecast.side.as_str()).unwrap_or(""),
+            forecast.map(|forecast| forecast.confidence).unwrap_or(0.0),
+            forecast
+                .map(|forecast| forecast.signal_strength.as_str())
+                .unwrap_or(""),
+            csv_cell(
+                forecast
+                    .map(|forecast| forecast.reason_short.as_str())
+                    .unwrap_or("")
+            ),
+            csv_cell(
+                forecast
+                    .map(|forecast| forecast.risk_note.as_str())
+                    .unwrap_or("")
+            ),
+            csv_cell(
+                &forecast
+                    .map(|forecast| forecast.key_drivers.join(" | "))
+                    .unwrap_or_default()
+            ),
+            result_winner.unwrap_or(""),
+            result_correct
+                .map(|correct| if correct { "true" } else { "false" })
+                .unwrap_or(""),
+            current_atr,
+            secs_to_start,
+            spot_price
+                .map(|p| format!("{:.4}", p))
+                .unwrap_or_else(|| "".to_string()),
+            spot_signal
+                .raw_velocity_usd_per_sec
+                .map(|v| format!("{:.6}", v))
+                .unwrap_or_else(|| "".to_string()),
+            spot_signal
+                .smoothed_velocity_usd_per_sec
+                .map(|v| format!("{:.6}", v))
+                .unwrap_or_else(|| "".to_string()),
+            spot_signal
+                .acceleration_usd_per_sec2
+                .map(|v| format!("{:.6}", v))
+                .unwrap_or_else(|| "".to_string()),
+            prices.up.bid,
+            prices.up.ask,
+            prices.down.bid,
+            prices.down.ask,
         ),
     );
 }

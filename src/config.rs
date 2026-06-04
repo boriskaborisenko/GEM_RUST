@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -51,8 +51,53 @@ pub struct DynamicBreakevenConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct LlmConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_llm_model")]
+    pub model: String,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: default_llm_model(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LlmConfigWire {
+    Bool(bool),
+    Object(LlmConfig),
+}
+
+fn default_llm_model() -> String {
+    "gemini-3.5-flash".to_string()
+}
+
+fn deserialize_llm_config<'de, D>(deserializer: D) -> Result<LlmConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let wire = Option::<LlmConfigWire>::deserialize(deserializer)?;
+    Ok(match wire {
+        Some(LlmConfigWire::Bool(enabled)) => LlmConfig {
+            enabled,
+            ..LlmConfig::default()
+        },
+        Some(LlmConfigWire::Object(config)) => config,
+        None => LlmConfig::default(),
+    })
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub strategy: String,
+    #[serde(default, deserialize_with = "deserialize_llm_config")]
+    pub llm: LlmConfig,
     #[serde(rename = "minBtcAtr")]
     pub min_btc_atr: f64,
     pub session: SessionConfig,

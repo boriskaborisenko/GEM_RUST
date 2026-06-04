@@ -6,6 +6,7 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
 const BYBIT_WS_URL: &str = "wss://stream.bybit.com/v5/public/linear";
 const ATR_PERIOD: usize = 14;
+type DynError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug, Default, Clone)]
 struct Bar {
@@ -49,8 +50,57 @@ impl VolatilityManager {
     }
 
     /// Загружает исторические свечи через REST API Bybit для мгновенного прогрева ATR при старте
-    pub async fn warmup_from_rest(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let client = reqwest::Client::new();
+    pub async fn warmup_from_rest(&self) -> Result<(), DynError> {
+        let client = reqwest::Client::builder()
+            .user_agent("GEM_RUST ATR warmup/0.1")
+            .build()?;
+
+        let (source, temp_history) = match Self::fetch_bybit_bars(&client).await {
+            Ok(bars) => ("Bybit REST", bars),
+            Err(bybit_err) => {
+                eprintln!(
+                    "[ATR Warmup] Bybit REST недоступен: {}. Пробуем Binance REST fallback...",
+                    bybit_err
+                );
+                match Self::fetch_binance_bars(&client).await {
+                    Ok(bars) => ("Binance REST fallback", bars),
+                    Err(binance_err) => {
+                        return Err(format!(
+                            "ATR REST warmup failed. Bybit: {} | Binance: {}",
+                            bybit_err, binance_err
+                        )
+                        .into());
+                    }
+                }
+            }
+        };
+
+        // Вычисляем начальный ATR по истории
+        let mut history = vec![];
+        let mut calculated_atr = 0.0;
+
+        for bar in temp_history {
+            if let Some(new_atr) = Self::calculate_next_atr(&mut history, bar) {
+                calculated_atr = new_atr;
+            }
+        }
+
+        // Записываем прогретый ATR в стейт
+        if calculated_atr > 0.0 {
+            let mut atr_lock = self.current_atr.lock().unwrap();
+            *atr_lock = calculated_atr;
+            println!(
+                "[ATR Warmup] Успешный мгновенный прогрев через {}! Стартовый ATR: {:.2} USD (на базе {} свечей)",
+                source,
+                calculated_atr,
+                history.len()
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn fetch_bybit_bars(client: &reqwest::Client) -> Result<Vec<Bar>, DynError> {
         // Загружаем последние 50 минутных свечей BTCUSDT
         let url = "https://api.bybit.com/v5/market/kline?category=linear&symbol=BTCUSDT&interval=1&limit=50";
 
@@ -68,40 +118,61 @@ impl VolatilityManager {
             .as_array()
             .ok_or("result.list not found in Bybit response")?;
 
-        let mut temp_history = vec![];
-
+        let mut bars = vec![];
         // Bybit возвращает свечи от новых к старым (descending), обходим в обратном порядке (ascending)
         for item in list.iter().rev() {
-            let item_arr = item.as_array().ok_or("kline item is not an array")?;
+            let item_arr = item.as_array().ok_or("Bybit kline item is not an array")?;
             if item_arr.len() < 5 {
                 continue;
             }
-            let high: f64 = item_arr[2].as_str().unwrap_or("0.0").parse()?;
-            let low: f64 = item_arr[3].as_str().unwrap_or("0.0").parse()?;
-            let close: f64 = item_arr[4].as_str().unwrap_or("0.0").parse()?;
-
-            let bar = Bar { high, low, close };
-            temp_history.push(bar);
+            bars.push(Bar {
+                high: item_arr[2].as_str().unwrap_or("0.0").parse()?,
+                low: item_arr[3].as_str().unwrap_or("0.0").parse()?,
+                close: item_arr[4].as_str().unwrap_or("0.0").parse()?,
+            });
         }
 
-        // Вычисляем начальный ATR по истории
-        let mut history = vec![];
-        let mut calculated_atr = 0.0;
+        if bars.len() <= ATR_PERIOD {
+            return Err(format!("Bybit returned too few candles: {}", bars.len()).into());
+        }
 
-        for bar in temp_history {
-            if let Some(new_atr) = Self::calculate_next_atr(&mut history, bar) {
-                calculated_atr = new_atr;
+        Ok(bars)
+    }
+
+    async fn fetch_binance_bars(client: &reqwest::Client) -> Result<Vec<Bar>, DynError> {
+        let url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=50";
+
+        let resp = client.get(url).send().await?;
+        if !resp.status().is_success() {
+            return Err(format!("Binance REST error: {}", resp.status()).into());
+        }
+
+        let list: serde_json::Value = resp.json().await?;
+        let arr = list
+            .as_array()
+            .ok_or("Binance kline response is not an array")?;
+
+        let mut bars = vec![];
+        // Binance возвращает свечи от старых к новым (ascending)
+        for item in arr {
+            let item_arr = item
+                .as_array()
+                .ok_or("Binance kline item is not an array")?;
+            if item_arr.len() < 5 {
+                continue;
             }
+            bars.push(Bar {
+                high: item_arr[2].as_str().unwrap_or("0.0").parse()?,
+                low: item_arr[3].as_str().unwrap_or("0.0").parse()?,
+                close: item_arr[4].as_str().unwrap_or("0.0").parse()?,
+            });
         }
 
-        // Записываем прогретый ATR в стейт
-        if calculated_atr > 0.0 {
-            let mut atr_lock = self.current_atr.lock().unwrap();
-            *atr_lock = calculated_atr;
-            println!("[ATR Warmup] Успешный мгновенный прогрев через REST API! Стартовый ATR: {:.2} USD (на базе {} свечей)", calculated_atr, history.len());
+        if bars.len() <= ATR_PERIOD {
+            return Err(format!("Binance returned too few candles: {}", bars.len()).into());
         }
 
-        Ok(())
+        Ok(bars)
     }
 
     /// Запускает асинхронный фоновый поток, который бесконечно слушает биржу

@@ -684,6 +684,7 @@ impl TradeStrategy for DynamicGridStrategy {
         secs_to_start: i64,
         current_btc_atr: f64,
         _spot_signal: SpotSignalSnapshot,
+        _llm_forecast: Option<crate::strategy::LlmForecast>,
     ) -> Option<EntrySignal> {
         if !config.pre_start_entry.enabled {
             return None;
