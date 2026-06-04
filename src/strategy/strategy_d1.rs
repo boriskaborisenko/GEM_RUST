@@ -1,8 +1,7 @@
 use crate::client::{MarketWindow, PricesState};
 use crate::config::Config;
 use crate::strategy::{
-    EntryMode, EntrySignal, LlmForecast, OrderSignal, SpotSignalSnapshot, StrategyState,
-    TradeStrategy,
+    EntryMode, EntrySignal, OrderSignal, SpotSignalSnapshot, StrategyState, TradeStrategy,
 };
 use crate::trader::WindowState;
 use std::collections::{HashMap, HashSet};
@@ -35,9 +34,6 @@ const D1_MIN_LOCK_PAIR_SHARES: f64 = 0.25;
 const D1_MIN_TRADE_USD: f64 = 1.0;
 const D1_PRESTART_SIGNAL_MIN_CONFIRMATIONS: usize = 2;
 const D1_PRESTART_SIGNAL_MAX_NEG_EDGE: f64 = -0.020;
-const D1_LLM_PRESTART_MIN_CONF_15M: f64 = 0.60;
-const D1_LLM_PRESTART_MIN_CONF_FAST: f64 = 0.68;
-const D1_LLM_PRESTART_MAX_NEG_EDGE: f64 = -0.020;
 const D1_SLEEP_TIME_PCT: f64 = 5.0;
 const D1_SLEEP_MIN_SECONDS: f64 = 25.0;
 const D1_HEDGE_MIN_WRONG_PCT: f64 = 0.010;
@@ -509,67 +505,6 @@ fn bootstrap_random_side(window_number: usize, market: &MarketWindow) -> &'stati
     }
 }
 
-fn llm_prestart_min_confidence(market: &MarketWindow) -> f64 {
-    if market_duration_sec(market) >= 900.0 {
-        D1_LLM_PRESTART_MIN_CONF_15M
-    } else {
-        D1_LLM_PRESTART_MIN_CONF_FAST
-    }
-}
-
-fn llm_strength_is_usable(strength: &str) -> bool {
-    matches!(strength.trim().to_lowercase().as_str(), "medium" | "strong")
-}
-
-fn llm_prior_probability(confidence: f64) -> f64 {
-    (0.50 + (confidence.clamp(0.50, 0.90) - 0.50) * 0.50).clamp(0.50, 0.70)
-}
-
-fn qualified_llm_prestart_side(
-    forecast: Option<&LlmForecast>,
-    config: &Config,
-    prices: &PricesState,
-    market: &MarketWindow,
-    fair_up: f64,
-) -> Option<(String, f64, f64, f64, String)> {
-    let forecast = forecast?;
-    let side = forecast.side.trim().to_uppercase();
-    if side != "UP" && side != "DOWN" {
-        return None;
-    }
-
-    if forecast.confidence < llm_prestart_min_confidence(market)
-        || !llm_strength_is_usable(&forecast.signal_strength)
-    {
-        return None;
-    }
-
-    let ask = side_ask(&side, prices);
-    if ask < config.pre_start_entry.min_side_ask || ask > config.pre_start_entry.max_side_ask {
-        return None;
-    }
-
-    let model_fair = side_fair_probability(&side, fair_up);
-    let llm_fair = llm_prior_probability(forecast.confidence);
-    let blended_fair = model_fair.max(llm_fair);
-    let edge = blended_fair - ask;
-    if edge < D1_LLM_PRESTART_MAX_NEG_EDGE {
-        return None;
-    }
-
-    Some((
-        side,
-        ask,
-        edge,
-        blended_fair,
-        format!(
-            "llm_prior_conf_{:.2}_strength_{}",
-            forecast.confidence,
-            forecast.signal_strength.trim().to_lowercase()
-        ),
-    ))
-}
-
 fn has_counter_velocity(side: &str, spot_signal: SpotSignalSnapshot) -> bool {
     let side_sign = if side == "UP" { 1.0 } else { -1.0 };
     spot_signal
@@ -752,7 +687,7 @@ impl TradeStrategy for DynamicGridD1Strategy {
         secs_to_start: i64,
         current_btc_atr: f64,
         spot_signal: SpotSignalSnapshot,
-        llm_forecast: Option<LlmForecast>,
+        _llm_forecast: Option<crate::strategy::LlmForecast>,
     ) -> Option<EntrySignal> {
         if !config.pre_start_entry.enabled || self.entered_windows.contains(&window_number) {
             return None;
@@ -792,8 +727,6 @@ impl TradeStrategy for DynamicGridD1Strategy {
         let ptb_known = market.price_to_beat.is_some() && spot_price.is_some();
         let atr_regime = D1AtrRegime::from_atr(current_btc_atr);
         let momentum_signal = prestart_momentum_side(spot_signal);
-        let llm_candidate =
-            qualified_llm_prestart_side(llm_forecast.as_ref(), config, prices, market, fair_up);
         let (fair_side, fair_ask, fair_edge, fair_probability) = if up_edge >= down_edge {
             ("UP", up_ask, up_edge, fair_up)
         } else {
@@ -814,10 +747,6 @@ impl TradeStrategy for DynamicGridD1Strategy {
                     "directional".to_string(),
                     0,
                 )
-            } else if let Some((llm_side, llm_ask, llm_edge, llm_probability, llm_source)) =
-                llm_candidate
-            {
-                (llm_side, llm_ask, llm_edge, llm_probability, llm_source, 0)
             } else if let Some((signal_side, signal_confirmations)) = momentum_signal {
                 let signal_ask = side_ask(signal_side, prices);
                 let signal_fair = side_fair_probability(signal_side, fair_up);
@@ -854,15 +783,7 @@ impl TradeStrategy for DynamicGridD1Strategy {
                 return None;
             };
 
-        let (min_entry_ask, max_entry_ask) = if entry_source.starts_with("llm_prior") {
-            (
-                config.pre_start_entry.min_side_ask,
-                config.pre_start_entry.max_side_ask,
-            )
-        } else {
-            (D1_FIRST_LEG_MIN_ASK, D1_FIRST_LEG_MAX_ASK)
-        };
-        if !(min_entry_ask..=max_entry_ask).contains(&first_ask) {
+        if !(D1_FIRST_LEG_MIN_ASK..=D1_FIRST_LEG_MAX_ASK).contains(&first_ask) {
             return None;
         }
 

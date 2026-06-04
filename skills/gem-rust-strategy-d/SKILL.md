@@ -72,7 +72,7 @@ First review should focus on expectancy, not winrate:
 - hedge cost vs hedge rescue value,
 - tail liquidation loss,
 - slippage sensitivity at +/-0.01 and +/-0.02,
-- for LLM-driven entries, whether the rolling last-10-window context was informative or misleading,
+- if LLM observer mode was enabled, whether it provided useful directional signal before considering re-enabling it,
 - entry frequency and skipped-window reasons,
 - WeakScalp rarity/usefulness and loss-size impact compared with the old `dynamic_buy_*` logs,
 - whether velocity-aware SELL-grid changes improved exits,

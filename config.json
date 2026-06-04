@@ -1,7 +1,7 @@
 {
-  "strategy": "dynamic_grid_d1",
+  "strategy": "dynamic_grid_dx",
   "llm": {
-    "enabled": true,
+    "enabled": false,
     "model": "gemini-3.5-flash",
     "location": "global"
   },

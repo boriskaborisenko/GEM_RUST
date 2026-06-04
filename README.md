@@ -22,7 +22,7 @@ This project is experimental research code. It is designed for paper execution, 
 {
   "strategy": "dynamic_grid_d1",
   "llm": {
-    "enabled": true,
+    "enabled": false,
     "model": "gemini-3.5-flash",
     "location": "global"
   }
@@ -52,16 +52,10 @@ Important semantics:
 D1 chooses the first side by priority:
 
 1. Strong local directional/fair signal when PTB and spot context are available.
-2. Qualified LLM forecast.
-3. Momentum signal from spot velocity/acceleration.
-4. First-window bootstrap fallback only when there is no signal history.
+2. Momentum signal from spot velocity/acceleration.
+3. First-window bootstrap fallback only when there is no signal history.
 
-LLM thresholds are **confidence**, not contract price:
-
-- `15m`: LLM confidence must be at least `0.60`.
-- Faster windows such as `5m`: LLM confidence must be at least `0.68`.
-- LLM strength must be `medium` or `strong`.
-- The actual BUY ask still must be inside `preStartEntry.minSideAsk..maxSideAsk`.
+LLM is currently disabled and D1 ignores LLM forecasts for BUY side selection. Recent logs showed that `llm_prior` entries had negative expectancy and weak directional accuracy, especially on the priority 15m interval.
 
 Current ask range:
 
@@ -76,7 +70,7 @@ So normal future-window prices around `0.47-0.54` are allowed.
 
 ## LLM Forecasting
 
-LLM is optional and configured under `llm` in `config.json`.
+LLM is optional and configured under `llm` in `config.json`, but it is currently disabled.
 
 Credentials:
 
@@ -92,11 +86,11 @@ Startup behavior:
 
 Runtime behavior:
 
-- One forecast is requested per upcoming window.
+- When enabled for research, one forecast is requested per upcoming window.
 - The forecast prompt includes rolling context from the last 10 closed windows in the same process: avg/median PnL, max drawdown, entry-side accuracy, LLM accuracy, runner redeem rate, hedge cost/rescue PnL, tail liquidation value, slippage sensitivity, winner counts, and compact per-window rows.
 - Terminal shows LLM status, model, location, right/wrong count, and accuracy.
 - Forecast rows and result rows are written to `llm_forecasts.csv`.
-- Entry rows include LLM side/confidence next to the actual entry side.
+- Entry rows can include LLM side/confidence next to the actual entry side, but D1 does not use LLM to choose BUY side.
 
 ## Project Map
 
@@ -235,7 +229,7 @@ Look at:
 - tail liquidation loss;
 - slippage sensitivity at `+/-0.01` and `+/-0.02`;
 - whether the chosen first side matches the eventual winner;
-- whether LLM improves side choice on 15m without damaging 5m;
+- whether any future LLM observer mode provides useful signal before re-enabling it;
 - whether correct runners are left alone long enough to redeem;
 - whether hedge buys are timely and not too early;
 - whether weak tails are sold only when bid overpays probability;

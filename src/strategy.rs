@@ -3,6 +3,7 @@ pub mod strategy_b;
 pub mod strategy_c;
 pub mod strategy_d;
 pub mod strategy_d1;
+pub mod strategy_dx;
 
 use crate::client::{MarketWindow, PricesState};
 use crate::config::Config;
@@ -103,6 +104,7 @@ impl StrategyEngine {
             "dynamic_breakeven" => Box::new(strategy_c::DynamicBreakEvenStrategy::new()),
             "dynamic_grid" => Box::new(strategy_d::DynamicGridStrategy::new()),
             "dynamic_grid_d1" => Box::new(strategy_d1::DynamicGridD1Strategy::new()),
+            "dynamic_grid_dx" => Box::new(strategy_dx::DynamicGridDxStrategy::new()),
             _ => Box::new(strategy_a::SimpleBothStrategy::new()),
         };
         Self {
