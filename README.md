@@ -93,6 +93,7 @@ Startup behavior:
 Runtime behavior:
 
 - One forecast is requested per upcoming window.
+- The forecast prompt includes rolling context from the last 10 closed windows in the same process: avg/median PnL, max drawdown, entry-side accuracy, LLM accuracy, runner redeem rate, hedge cost/rescue PnL, tail liquidation value, slippage sensitivity, winner counts, and compact per-window rows.
 - Terminal shows LLM status, model, location, right/wrong count, and accuracy.
 - Forecast rows and result rows are written to `llm_forecasts.csv`.
 - Entry rows include LLM side/confidence next to the actual entry side.
@@ -224,7 +225,15 @@ Do not judge a run only by winrate.
 
 Look at:
 
+- avg PnL per window;
+- median PnL;
+- max drawdown;
 - expectancy: average win vs average loss;
+- entry side accuracy;
+- runner held-to-redeem rate;
+- hedge cost vs hedge rescue value;
+- tail liquidation loss;
+- slippage sensitivity at `+/-0.01` and `+/-0.02`;
 - whether the chosen first side matches the eventual winner;
 - whether LLM improves side choice on 15m without damaging 5m;
 - whether correct runners are left alone long enough to redeem;

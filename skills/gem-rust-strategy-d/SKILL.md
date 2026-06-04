@@ -64,6 +64,15 @@ Target sample:
 
 First review should focus on expectancy, not winrate:
 
+- avg PnL per window,
+- median PnL,
+- max drawdown,
+- entry side accuracy,
+- runner held-to-redeem rate,
+- hedge cost vs hedge rescue value,
+- tail liquidation loss,
+- slippage sensitivity at +/-0.01 and +/-0.02,
+- for LLM-driven entries, whether the rolling last-10-window context was informative or misleading,
 - entry frequency and skipped-window reasons,
 - WeakScalp rarity/usefulness and loss-size impact compared with the old `dynamic_buy_*` logs,
 - whether velocity-aware SELL-grid changes improved exits,

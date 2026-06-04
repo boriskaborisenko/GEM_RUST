@@ -16,12 +16,12 @@ mod volatility;
 
 use client::{get_now_ms, MarketEvent, MarketWindow, PricesState};
 use config::Config;
-use llm::{LlmForecastRequest, LlmForecaster};
+use llm::{LlmForecastRequest, LlmForecaster, LlmRecentWindowContext, LlmRecentWindowRow};
 use strategy::{
     EntryMode, EntrySignal, LlmForecast, OrderSignal, SpotSignalSnapshot, StrategyEngine,
     LEGACY_CHEAPER_SIDE_RATIO,
 };
-use trader::{Portfolio, WindowState};
+use trader::{Portfolio, TradeRecord, WindowState};
 use volatility::VolatilityManager;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -532,6 +532,7 @@ async fn get_or_request_llm_forecast(
         market: next.market.clone(),
         secs_to_start,
         spot_signal: app.spot_series.snapshot(),
+        recent_context: build_llm_recent_context(app, 10),
     };
 
     match tokio::time::timeout(Duration::from_secs(8), forecaster.forecast(request)).await {
@@ -651,6 +652,230 @@ fn record_llm_result(
         Some(winner),
         Some(correct),
     );
+}
+
+fn build_llm_recent_context(app: &AppState, limit: usize) -> LlmRecentWindowContext {
+    let port = app.portfolio.lock().unwrap();
+    let mut closed = port
+        .windows
+        .values()
+        .filter(|win| win.spent > 0.0 && win.status.starts_with("CLOSED"))
+        .collect::<Vec<_>>();
+    closed.sort_by_key(|win| win.window_number);
+    let start = closed.len().saturating_sub(limit);
+    let recent = &closed[start..];
+
+    let mut rows = Vec::with_capacity(recent.len());
+    let mut pnls = Vec::with_capacity(recent.len());
+    let mut entry_hits = 0usize;
+    let mut entry_known = 0usize;
+    let mut llm_hits = 0usize;
+    let mut llm_known = 0usize;
+    let mut runner_redeems = 0usize;
+    let mut up_winners = 0usize;
+    let mut down_winners = 0usize;
+    let mut hedge_cost_total = 0.0;
+    let mut hedge_window_pnl = 0.0;
+    let mut tail_liquidation_value = 0.0;
+    let mut buy_shares = 0.0;
+    let mut sell_shares = 0.0;
+
+    for win in recent {
+        let pnl = win.cash_returned - win.spent;
+        pnls.push(pnl);
+
+        let entry_side = first_buy(win)
+            .map(|trade| trade.side.clone())
+            .unwrap_or_default();
+        let entry_source = first_buy(win)
+            .map(|trade| extract_entry_source(&trade.reason))
+            .unwrap_or_else(|| "none".to_string());
+        let winner = redeemed_winner(win).unwrap_or_default();
+        if winner == "UP" {
+            up_winners += 1;
+        } else if winner == "DOWN" {
+            down_winners += 1;
+        }
+
+        if !entry_side.is_empty() && !winner.is_empty() {
+            entry_known += 1;
+            if entry_side == winner {
+                entry_hits += 1;
+            }
+        }
+
+        let llm_side = app
+            .llm_forecasts
+            .get(&win.window_number)
+            .map(|forecast| forecast.side.clone())
+            .unwrap_or_default();
+        if !llm_side.is_empty() && !winner.is_empty() {
+            llm_known += 1;
+            if llm_side == winner {
+                llm_hits += 1;
+            }
+        }
+
+        let runner_redeemed = !entry_side.is_empty()
+            && win.trades.iter().any(|trade| {
+                trade.trade_type == "REDEEM" && trade.side == entry_side && trade.shares > 0.0
+            });
+        if runner_redeemed {
+            runner_redeems += 1;
+        }
+
+        let hedge_cost = opposite_buy_cost_after_first(win, &entry_side);
+        if hedge_cost > 0.0 {
+            hedge_window_pnl += pnl;
+        }
+        hedge_cost_total += hedge_cost;
+
+        let tail_value = tail_liquidation_usd(win);
+        tail_liquidation_value += tail_value;
+
+        buy_shares += win
+            .trades
+            .iter()
+            .filter(|trade| trade.trade_type == "BUY")
+            .map(|trade| trade.shares)
+            .sum::<f64>();
+        sell_shares += win
+            .trades
+            .iter()
+            .filter(|trade| trade.trade_type == "SELL")
+            .map(|trade| trade.shares)
+            .sum::<f64>();
+
+        rows.push(LlmRecentWindowRow {
+            window_id: win.window_number,
+            entry_side,
+            llm_side,
+            winner,
+            pnl,
+            entry_source,
+            runner_redeemed,
+            hedge_cost,
+            tail_value,
+        });
+    }
+
+    let total_pnl = pnls.iter().sum::<f64>();
+    let sample_size = pnls.len();
+    let adverse_slippage_01_pnl = total_pnl - 0.01 * (buy_shares + sell_shares);
+    let adverse_slippage_02_pnl = total_pnl - 0.02 * (buy_shares + sell_shares);
+
+    LlmRecentWindowContext {
+        sample_size,
+        avg_pnl_per_window: if sample_size > 0 {
+            total_pnl / sample_size as f64
+        } else {
+            0.0
+        },
+        median_pnl: median_f64(pnls.clone()),
+        max_drawdown: max_drawdown(&pnls),
+        entry_side_accuracy: ratio(entry_hits, entry_known),
+        llm_accuracy: ratio(llm_hits, llm_known),
+        runner_redeem_rate: ratio(runner_redeems, sample_size),
+        hedge_cost: hedge_cost_total,
+        hedge_window_pnl,
+        tail_liquidation_value,
+        adverse_slippage_01_pnl,
+        adverse_slippage_02_pnl,
+        up_winners,
+        down_winners,
+        rows,
+    }
+}
+
+fn first_buy(win: &WindowState) -> Option<&TradeRecord> {
+    win.trades.iter().find(|trade| trade.trade_type == "BUY")
+}
+
+fn redeemed_winner(win: &WindowState) -> Option<String> {
+    win.trades
+        .iter()
+        .find(|trade| trade.trade_type == "REDEEM" && trade.shares > 0.0)
+        .map(|trade| trade.side.clone())
+}
+
+fn opposite_buy_cost_after_first(win: &WindowState, first_side: &str) -> f64 {
+    let mut seen_first_buy = false;
+    win.trades
+        .iter()
+        .filter(|trade| {
+            if trade.trade_type != "BUY" {
+                return false;
+            }
+            if !seen_first_buy {
+                seen_first_buy = true;
+                return false;
+            }
+            !first_side.is_empty() && trade.side != first_side
+        })
+        .map(|trade| trade.usd_value)
+        .sum()
+}
+
+fn tail_liquidation_usd(win: &WindowState) -> f64 {
+    win.trades
+        .iter()
+        .filter(|trade| {
+            trade.trade_type == "SELL"
+                && (trade.reason.contains("weak_salvage")
+                    || trade.reason.contains("emergency")
+                    || trade.reason.contains("tail")
+                    || trade.reason.contains("otm_surplus"))
+        })
+        .map(|trade| trade.usd_value)
+        .sum()
+}
+
+fn extract_entry_source(reason: &str) -> String {
+    let marker = "_source_";
+    let Some(start) = reason.find(marker).map(|idx| idx + marker.len()) else {
+        return "unknown".to_string();
+    };
+    let rest = &reason[start..];
+    let end = rest.find("_conf_").unwrap_or(rest.len());
+    rest[..end].to_string()
+}
+
+fn ratio(num: usize, den: usize) -> f64 {
+    if den > 0 {
+        num as f64 / den as f64
+    } else {
+        0.0
+    }
+}
+
+fn median_f64(mut values: Vec<f64>) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = values.len() / 2;
+    if values.len() % 2 == 0 {
+        (values[mid - 1] + values[mid]) / 2.0
+    } else {
+        values[mid]
+    }
+}
+
+fn max_drawdown(pnls: &[f64]) -> f64 {
+    let mut cumulative = 0.0;
+    let mut peak = 0.0;
+    let mut max_dd = 0.0;
+    for pnl in pnls {
+        cumulative += pnl;
+        if cumulative > peak {
+            peak = cumulative;
+        }
+        let dd = peak - cumulative;
+        if dd > max_dd {
+            max_dd = dd;
+        }
+    }
+    max_dd
 }
 
 /**

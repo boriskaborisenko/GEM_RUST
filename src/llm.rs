@@ -24,6 +24,39 @@ pub struct LlmForecastRequest {
     pub market: MarketWindow,
     pub secs_to_start: i64,
     pub spot_signal: SpotSignalSnapshot,
+    pub recent_context: LlmRecentWindowContext,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LlmRecentWindowContext {
+    pub sample_size: usize,
+    pub avg_pnl_per_window: f64,
+    pub median_pnl: f64,
+    pub max_drawdown: f64,
+    pub entry_side_accuracy: f64,
+    pub llm_accuracy: f64,
+    pub runner_redeem_rate: f64,
+    pub hedge_cost: f64,
+    pub hedge_window_pnl: f64,
+    pub tail_liquidation_value: f64,
+    pub adverse_slippage_01_pnl: f64,
+    pub adverse_slippage_02_pnl: f64,
+    pub up_winners: usize,
+    pub down_winners: usize,
+    pub rows: Vec<LlmRecentWindowRow>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LlmRecentWindowRow {
+    pub window_id: usize,
+    pub entry_side: String,
+    pub llm_side: String,
+    pub winner: String,
+    pub pnl: f64,
+    pub entry_source: String,
+    pub runner_redeemed: bool,
+    pub hedge_cost: f64,
+    pub tail_value: f64,
 }
 
 #[derive(Deserialize, Debug)]
@@ -237,6 +270,7 @@ fn build_direction_prompt(req: &LlmForecastRequest) -> String {
     let raw_velocity = opt_num(req.spot_signal.raw_velocity_usd_per_sec);
     let smoothed_velocity = opt_num(req.spot_signal.smoothed_velocity_usd_per_sec);
     let acceleration = opt_num(req.spot_signal.acceleration_usd_per_sec2);
+    let recent_context = format_recent_context(&req.recent_context);
 
     format!(
         "You are a short-horizon directional signal assistant for Polymarket crypto UP/DOWN windows.\n\n\
@@ -245,10 +279,13 @@ A new Polymarket {asset} Up/Down {interval} window opens at {open_time}.\n\
 Before the window opens, choose which ONE side is directionally preferable to buy near parity: UP or DOWN.\n\n\
 Important:\n\
 - You are NOT deciding whether the trade is allowed.\n\
-- Assume the trading bot will only buy if ask is near parity, around 0.48-0.52.\n\
+- Assume the trading bot will only buy if ask is near parity, usually around 0.42-0.58.\n\
 - Your job is only to provide a directional micro-prior.\n\
 - Do not chase current contract prices.\n\
 - Since PTB is set at window open, focus on likely short-term direction AFTER the open.\n\
+- Use recent_window_context as regime memory, not as a blind rule.\n\
+- If recent LLM accuracy is poor, lower confidence and lean more on current momentum.\n\
+- If recent entry-side accuracy is poor, look for what the bot has been missing.\n\
 - If evidence is weak, still choose UP or DOWN, but use low confidence.\n\
 - Output strict JSON only.\n\n\
 Input JSON:\n\
@@ -267,7 +304,8 @@ Input JSON:\n\
   \"combined_ask\": {combined:.4},\n\
   \"raw_velocity_usd_per_sec\": {raw_velocity},\n\
   \"smoothed_velocity_usd_per_sec\": {smoothed_velocity},\n\
-  \"acceleration_usd_per_sec2\": {acceleration}\n\
+  \"acceleration_usd_per_sec2\": {acceleration},\n\
+  \"recent_window_context\": {recent_context}\n\
 }}\n\n\
 Return JSON schema:\n\
 {{\n\
@@ -293,7 +331,51 @@ Return JSON schema:\n\
         raw_velocity = raw_velocity,
         smoothed_velocity = smoothed_velocity,
         acceleration = acceleration,
+        recent_context = recent_context,
     )
+}
+
+fn format_recent_context(context: &LlmRecentWindowContext) -> String {
+    let rows = context
+        .rows
+        .iter()
+        .map(|row| {
+            json!({
+                "window_id": row.window_id,
+                "entry_side": row.entry_side,
+                "llm_side": row.llm_side,
+                "winner": row.winner,
+                "pnl": round4(row.pnl),
+                "entry_source": row.entry_source,
+                "runner_redeemed": row.runner_redeemed,
+                "hedge_cost": round4(row.hedge_cost),
+                "tail_value": round4(row.tail_value)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "sample_size": context.sample_size,
+        "avg_pnl_per_window": round4(context.avg_pnl_per_window),
+        "median_pnl": round4(context.median_pnl),
+        "max_drawdown": round4(context.max_drawdown),
+        "entry_side_accuracy": round4(context.entry_side_accuracy),
+        "llm_accuracy": round4(context.llm_accuracy),
+        "runner_redeem_rate": round4(context.runner_redeem_rate),
+        "hedge_cost": round4(context.hedge_cost),
+        "hedge_window_pnl": round4(context.hedge_window_pnl),
+        "tail_liquidation_value": round4(context.tail_liquidation_value),
+        "adverse_slippage_01_pnl": round4(context.adverse_slippage_01_pnl),
+        "adverse_slippage_02_pnl": round4(context.adverse_slippage_02_pnl),
+        "up_winners": context.up_winners,
+        "down_winners": context.down_winners,
+        "recent_windows": rows
+    })
+    .to_string()
+}
+
+fn round4(value: f64) -> f64 {
+    (value * 10000.0).round() / 10000.0
 }
 
 fn opt_num(value: Option<f64>) -> String {
