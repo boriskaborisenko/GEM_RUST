@@ -10,6 +10,7 @@ pub struct LlmForecaster {
     service_account: CustomServiceAccount,
     project_id: String,
     model: String,
+    location: String,
 }
 
 #[derive(Debug, Clone)]
@@ -33,11 +34,13 @@ struct VertexResponse {
 #[derive(Deserialize, Debug)]
 struct Candidate {
     content: Content,
+    #[serde(rename = "finishReason")]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
 struct Content {
-    parts: Vec<Part>,
+    parts: Option<Vec<Part>>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -55,10 +58,16 @@ struct LlmForecastWire {
     risk_note: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct LlmHealthWire {
+    ok: bool,
+}
+
 impl LlmForecaster {
     pub fn new<P: AsRef<Path>>(
         key_path: P,
         model: impl Into<String>,
+        location: impl Into<String>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let path_ref = key_path.as_ref();
         if !path_ref.exists() {
@@ -79,34 +88,66 @@ impl LlmForecaster {
             service_account,
             project_id,
             model: model.into(),
+            location: location.into(),
         })
+    }
+
+    pub async fn health_check(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let text = self
+            .generate_content_text(
+                "Return strict JSON only: {\"ok\":true}",
+                4096,
+                "Vertex health check",
+            )
+            .await?;
+        let json_text = extract_json_object(&text).unwrap_or(&text).trim();
+        let wire: LlmHealthWire = serde_json::from_str(json_text).map_err(|e| {
+            format!(
+                "Vertex health check returned invalid JSON: {} | {}",
+                e, text
+            )
+        })?;
+        if wire.ok {
+            Ok(())
+        } else {
+            Err(format!("Vertex health check returned ok=false: {}", text).into())
+        }
     }
 
     pub async fn forecast(
         &self,
         req: LlmForecastRequest,
     ) -> Result<LlmForecast, Box<dyn std::error::Error + Send + Sync>> {
+        let prompt = build_direction_prompt(&req);
+        let text = self
+            .generate_content_text(&prompt, 8192, "Vertex forecast")
+            .await?;
+        parse_forecast_json(&text)
+    }
+
+    async fn generate_content_text(
+        &self,
+        prompt: &str,
+        max_output_tokens: u32,
+        label: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let token = self
             .service_account
             .token(&["https://www.googleapis.com/auth/cloud-platform"])
             .await?;
-        let url = format!(
-            "https://us-central1-aiplatform.googleapis.com/v1/projects/{}/locations/us-central1/publishers/google/models/{}:generateContent",
-            self.project_id, self.model
-        );
-
-        let prompt = build_direction_prompt(&req);
+        let url = self.endpoint_url();
         let payload = json!({
-            "contents": {
+            "contents": [{
                 "role": "user",
                 "parts": [
                     { "text": prompt }
                 ]
-            },
+            }],
             "generationConfig": {
                 "temperature": 0.15,
-                "maxOutputTokens": 768,
-                "responseMimeType": "application/json"
+                "maxOutputTokens": max_output_tokens,
+                "responseMimeType": "application/json",
+                "thinkingConfig": self.thinking_config()
             }
         });
 
@@ -120,17 +161,70 @@ impl LlmForecaster {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(format!("Vertex forecast failed: {} {}", status, text).into());
+            return Err(format!("{} failed: {} {}", label, status, text).into());
         }
 
-        let data = response.json::<VertexResponse>().await?;
+        let body = response.text().await?;
+        let data = serde_json::from_str::<VertexResponse>(&body).map_err(|e| {
+            format!(
+                "{} response shape decode failed: {} | body: {}",
+                label,
+                e,
+                compact_for_error(&body, 1200)
+            )
+        })?;
         let text = data
             .candidates
             .first()
-            .and_then(|candidate| candidate.content.parts.first())
+            .and_then(|candidate| candidate.content.parts.as_ref())
+            .and_then(|parts| parts.first())
             .map(|part| part.text.trim().to_string())
-            .ok_or("Vertex forecast response has no text")?;
-        parse_forecast_json(&text)
+            .ok_or_else(|| {
+                let finish_reason = data
+                    .candidates
+                    .first()
+                    .and_then(|candidate| candidate.finish_reason.as_deref())
+                    .unwrap_or("unknown");
+                format!(
+                    "{} response has no candidate text | finishReason: {} | body: {}",
+                    label,
+                    finish_reason,
+                    compact_for_error(&body, 1200)
+                )
+            })?;
+        Ok(text)
+    }
+
+    fn endpoint_url(&self) -> String {
+        let location = self.location.trim();
+        let api_host = if location.eq_ignore_ascii_case("global") {
+            "aiplatform.googleapis.com".to_string()
+        } else {
+            format!("{}-aiplatform.googleapis.com", location)
+        };
+        format!(
+            "https://{}/v1/projects/{}/locations/{}/publishers/google/models/{}:generateContent",
+            api_host, self.project_id, location, self.model
+        )
+    }
+
+    fn thinking_config(&self) -> serde_json::Value {
+        let model = self.model.to_lowercase();
+        if model.starts_with("gemini-3") {
+            json!({
+                "includeThoughts": false,
+                "thinkingLevel": "LOW"
+            })
+        } else if model.contains("flash") {
+            json!({
+                "includeThoughts": false,
+                "thinkingBudget": 0
+            })
+        } else {
+            json!({
+                "includeThoughts": false
+            })
+        }
     }
 }
 
@@ -237,4 +331,13 @@ fn extract_json_object(text: &str) -> Option<&str> {
     } else {
         None
     }
+}
+
+fn compact_for_error(text: &str, max_chars: usize) -> String {
+    let mut compact = text.replace('\n', " ");
+    if compact.len() > max_chars {
+        compact.truncate(max_chars);
+        compact.push_str("...");
+    }
+    compact
 }

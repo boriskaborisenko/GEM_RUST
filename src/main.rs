@@ -260,23 +260,45 @@ async fn main() -> anyhow::Result<()> {
         run_log_dir.clone(),
     )));
     let strategy_engine = Arc::new(Mutex::new(StrategyEngine::new(&config.strategy)));
-    let llm_forecaster = if config.llm.enabled {
-        match LlmForecaster::new("llm.json", config.llm.model.clone()) {
+    let (llm_forecaster, llm_startup_log) = if config.llm.enabled {
+        match LlmForecaster::new(
+            "llm.json",
+            config.llm.model.clone(),
+            config.llm.location.clone(),
+        ) {
             Ok(forecaster) => {
-                println!(
-                    "[LLM] Vertex forecast enabled via llm.json | model: {}",
-                    config.llm.model
-                );
-                Some(Arc::new(forecaster))
+                match tokio::time::timeout(Duration::from_secs(8), forecaster.health_check()).await
+                {
+                    Ok(Ok(())) => {
+                        let msg = format!(
+                            "[LLM] OK | Vertex forecast enabled via llm.json | model: {} | location: {}",
+                            config.llm.model, config.llm.location
+                        );
+                        println!("{}", msg);
+                        (Some(Arc::new(forecaster)), msg)
+                    }
+                    Ok(Err(e)) => {
+                        let msg = format!("[LLM] Disabled | startup check failed: {}", e);
+                        println!("{}", msg);
+                        (None, msg)
+                    }
+                    Err(_) => {
+                        let msg = "[LLM] Disabled | startup check timed out".to_string();
+                        println!("{}", msg);
+                        (None, msg)
+                    }
+                }
             }
             Err(e) => {
-                println!("[LLM] Forecast disabled: {}", e);
-                None
+                let msg = format!("[LLM] Disabled | {}", e);
+                println!("{}", msg);
+                (None, msg)
             }
         }
     } else {
-        println!("[LLM] Forecast disabled by config");
-        None
+        let msg = "[LLM] Disabled | config llm.enabled=false".to_string();
+        println!("{}", msg);
+        (None, msg)
     };
 
     let mut app_state = AppState {
@@ -291,7 +313,7 @@ async fn main() -> anyhow::Result<()> {
         next_sub: None,
         exclude_slugs: vec![],
         next_window_number: 0,
-        system_logs: vec![],
+        system_logs: vec![llm_startup_log],
         started_at: get_now_ms(),
         spot_price: None,
         volatility_mgr: volatility_mgr.clone(),
@@ -1144,12 +1166,13 @@ fn render_dashboard(app: &AppState) {
     };
     let llm_enabled = app.config.llm.enabled && app.llm_forecaster.is_some();
     println!(
-        "  LLM-forecast: {} | Model: {} | Right {} | Wrong {} | Acc {:.1}%",
+        "  LLM-forecast: {} | Model: {} | Location: {} | Right {} | Wrong {} | Acc {:.1}%",
         paint(
             if llm_enabled { "enabled" } else { "disabled" },
             if llm_enabled { "green" } else { "dim" }
         ),
         paint(&app.config.llm.model, "cyan"),
+        paint(&app.config.llm.location, "cyan"),
         paint(&app.llm_correct.to_string(), "green"),
         paint(&app.llm_wrong.to_string(), "red"),
         llm_accuracy

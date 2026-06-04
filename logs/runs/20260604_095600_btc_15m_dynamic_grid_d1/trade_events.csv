@@ -1,0 +1,2 @@
+timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
+1780567082024,1,btc-updown-15m-1780567200,BUY,UP,d1_one_leg_up_ask_0.52_fair_0.575_edge_+0.055_source_llm_prior_conf_0.65_strength_medium_conf_0_ptb_known_false_discount_-0.020_discount_req_0.035_combined_1.02_atr_102.44_atr_regime_storm_budget_mult_0.10,0.5200,5.76923077,3.0000,97.0000

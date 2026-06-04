@@ -56,6 +56,8 @@ pub struct LlmConfig {
     pub enabled: bool,
     #[serde(default = "default_llm_model")]
     pub model: String,
+    #[serde(default = "default_llm_location")]
+    pub location: String,
 }
 
 impl Default for LlmConfig {
@@ -63,6 +65,7 @@ impl Default for LlmConfig {
         Self {
             enabled: false,
             model: default_llm_model(),
+            location: default_llm_location(),
         }
     }
 }
@@ -76,6 +79,10 @@ enum LlmConfigWire {
 
 fn default_llm_model() -> String {
     "gemini-3.5-flash".to_string()
+}
+
+fn default_llm_location() -> String {
+    "global".to_string()
 }
 
 fn deserialize_llm_config<'de, D>(deserializer: D) -> Result<LlmConfig, D::Error>
