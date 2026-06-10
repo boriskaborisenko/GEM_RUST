@@ -49,6 +49,11 @@ CURRENT/NEXT lifecycle:
 - `src/strategy/strategy_d.rs`: Dynamic Grid / TVDS / WeakScalp.
 - `src/strategy/strategy_d1.rs`: D1 one-leg pair-builder experiment.
 - `src/strategy/strategy_dx.rs`: Dx current-window fair-value directional strategy with optional hedge/PTB unwind.
+- `src/strategy/strategy_d_cross.rs`: D-CROSS cheap-side mean-reversion with adaptive grid exit; reads `MidCrossSnapshot`.
+- `src/mid_cross_tracker.rs`: shared mid-lead cross tracker for all strategies (arms at 8% window, logs ATR on flips).
+- `src/redeem_hold.rs`: shared ITM deep-late redeem hold gate (do not sell cheap when redeem at $1 is likely).
+- `src/window_stats.rs`: session aggregator over closed windows (`session_stats.csv` on shutdown).
+- `src/cex_micro.rs`: Bybit `publicTrade.BTCUSDT` WS for 1–5s CEX momentum vs Chainlink (D-CROSS entry veto).
 - `src/volatility.rs`: Bybit BTC ATR(14), currently BTC-only even when asset CLI is ETH/SOL.
 - `src/analytics.rs`: optional Vertex AI log analysis helper; not wired into `main.rs` yet.
 
@@ -81,8 +86,18 @@ CURRENT/NEXT lifecycle:
 All strategies implement:
 
 - `check_pre_start_entry(config, prices, window_number, secs_to_start, current_btc_atr) -> Option<EntrySignal>`
-- `process_live_tick(config, prices, spot_price, market, win_state, secs_to_end, current_atr, spot_signal) -> Vec<OrderSignal>`
+- `process_live_tick(config, prices, spot_price, market, win_state, secs_to_end, current_atr, spot_signal, mid_cross, cex_micro) -> Vec<OrderSignal>`
 - `get_strategy_state(window_number)`
+
+`main.rs` always runs `MidCrossTracker` on CURRENT ticks before the active strategy. This is separate from per-strategy spot-vs-strike `StrategyState.ptb_crossed`.
+
+Mid-lead cross (UP mid vs DOWN mid, not spot vs strike):
+
+- Arms at `8%` elapsed window time.
+- Leader = side with higher `(bid+ask)/2`; flip logs `mid_cross_events.csv` with ATR snapshot.
+- `significant_cross_count` increments when outgoing leader had `peak_lead_gap >= 0.20`.
+- Terminal CURRENT block shows `Mid Lead` / `Last Mid Cross`.
+- Config key for D-CROSS strategy: `dynamic_grid_dcross`.
 
 Strategies do not directly mutate the portfolio. They emit `EntrySignal` / `OrderSignal`; `main.rs` applies them through `Portfolio`.
 
@@ -177,12 +192,13 @@ Strategy Dx:
 
 - Activate with `strategy: "dynamic_grid_dx"` in `config.json`.
 - Dx deliberately does not buy NEXT/future windows. `check_pre_start_entry` always returns `None`; the runtime promotes an unentered window to `SKIPPED`, and Dx can then use the existing live BUY path to convert the active CURRENT window to `LIVE`.
+- Origin note: Dx was inspired by `aulekator/Polymarket-BTC-15-Minute-Trading-Bot`. The useful idea was current-window trading from live Polymarket probability/trend instead of blind pre-start prediction. That repo's strong guardrail was late-window trading around minutes 13-14 and skipping coin-flip prices near 0.50; do not misremember Dx as a generic early PTB predictor.
 - Dx is a hybrid of D1 directionality and Strategy D PTB management: direction comes from current PTB gap/z-score, entry quality comes from fair probability vs live ask, and management uses optional hedge plus PTB sells.
-- Fair probability follows the existing Normal CDF model: `(spot - PTB + velocity_drift) / (ATR * sqrt(seconds_left / 60))`. Dx requires the fair edge side to match the PTB gap side before entering.
+- Fair probability follows the existing Normal CDF model: `(spot - PTB + velocity_drift) / (ATR * sqrt(seconds_left / 60))`, but velocity drift is capped relative to expected move so a short spot impulse cannot saturate fair probability to `1.000` for the whole remaining window. Dx requires the fair edge side to match the PTB gap side before entering unless a late live-market verdict path is active.
 - Dx keeps an internal per-window YES-mid tick buffer to approximate Polymarket probability velocity over 30s/60s. This is a microstructure guardrail: favorable probability velocity can confirm entry; strongly adverse probability velocity blocks entry or can justify a small hedge.
-- Entry phases are current-window only: first 10% observe, then entry/manage, strict late mode after roughly 76%, and final salvage after 90%. Late entries require higher edge, higher fair probability, tighter spread, and stronger PTB z-score.
-- Hedge buys are optional and capped. Dx buys the opposite side only when it is cheap versus fair value, pair cost is bounded, and the primary leg shows adverse cross/counter-velocity. Hedge PTB sells unload the hedge when bid exceeds its average entry by the target and overpays modeled probability.
-- Primary PTB sells lock profit in small steps when bid beats average entry and overpays fair probability, while clear close-window winners can remain for redeem.
+- Entry phases are current-window only: first 3% observe, then PTB/velocity entry/manage, and a late-market-verdict path after about 72% elapsed. Entry gates were loosened after `20260608_071259_btc_15m_dynamic_grid_dx` showed only 4/113 windows entered: lower gap-z/fair-prob floors, wider spread cap, market-mid confirmation path, and single spot-confirmation allowed when edge/gap-z is strong. Rich asks `>=0.62` still require two spot confirmations or probability confirmation.
+- Hedge buys are optional and capped. Dx buys the opposite side when cheap versus fair value, pair cost is bounded, and the primary leg shows adverse cross/counter-velocity. Severe adverse cases after PTB cross may hedge up to ask `0.52` and pair cost `1.12`. Hedge PTB sells unload the hedge when bid exceeds its average entry by the target and overpays modeled probability.
+- Primary exit logic is three-way, not a blind ladder. `dx_primary_take_profit_*` sells the whole leg when bid is much better than entry but only ~fair (`bid >= avg + 0.12` and `edge_vs_fair < 0.035`); this fixes `20260609_112745` window 2 where partial sells at `0.80` with `+0.018` edge left a runner that later dumped at `0.15`. `hold_for_redeem` blocks further sells on clear winners near close. Ladder steps require `edge_vs_fair >= 0.05` plus cost recovery or an adverse leg. Final salvage never dumps a naked primary runner. Manage/Late entries after 47% require `gap_z >= 0.40` unless `market_verdict`.
 
 ATR:
 

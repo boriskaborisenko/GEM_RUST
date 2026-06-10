@@ -1,6 +1,11 @@
+use crate::cex_micro::cex_velocity_against_side;
 use crate::client::{get_now_ms, MarketWindow, PricesState};
 use crate::config::Config;
-use crate::strategy::{EntrySignal, OrderSignal, SpotSignalSnapshot, StrategyState, TradeStrategy};
+use crate::redeem_hold::{evaluate_redeem_hold, RedeemHoldInput};
+use crate::strategy::{
+    CexMicroSnapshot, EntrySignal, MidCrossSnapshot, OrderSignal, SpotSignalSnapshot,
+    StrategyState, TradeStrategy,
+};
 use crate::trader::WindowState;
 use std::collections::{HashMap, VecDeque};
 
@@ -9,35 +14,43 @@ const DX_ENTRY_BUDGET_MULTIPLIER: f64 = 0.30;
 const DX_ENTRY_VOLATILE_MULTIPLIER: f64 = 0.22;
 const DX_ENTRY_STORM_MULTIPLIER: f64 = 0.14;
 const DX_MIN_TRADE_USD: f64 = 1.0;
-const DX_MAX_ENTRY_ASK: f64 = 0.68;
-const DX_RICH_ENTRY_ASK: f64 = 0.58;
-const DX_MAX_ENTRY_SPREAD: f64 = 0.08;
-const DX_LATE_MAX_ENTRY_SPREAD: f64 = 0.06;
-const DX_MAX_TIME_PCT: f64 = 85.0;
-const DX_MAIN_MAX_TIME_PCT: f64 = 70.0;
-const DX_MIN_ENTRY_EDGE: f64 = 0.03;
-const DX_MID_MIN_ENTRY_EDGE: f64 = 0.04;
-const DX_LATE_MIN_ENTRY_EDGE: f64 = 0.07;
-const DX_MIN_FAIR_PROB: f64 = 0.55;
-const DX_MID_MIN_FAIR_PROB: f64 = 0.58;
-const DX_LATE_MIN_FAIR_PROB: f64 = 0.64;
-const DX_MIN_ABS_GAP_Z: f64 = 0.45;
-const DX_RICH_MIN_ABS_GAP_Z: f64 = 0.70;
-const DX_LATE_MIN_ABS_GAP_Z: f64 = 0.85;
+const DX_MAX_ENTRY_ASK: f64 = 0.78;
+const DX_EARLY_MAX_ENTRY_ASK: f64 = 0.66;
+const DX_RICH_ENTRY_ASK: f64 = 0.60;
+const DX_MAX_ENTRY_SPREAD: f64 = 0.09;
+const DX_LATE_MAX_ENTRY_SPREAD: f64 = 0.07;
+const DX_MAX_TIME_PCT: f64 = 88.0;
+const DX_MAIN_MAX_TIME_PCT: f64 = 72.0;
+const DX_MIN_ENTRY_EDGE: f64 = 0.020;
+const DX_MID_MIN_ENTRY_EDGE: f64 = 0.028;
+const DX_LATE_MIN_ENTRY_EDGE: f64 = 0.040;
+const DX_STRONG_ENTRY_EDGE: f64 = 0.12;
+const DX_MIN_FAIR_PROB: f64 = 0.54;
+const DX_MID_MIN_FAIR_PROB: f64 = 0.56;
+const DX_LATE_MIN_FAIR_PROB: f64 = 0.58;
+const DX_MIN_ABS_GAP_Z: f64 = 0.28;
+const DX_MID_MIN_ABS_GAP_Z: f64 = 0.26;
+const DX_RICH_MIN_ABS_GAP_Z: f64 = 0.45;
+const DX_LATE_MIN_ABS_GAP_Z: f64 = 0.48;
+const DX_STRONG_GAP_Z: f64 = 0.45;
+const DX_MARKET_MID_CONFIRM: f64 = 0.55;
 const DX_VELOCITY_DRIFT_FRACTION: f64 = 0.35;
+const DX_MAX_VELOCITY_DRIFT_MOVE_FRACTION: f64 = 0.65;
 const DX_SPOT_CONFIRM_USD_PER_SEC: f64 = 0.10;
 const DX_SPOT_ACCEL_CONFIRM_USD_PER_SEC2: f64 = 0.01;
 const DX_PROB_VELOCITY_30S_CONFIRM: f64 = 0.010;
 const DX_PROB_VELOCITY_60S_CONFIRM: f64 = 0.015;
 const DX_PROB_VELOCITY_30S_BLOCK: f64 = 0.018;
 const DX_PROB_VELOCITY_60S_BLOCK: f64 = 0.025;
-const DX_ENTRY_NO_MICRO_EXTRA_EDGE: f64 = 0.02;
+const DX_ENTRY_NO_MICRO_EXTRA_EDGE: f64 = 0.010;
+const DX_FAIR_SIDE_FALLBACK_EXTRA_EDGE: f64 = 0.015;
 const DX_HEDGE_MAX_FRACTION_OF_SPENT: f64 = 0.35;
 const DX_HEDGE_STEP_FRACTION_OF_SPENT: f64 = 0.12;
 const DX_HEDGE_MIN_EDGE: f64 = 0.035;
-const DX_HEDGE_CHEAP_ASK: f64 = 0.40;
+const DX_HEDGE_CHEAP_ASK: f64 = 0.42;
+const DX_HEDGE_SEVERE_CHEAP_ASK: f64 = 0.52;
 const DX_HEDGE_MAX_PAIR_COST: f64 = 1.05;
-const DX_HEDGE_SEVERE_MAX_PAIR_COST: f64 = 1.10;
+const DX_HEDGE_SEVERE_MAX_PAIR_COST: f64 = 1.12;
 const DX_HEDGE_BASE_TARGET_RATIO: f64 = 0.18;
 const DX_HEDGE_ADVERSE_TARGET_RATIO: f64 = 0.35;
 const DX_HEDGE_SEVERE_TARGET_RATIO: f64 = 0.55;
@@ -46,11 +59,24 @@ const DX_PRIMARY_PTB_STEP1: f64 = 0.060;
 const DX_PRIMARY_PTB_STEP2: f64 = 0.125;
 const DX_PRIMARY_PTB_STEP3: f64 = 0.220;
 const DX_PRIMARY_SELL_EDGE: f64 = 0.015;
+const DX_LADDER_MIN_EDGE_VS_FAIR: f64 = 0.050;
+const DX_TAKE_PROFIT_MIN_BID_VS_AVG: f64 = 0.12;
+const DX_TAKE_PROFIT_MAX_EDGE_VS_FAIR: f64 = 0.035;
+const DX_MANAGE_MIN_GAP_Z: f64 = 0.40;
 const DX_PRIMARY_HOLD_REDEEM_SECONDS: i64 = 55;
+const DX_MARKET_VERDICT_TIME_PCT: f64 = 70.0;
+const DX_MARKET_VERDICT_MIN_MID: f64 = 0.60;
+const DX_MARKET_VERDICT_LEAD: f64 = 0.08;
+const DX_RUNNER_FRACTION: f64 = 0.45;
+const DX_COST_RECOVERY_FRACTION: f64 = 0.95;
+const DX_RUNNER_MIN_FAIR_PROB: f64 = 0.60;
+const DX_MAX_PRIMARY_SELL_STEPS: usize = 3;
+const DX_MIN_PRIMARY_SELL_USD: f64 = 0.75;
 const DX_FINAL_TIME_PCT: f64 = 90.0;
 const DX_FINAL_MIN_BID: f64 = 0.05;
 const DX_FINAL_SELL_EDGE: f64 = 0.02;
 const DX_SELL_MIN_SHARES: f64 = 0.000001;
+const DX_OBSERVE_TIME_PCT: f64 = 3.0;
 
 #[derive(Debug, Clone, Copy)]
 struct DxProbTick {
@@ -75,7 +101,7 @@ enum DxPhase {
 
 impl DxPhase {
     fn from_time_pct(time_pct: f64) -> Self {
-        if time_pct < 10.0 {
+        if time_pct < DX_OBSERVE_TIME_PCT {
             Self::Observe
         } else if time_pct < 47.0 {
             Self::Entry
@@ -254,9 +280,12 @@ fn fair_probability_up(
         return 0.50;
     };
     let secs_left_f = (secs_left as f64).max(1.0);
+    let expected_move = expected_move_usd(current_atr, secs_left);
+    let max_velocity_drift = expected_move * DX_MAX_VELOCITY_DRIFT_MOVE_FRACTION;
     let velocity_drift =
-        spot_velocity(spot_signal).unwrap_or(0.0) * secs_left_f * DX_VELOCITY_DRIFT_FRACTION;
-    normal_cdf(((spot - ptb) + velocity_drift) / expected_move_usd(current_atr, secs_left))
+        (spot_velocity(spot_signal).unwrap_or(0.0) * secs_left_f * DX_VELOCITY_DRIFT_FRACTION)
+            .clamp(-max_velocity_drift, max_velocity_drift);
+    normal_cdf(((spot - ptb) + velocity_drift) / expected_move)
 }
 
 fn market_duration_sec(market: &MarketWindow) -> f64 {
@@ -295,6 +324,14 @@ fn side_bid(side: &str, prices: &PricesState) -> f64 {
     }
 }
 
+fn side_mid(side: &str, prices: &PricesState) -> f64 {
+    if side == "UP" {
+        midpoint(prices.up.bid, prices.up.ask)
+    } else {
+        midpoint(prices.down.bid, prices.down.ask)
+    }
+}
+
 fn side_spread(side: &str, prices: &PricesState) -> f64 {
     (side_ask(side, prices) - side_bid(side, prices)).max(0.0)
 }
@@ -312,6 +349,14 @@ fn side_fair_probability(side: &str, fair_up: f64) -> f64 {
         fair_up
     } else {
         1.0 - fair_up
+    }
+}
+
+fn side_sign(side: &str) -> f64 {
+    if side == "UP" {
+        1.0
+    } else {
+        -1.0
     }
 }
 
@@ -448,6 +493,103 @@ fn has_counter_spot_velocity(side: &str, spot_signal: SpotSignalSnapshot) -> boo
         .unwrap_or(false)
 }
 
+fn market_mid_confirms_side(side: &str, prices: &PricesState) -> bool {
+    side_mid(side, prices) >= DX_MARKET_MID_CONFIRM
+}
+
+fn spot_velocity_against_side(side: &str, spot_signal: SpotSignalSnapshot) -> bool {
+    let side_sign = if side == "UP" { 1.0 } else { -1.0 };
+    spot_signal
+        .smoothed_velocity_usd_per_sec
+        .or(spot_signal.raw_velocity_usd_per_sec)
+        .map(|velocity| velocity * side_sign < -DX_SPOT_CONFIRM_USD_PER_SEC)
+        .unwrap_or(false)
+}
+
+fn primary_should_hold_for_redeem(
+    primary_side: &str,
+    spot: f64,
+    ptb: f64,
+    current_atr: f64,
+    primary_is_favorable: bool,
+    ptb_crossed: bool,
+    primary_bid: f64,
+    primary_prob: f64,
+    time_pct: f64,
+    secs_to_end: i64,
+    recovered_cost: bool,
+    spot_signal: SpotSignalSnapshot,
+    cex_micro: &CexMicroSnapshot,
+) -> bool {
+    if !primary_is_favorable || ptb_crossed {
+        return false;
+    }
+
+    let decision = evaluate_redeem_hold(&RedeemHoldInput {
+        side: primary_side,
+        spot,
+        ptb,
+        secs_to_end,
+        time_pct,
+        current_atr,
+        bid: primary_bid,
+        fair_prob: primary_prob,
+        ptb_crossed,
+        counter_velocity_against: spot_velocity_against_side(primary_side, spot_signal),
+        cex_velocity_against: cex_velocity_against_side(primary_side, cex_micro),
+    });
+    if decision.should_hold {
+        return true;
+    }
+
+    if recovered_cost
+        && (secs_to_end <= DX_PRIMARY_HOLD_REDEEM_SECONDS
+            || time_pct >= DX_MARKET_VERDICT_TIME_PCT)
+        && primary_prob >= 0.70
+        && primary_bid >= 0.70
+    {
+        return true;
+    }
+    (time_pct >= 65.0 || secs_to_end <= 120)
+        && primary_bid >= 0.72
+        && primary_prob >= 0.58
+}
+
+fn primary_should_take_full_profit(
+    primary_is_favorable: bool,
+    primary_bid: f64,
+    primary_avg: f64,
+    edge_vs_fair: f64,
+) -> bool {
+    primary_is_favorable
+        && primary_bid >= primary_avg + DX_TAKE_PROFIT_MIN_BID_VS_AVG
+        && edge_vs_fair < DX_TAKE_PROFIT_MAX_EDGE_VS_FAIR
+        && edge_vs_fair >= -0.03
+}
+
+fn entry_has_sufficient_confirmation(
+    entry_side: &str,
+    entry_edge: f64,
+    side_gap_z: f64,
+    spot_confirmations: usize,
+    prob_confirms: bool,
+    prices: &PricesState,
+) -> bool {
+    if prob_confirms || spot_confirmations >= 2 {
+        return true;
+    }
+    if spot_confirmations >= 1
+        && (entry_edge >= DX_STRONG_ENTRY_EDGE
+            || side_gap_z >= DX_STRONG_GAP_Z
+            || market_mid_confirms_side(entry_side, prices))
+    {
+        return true;
+    }
+    market_mid_confirms_side(entry_side, prices)
+        && side_gap_z >= 0.18
+        && entry_edge >= DX_MIN_ENTRY_EDGE + DX_ENTRY_NO_MICRO_EXTRA_EDGE
+}
+
 fn entry_thresholds(phase: DxPhase, time_pct: f64) -> (f64, f64, f64) {
     if matches!(phase, DxPhase::Late) || time_pct > DX_MAIN_MAX_TIME_PCT {
         (
@@ -459,7 +601,7 @@ fn entry_thresholds(phase: DxPhase, time_pct: f64) -> (f64, f64, f64) {
         (
             DX_MID_MIN_ENTRY_EDGE,
             DX_MID_MIN_FAIR_PROB,
-            DX_MIN_ABS_GAP_Z,
+            DX_MID_MIN_ABS_GAP_Z,
         )
     } else {
         (DX_MIN_ENTRY_EDGE, DX_MIN_FAIR_PROB, DX_MIN_ABS_GAP_Z)
@@ -517,15 +659,27 @@ impl TradeStrategy for DynamicGridDxStrategy {
         secs_to_end: i64,
         current_atr: f64,
         spot_signal: SpotSignalSnapshot,
+        _mid_cross: &MidCrossSnapshot,
+        cex_micro: &CexMicroSnapshot,
     ) -> Vec<OrderSignal> {
         let mut signals = Vec::new();
         let window_number = win_state.window_number;
-        let (_, _, time_pct) = duration_elapsed_and_time_pct(market, secs_to_end);
+        let mut live_market = market.clone();
+        if live_market.price_to_beat.is_none() {
+            live_market.price_to_beat = win_state.market.price_to_beat;
+        }
+
+        let (_, _, time_pct) = duration_elapsed_and_time_pct(&live_market, secs_to_end);
         let phase = DxPhase::from_time_pct(time_pct);
         let atr_regime = DxAtrRegime::from_atr(current_atr);
         let prob_velocity = self.update_probability_velocity(window_number, prices);
-        let fair_up =
-            fair_probability_up(market, spot_price, current_atr, secs_to_end, spot_signal);
+        let fair_up = fair_probability_up(
+            &live_market,
+            spot_price,
+            current_atr,
+            secs_to_end,
+            spot_signal,
+        );
         let fair_down = 1.0 - fair_up;
 
         let state = self.states.entry(window_number).or_insert(StrategyState {
@@ -535,13 +689,13 @@ impl TradeStrategy for DynamicGridDxStrategy {
             ptb_crossed: false,
             ptb_baseline: None,
         });
-        let cross_happened_now = update_ptb_cross_state(state, market, spot_price);
+        let cross_happened_now = update_ptb_cross_state(state, &live_market, spot_price);
         let ptb_crossed = state.ptb_crossed;
         let ptb_baseline = state
             .ptb_baseline
             .clone()
             .unwrap_or_else(|| "NA".to_string());
-        let relation = relation_for_spot(market, spot_price).unwrap_or("NA");
+        let relation = relation_for_spot(&live_market, spot_price).unwrap_or("NA");
 
         if current_atr < config.min_btc_atr || current_atr < DX_MIN_VALID_ATR {
             return signals;
@@ -553,7 +707,7 @@ impl TradeStrategy for DynamicGridDxStrategy {
                 return signals;
             }
 
-            let (Some(spot), Some(ptb)) = (spot_price, market.price_to_beat) else {
+            let (Some(spot), Some(ptb)) = (spot_price, live_market.price_to_beat) else {
                 return signals;
             };
             let expected_move = expected_move_usd(current_atr, secs_to_end);
@@ -566,19 +720,54 @@ impl TradeStrategy for DynamicGridDxStrategy {
             let up_edge = fair_up - prices.up.ask;
             let down_edge = fair_down - prices.down.ask;
             let fair_side = if up_edge >= down_edge { "UP" } else { "DOWN" };
-            if d1_side != fair_side {
-                return signals;
-            }
-
-            let ask = side_ask(d1_side, prices);
-            let bid = side_bid(d1_side, prices);
-            let spread = side_spread(d1_side, prices);
-            let fair_side_prob = side_fair_probability(d1_side, fair_up);
-            let entry_edge = fair_side_prob - ask;
             let (mut min_edge, min_prob, min_abs_gap_z) = entry_thresholds(phase, time_pct);
-            let spot_confirmations = spot_entry_confirmations(d1_side, spot_signal);
-            let prob_confirms = probability_velocity_confirms(d1_side, prob_velocity);
+
+            let d1_ask = side_ask(d1_side, prices);
+            let d1_prob = side_fair_probability(d1_side, fair_up);
+            let d1_edge = d1_prob - d1_ask;
+            let fair_ask = side_ask(fair_side, prices);
+            let fair_prob = side_fair_probability(fair_side, fair_up);
+            let fair_edge = fair_prob - fair_ask;
+            let fair_side_moves_with_gap = side_sign(fair_side) * gap_z >= 0.10;
+            let up_mid = side_mid("UP", prices);
+            let down_mid = side_mid("DOWN", prices);
+            let market_verdict_side = if time_pct >= DX_MARKET_VERDICT_TIME_PCT
+                && up_mid >= DX_MARKET_VERDICT_MIN_MID
+                && up_mid >= down_mid + DX_MARKET_VERDICT_LEAD
+            {
+                Some("UP")
+            } else if time_pct >= DX_MARKET_VERDICT_TIME_PCT
+                && down_mid >= DX_MARKET_VERDICT_MIN_MID
+                && down_mid >= up_mid + DX_MARKET_VERDICT_LEAD
+            {
+                Some("DOWN")
+            } else {
+                None
+            };
+
+            let (entry_side, entry_source) = if let Some(verdict_side) = market_verdict_side {
+                (verdict_side, "market_verdict")
+            } else if d1_edge >= min_edge {
+                (d1_side, "gap_aligned")
+            } else if fair_side_moves_with_gap
+                && fair_edge >= min_edge + DX_FAIR_SIDE_FALLBACK_EXTRA_EDGE
+            {
+                (fair_side, "fair_fallback")
+            } else {
+                return signals;
+            };
+
+            let ask = side_ask(entry_side, prices);
+            let bid = side_bid(entry_side, prices);
+            let spread = side_spread(entry_side, prices);
+            let fair_side_prob = side_fair_probability(entry_side, fair_up);
+            let entry_edge = fair_side_prob - ask;
+            let side_gap_z = side_sign(entry_side) * gap_z;
+            let spot_confirmations = spot_entry_confirmations(entry_side, spot_signal);
+            let prob_confirms = probability_velocity_confirms(entry_side, prob_velocity);
             let has_micro = spot_confirmations > 0 || prob_confirms;
+            let market_mid = side_mid(entry_side, prices);
+            let market_verdict_entry = entry_source == "market_verdict";
             if !has_micro {
                 min_edge += DX_ENTRY_NO_MICRO_EXTRA_EDGE;
             }
@@ -586,6 +775,9 @@ impl TradeStrategy for DynamicGridDxStrategy {
             if ask <= 0.0
                 || bid <= 0.0
                 || ask > DX_MAX_ENTRY_ASK
+                || (!market_verdict_entry
+                    && time_pct < DX_MARKET_VERDICT_TIME_PCT
+                    && ask > DX_EARLY_MAX_ENTRY_ASK)
                 || spread
                     > if matches!(phase, DxPhase::Late) {
                         DX_LATE_MAX_ENTRY_SPREAD
@@ -594,14 +786,52 @@ impl TradeStrategy for DynamicGridDxStrategy {
                     }
                 || entry_edge < min_edge
                 || fair_side_prob < min_prob
-                || gap_z.abs() < min_abs_gap_z
-                || has_counter_spot_velocity(d1_side, spot_signal)
-                || probability_velocity_blocks(d1_side, prob_velocity)
+                || side_gap_z < min_abs_gap_z
+                || has_counter_spot_velocity(entry_side, spot_signal)
+                || probability_velocity_blocks(entry_side, prob_velocity)
             {
                 return signals;
             }
 
-            if ask > DX_RICH_ENTRY_ASK && (gap_z.abs() < DX_RICH_MIN_ABS_GAP_Z || !has_micro) {
+            if market_verdict_entry {
+                let verdict_has_sanity =
+                    side_gap_z >= 0.05 || spot_confirmations >= 1 || prob_confirms;
+                if market_mid < DX_MARKET_VERDICT_MIN_MID
+                    || !verdict_has_sanity
+                    || has_counter_spot_velocity(entry_side, spot_signal)
+                {
+                    return signals;
+                }
+            } else if !entry_has_sufficient_confirmation(
+                entry_side,
+                entry_edge,
+                side_gap_z,
+                spot_confirmations,
+                prob_confirms,
+                prices,
+            ) {
+                return signals;
+            }
+
+            if ask > DX_RICH_ENTRY_ASK
+                && (side_gap_z < DX_RICH_MIN_ABS_GAP_Z || (!has_micro && !market_verdict_entry))
+            {
+                return signals;
+            }
+            if ask >= 0.62
+                && !market_verdict_entry
+                && spot_confirmations < 2
+                && !prob_confirms
+            {
+                return signals;
+            }
+
+            // After ~47% elapsed, only enter on a clear market verdict or a strong PTB gap.
+            // Prevents late chase entries like buying DOWN at 67% with gap_z 0.34.
+            if !market_verdict_entry
+                && (matches!(phase, DxPhase::Manage | DxPhase::Late) || time_pct > 47.0)
+                && side_gap_z < DX_MANAGE_MIN_GAP_Z
+            {
                 return signals;
             }
 
@@ -610,25 +840,35 @@ impl TradeStrategy for DynamicGridDxStrategy {
                 return signals;
             }
 
-            self.primary_side.insert(window_number, d1_side.to_string());
+            self.primary_side
+                .insert(window_number, entry_side.to_string());
             self.primary_entry_price.insert(window_number, ask);
 
             signals.push(OrderSignal {
-                side: d1_side.to_string(),
+                side: entry_side.to_string(),
                 is_buy: true,
                 amount: budget,
                 price: ask,
                 reason: format!(
-                    "dx_live_entry_{}_phase_{}_atr_{}_ask_{:.2}_bid_{:.2}_spread_{:.3}_fair_{:.3}_edge_{:+.3}_gap_z_{:+.2}_time_{:.1}_spot_conf_{}_prob30_{}_prob60_{}_budget_{:.2}",
-                    d1_side.to_lowercase(),
+                    "dx_live_entry_{}_source_{}_phase_{}_atr_{}_ask_{:.2}_bid_{:.2}_mid_{:.2}_spread_{:.3}_fair_{:.3}_edge_{:+.3}_gap_z_{:+.2}_side_gap_z_{:+.2}_d1_{}_d1_edge_{:+.3}_fair_best_{}_fair_edge_{:+.3}_up_mid_{:.2}_down_mid_{:.2}_time_{:.1}_spot_conf_{}_prob30_{}_prob60_{}_budget_{:.2}",
+                    entry_side.to_lowercase(),
+                    entry_source,
                     phase.as_str(),
                     atr_regime.as_str(),
                     ask,
                     bid,
+                    market_mid,
                     spread,
                     fair_side_prob,
                     entry_edge,
                     gap_z,
+                    side_gap_z,
+                    d1_side.to_lowercase(),
+                    d1_edge,
+                    fair_side.to_lowercase(),
+                    fair_edge,
+                    up_mid,
+                    down_mid,
                     time_pct,
                     spot_confirmations,
                     fmt_opt(prob_velocity.velocity_30s),
@@ -662,19 +902,27 @@ impl TradeStrategy for DynamicGridDxStrategy {
         let hedge_ask = side_ask(hedge_side, prices);
 
         // HEDGE: buy only when the opposite side is useful and not rich.
+        let primary_adverse_after_cross =
+            ptb_crossed && !relation_is_favorable_for_side(&primary_side, relation);
+        let severe_primary_wrong = primary_prob <= 0.42
+            && primary_adverse_after_cross
+            && (has_counter_spot_velocity(&primary_side, spot_signal)
+                || probability_velocity_blocks(&primary_side, prob_velocity));
+        let hedge_ask_cap = if severe_primary_wrong {
+            DX_HEDGE_SEVERE_CHEAP_ASK
+        } else {
+            DX_HEDGE_CHEAP_ASK
+        };
         if primary_shares > DX_SELL_MIN_SHARES
             && hedge_ask > 0.0
-            && hedge_ask <= DX_HEDGE_CHEAP_ASK
+            && hedge_ask <= hedge_ask_cap
             && time_pct < DX_FINAL_TIME_PCT
         {
             let current_hedge_ratio = (hedge_shares / primary_shares).clamp(0.0, 1.0);
             let hedge_edge = hedge_prob - hedge_ask;
             let pair_cost = primary_entry_price + hedge_ask;
-            let primary_adverse_after_cross =
-                ptb_crossed && !relation_is_favorable_for_side(&primary_side, relation);
-            let severe_primary_wrong = primary_prob <= 0.38
-                && primary_adverse_after_cross
-                && pair_cost <= DX_HEDGE_SEVERE_MAX_PAIR_COST;
+            let severe_pair_ok = pair_cost <= DX_HEDGE_SEVERE_MAX_PAIR_COST;
+            let severe_primary_wrong = severe_primary_wrong && severe_pair_ok;
             let regular_hedge = hedge_edge >= DX_HEDGE_MIN_EDGE
                 && pair_cost <= DX_HEDGE_MAX_PAIR_COST
                 && (primary_adverse_after_cross
@@ -759,32 +1007,100 @@ impl TradeStrategy for DynamicGridDxStrategy {
             }
         }
 
-        // PRIMARY PTB: lock profit, but keep clear close-window winners.
+        // PRIMARY: hold redeem, full take-profit, or ladder — never partial-dump on noise edge.
         if primary_shares > DX_SELL_MIN_SHARES {
             let primary_avg =
                 side_avg_entry(&primary_side, win_state).unwrap_or(primary_entry_price);
+            let (_, primary_bought_shares) = side_buy_cost_shares(&primary_side, win_state);
             let step_key = (window_number, primary_side.clone());
             let current_step = *self.sell_steps.get(&step_key).unwrap_or(&0);
             let target = primary_ptb_target(current_step, phase);
-            let close_redeem_hold = secs_to_end <= DX_PRIMARY_HOLD_REDEEM_SECONDS
-                && primary_prob >= 0.72
-                && relation_is_favorable_for_side(&primary_side, relation);
+            let primary_is_favorable = relation_is_favorable_for_side(&primary_side, relation);
+            let recovered_cost =
+                win_state.cash_returned >= win_state.spent * DX_COST_RECOVERY_FRACTION;
+            let edge_vs_fair = primary_bid - primary_prob;
+            let paired_core = win_state.up_shares.min(win_state.down_shares);
+            // Full exit beats hold: if bid is great vs entry but only ~fair, take it before reversal.
+            if primary_should_take_full_profit(
+                primary_is_favorable,
+                primary_bid,
+                primary_avg,
+                edge_vs_fair,
+            ) {
+                signals.push(OrderSignal {
+                    side: primary_side.to_string(),
+                    is_buy: false,
+                    amount: primary_shares,
+                    price: primary_bid,
+                    reason: format!(
+                        "dx_primary_take_profit_{}_phase_{}_bid_{:.2}_avg_{:.2}_fair_{:.3}_edge_{:+.3}_sell_all_{:.4}_fav_{}_time_{:.1}",
+                        primary_side.to_lowercase(),
+                        phase.as_str(),
+                        primary_bid,
+                        primary_avg,
+                        primary_prob,
+                        edge_vs_fair,
+                        primary_shares,
+                        primary_is_favorable,
+                        time_pct
+                    ),
+                });
+                return signals;
+            }
 
-            if !close_redeem_hold
-                && primary_bid >= primary_avg + target
-                && primary_bid >= primary_prob + DX_PRIMARY_SELL_EDGE
+            let hold_for_redeem = match (spot_price, live_market.price_to_beat) {
+                (Some(spot), Some(ptb)) => primary_should_hold_for_redeem(
+                    &primary_side,
+                    spot,
+                    ptb,
+                    current_atr,
+                    primary_is_favorable,
+                    ptb_crossed,
+                    primary_bid,
+                    primary_prob,
+                    time_pct,
+                    secs_to_end,
+                    recovered_cost,
+                    spot_signal,
+                    cex_micro,
+                ),
+                _ => false,
+            };
+
+            let runner_floor = if hold_for_redeem {
+                primary_bought_shares * DX_RUNNER_FRACTION
+            } else if primary_is_favorable
+                && primary_prob >= DX_RUNNER_MIN_FAIR_PROB
+                && recovered_cost
             {
-                let paired_core = win_state.up_shares.min(win_state.down_shares);
+                primary_bought_shares * DX_RUNNER_FRACTION
+            } else {
+                0.0
+            };
+
+            let ladder_allowed = !hold_for_redeem
+                && current_step < DX_MAX_PRIMARY_SELL_STEPS
+                && primary_bid >= primary_avg + target
+                && edge_vs_fair >= DX_LADDER_MIN_EDGE_VS_FAIR
+                && (recovered_cost || !primary_is_favorable);
+
+            if ladder_allowed {
                 let surplus = (primary_shares - paired_core).max(0.0);
                 let sell_fraction = match current_step {
                     0 => 0.35,
-                    1 => 0.35,
-                    _ => 1.0,
+                    1 => 0.25,
+                    _ => if primary_is_favorable { 0.25 } else { 1.0 },
                 };
                 let mut sell_amount = (primary_shares * sell_fraction).min(primary_shares);
                 if surplus > DX_SELL_MIN_SHARES {
                     sell_amount = sell_amount.min(surplus);
                 } else if primary_bid < 0.80 && !matches!(phase, DxPhase::Final) {
+                    sell_amount = 0.0;
+                }
+                if runner_floor > DX_SELL_MIN_SHARES {
+                    sell_amount = sell_amount.min((primary_shares - runner_floor).max(0.0));
+                }
+                if sell_amount * primary_bid < DX_MIN_PRIMARY_SELL_USD {
                     sell_amount = 0.0;
                 }
 
@@ -796,7 +1112,7 @@ impl TradeStrategy for DynamicGridDxStrategy {
                         amount: sell_amount,
                         price: primary_bid,
                         reason: format!(
-                            "dx_primary_ptb_sell_{}_step_{}_phase_{}_bid_{:.2}_avg_{:.2}_target_{:.3}_fair_{:.3}_edge_{:+.3}_sell_{:.4}_paired_{:.4}_time_{:.1}",
+                            "dx_primary_ptb_sell_{}_step_{}_phase_{}_bid_{:.2}_avg_{:.2}_target_{:.3}_fair_{:.3}_edge_{:+.3}_sell_{:.4}_paired_{:.4}_runner_floor_{:.4}_recovered_{}_fav_{}_time_{:.1}",
                             primary_side.to_lowercase(),
                             current_step + 1,
                             phase.as_str(),
@@ -804,9 +1120,12 @@ impl TradeStrategy for DynamicGridDxStrategy {
                             primary_avg,
                             target,
                             primary_prob,
-                            primary_bid - primary_prob,
+                            edge_vs_fair,
                             sell_amount,
                             paired_core,
+                            runner_floor,
+                            recovered_cost,
+                            primary_is_favorable,
                             time_pct
                         ),
                     });
@@ -815,10 +1134,13 @@ impl TradeStrategy for DynamicGridDxStrategy {
             }
         }
 
-        // FINAL SALVAGE: only sell OTM surplus if market overpays it.
+        // FINAL SALVAGE: hedge surplus only — never dump a naked primary runner at 0.15.
         if matches!(phase, DxPhase::Final) {
             let paired_core = win_state.up_shares.min(win_state.down_shares);
             for side in ["UP", "DOWN"] {
+                if side == primary_side && paired_core <= DX_SELL_MIN_SHARES {
+                    continue;
+                }
                 let shares = side_shares(side, win_state);
                 let surplus = (shares - paired_core).max(0.0);
                 if surplus <= DX_SELL_MIN_SHARES {

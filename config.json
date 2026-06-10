@@ -1,5 +1,5 @@
 {
-  "strategy": "dynamic_grid_dx",
+  "strategy": "dynamic_grid_dcross",
   "llm": {
     "enabled": false,
     "model": "gemini-3.5-flash",

@@ -840,6 +840,8 @@ impl TradeStrategy for DynamicGridD1Strategy {
         secs_to_end: i64,
         current_atr: f64,
         spot_signal: SpotSignalSnapshot,
+        _mid_cross: &crate::strategy::MidCrossSnapshot,
+        _cex_micro: &crate::strategy::CexMicroSnapshot,
     ) -> Vec<OrderSignal> {
         let mut signals = Vec::new();
         let window_number = win_state.window_number;

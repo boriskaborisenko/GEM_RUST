@@ -10,19 +10,29 @@ mod analytics;
 mod client;
 mod config;
 mod llm;
+mod cex_micro;
+mod mid_cross_tracker;
+mod redeem_hold;
 mod strategy;
+mod window_stats;
 mod trader;
 mod volatility;
 
 use client::{get_now_ms, MarketEvent, MarketWindow, PricesState};
 use config::Config;
 use llm::{LlmForecastRequest, LlmForecaster, LlmRecentWindowContext, LlmRecentWindowRow};
-use strategy::{
-    EntryMode, EntrySignal, LlmForecast, OrderSignal, SpotSignalSnapshot, StrategyEngine,
-    LEGACY_CHEAPER_SIDE_RATIO,
+use cex_micro::CexMicroManager;
+use mid_cross_tracker::{LeadSide, MidCrossEvent, MidCrossSnapshot, MidCrossTracker};
+use redeem_hold::{
+    evaluate_redeem_hold, itm_gap_z, side_is_itm, RedeemHoldInput, REDEEM_HOLD_MIN_VALID_ATR,
 };
-use trader::{Portfolio, TradeRecord, WindowState};
+use strategy::{
+    CexMicroSnapshot, EntryMode, EntrySignal, LlmForecast, OrderSignal, SpotSignalSnapshot,
+    StrategyEngine, LEGACY_CHEAPER_SIDE_RATIO,
+};
+use trader::{Portfolio, TradeRecord, WindowCloseMeta, WindowState};
 use volatility::VolatilityManager;
+use window_stats::{WindowCloseRecord, WindowStatsAggregator};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -54,6 +64,9 @@ struct AppState {
     llm_forecast_scored: HashSet<usize>,
     llm_correct: u32,
     llm_wrong: u32,
+    mid_cross_tracker: MidCrossTracker,
+    cex_micro_mgr: CexMicroManager,
+    window_stats: WindowStatsAggregator,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -240,6 +253,9 @@ async fn main() -> anyhow::Result<()> {
     // Запускаем фоновое отслеживание живых тиков
     volatility_mgr.start_tracking();
 
+    let cex_micro_mgr = CexMicroManager::new();
+    cex_micro_mgr.start_tracking();
+
     let run_id = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let run_log_dir = format!(
         "logs/runs/{}_{}_{}_{}",
@@ -326,6 +342,9 @@ async fn main() -> anyhow::Result<()> {
         llm_forecast_scored: HashSet::new(),
         llm_correct: 0,
         llm_wrong: 0,
+        mid_cross_tracker: MidCrossTracker::new(),
+        cex_micro_mgr: cex_micro_mgr.clone(),
+        window_stats: WindowStatsAggregator::new(),
     };
 
     app_state
@@ -364,6 +383,10 @@ async fn main() -> anyhow::Result<()> {
             }
             if can_exit {
                 render_dashboard(&app_state);
+                app_state
+                    .window_stats
+                    .flush_to_csv(&app_state.run_log_dir);
+                println!("  {}", app_state.window_stats.session_summary_line());
                 println!("\n=================================================================================");
                 println!("  \x1b[38;5;114mSESSION DONE!\x1b[0m - All active positions concluded.");
                 println!("=================================================================================\n");
@@ -1084,19 +1107,7 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
                         "[SAFETY CLOSE] Window #{} past end time ({}s). Force closing.",
                         current.window_number, secs_to_end
                     ));
-                    let updated = {
-                        let mut port = app.portfolio.lock().unwrap();
-                        port.close_window(current.window_number, "CLOSED_TIME", app.spot_price);
-                        port.get_or_create_window_state(current.window_number, "", &current.market)
-                            .clone()
-                    };
-                    record_llm_result(
-                        app,
-                        current.window_number,
-                        &updated.market,
-                        app.spot_price,
-                        &updated.prices,
-                    );
+                    let updated = close_window_tracked(app, &current, "CLOSED_TIME", secs_to_end);
                     app.current_window = Some(updated);
                 }
             }
@@ -1123,19 +1134,10 @@ async fn promote_next_to_current(
                 "[Lifecycle] Force closing overlapping CURRENT Window #{}",
                 curr.window_number
             ));
-            let updated = {
-                let mut port = app.portfolio.lock().unwrap();
-                port.close_window(curr.window_number, "CLOSED_TIME", app.spot_price);
-                port.get_or_create_window_state(curr.window_number, "", &curr.market)
-                    .clone()
-            };
-            record_llm_result(
-                app,
-                curr.window_number,
-                &updated.market,
-                app.spot_price,
-                &updated.prices,
-            );
+            let secs_to_end = chrono::DateTime::parse_from_rfc3339(&curr.market.end_time)
+                .map(|end| (end.timestamp_millis() - get_now_ms()) / 1000)
+                .unwrap_or(0);
+            let _updated = close_window_tracked(app, &curr, "CLOSED_TIME", secs_to_end);
         }
     }
 
@@ -1293,6 +1295,52 @@ async fn process_event(
                     let current_atr = app.volatility_mgr.get_current_atr();
                     let spot_signal = app.spot_series.snapshot();
 
+                    if let Some(mid_event) = app.mid_cross_tracker.observe_tick(
+                        window_number,
+                        &market,
+                        &prices,
+                        secs_to_end,
+                        current_atr,
+                        app.spot_price,
+                        spot_signal,
+                        timestamp,
+                    ) {
+                        append_mid_cross_event(
+                            &app.run_log_dir,
+                            window_number,
+                            &market.slug,
+                            &mid_event,
+                            app.spot_price,
+                            &win_state.market,
+                            spot_signal,
+                        );
+                        if mid_event.event == "mid_cross" {
+                            let sig_label = if mid_event.is_significant {
+                                "sig=yes"
+                            } else {
+                                "sig=no"
+                            };
+                            app.system_logs.push(format!(
+                                "[MID CROSS] #{} {}→{} {} ATR={:.1} @{:.1}%",
+                                mid_event.cross_count,
+                                mid_event
+                                    .from_side
+                                    .map(|s| s.as_str())
+                                    .unwrap_or("?"),
+                                mid_event.to_side.as_str(),
+                                sig_label,
+                                mid_event.current_atr,
+                                mid_event.time_pct
+                            ));
+                            if app.system_logs.len() > 30 {
+                                app.system_logs.remove(0);
+                            }
+                        }
+                    }
+
+                    let mid_cross_snap = app.mid_cross_tracker.snapshot(window_number);
+                    let cex_micro_snap = app.cex_micro_mgr.snapshot(app.spot_price);
+
                     let signals = strat.process_live_tick(
                         &app.config,
                         &prices,
@@ -1302,6 +1350,8 @@ async fn process_event(
                         secs_to_end,
                         current_atr,
                         spot_signal,
+                        &mid_cross_snap,
+                        &cex_micro_snap,
                     );
 
                     for sig in signals {
@@ -1510,19 +1560,31 @@ fn render_dashboard(app: &AppState) {
         .as_ref()
         .and_then(|win| app.llm_forecasts.get(&win.window_number));
 
+    let current_mid_cross = current_window
+        .as_ref()
+        .map(|win| app.mid_cross_tracker.snapshot(win.window_number));
+    let cex_micro_snap = app.cex_micro_mgr.snapshot(app.spot_price);
     let left_lines = render_window_block(
         &current_window,
         "CURRENT",
         app.spot_price,
+        app.volatility_mgr.get_current_atr(),
         app.strategy.clone(),
         current_llm,
+        current_mid_cross.as_ref(),
+        Some(&cex_micro_snap),
     );
+    println!("  {}", app.window_stats.session_summary_line());
+
     let right_lines = render_window_block(
         &next_window,
         "NEXT",
         app.spot_price,
+        app.volatility_mgr.get_current_atr(),
         app.strategy.clone(),
         next_llm,
+        None,
+        None,
     );
 
     // Render blocks vertically
@@ -1566,8 +1628,11 @@ fn render_window_block(
     win_opt: &Option<WindowState>,
     label: &str,
     spot_price: Option<f64>,
+    current_atr: f64,
     strategy: Arc<Mutex<StrategyEngine>>,
     llm_forecast: Option<&LlmForecast>,
+    mid_cross: Option<&MidCrossSnapshot>,
+    cex_micro: Option<&CexMicroSnapshot>,
 ) -> Vec<String> {
     let mut lines = vec![];
 
@@ -1685,6 +1750,132 @@ fn render_window_block(
         "Combined Ask:    {}",
         paint(&format!("{:.2}", UP.ask + DN.ask), "bold")
     ));
+    if label == "CURRENT" {
+        if let Some(mc) = mid_cross {
+            if mc.armed {
+                let leader = mc
+                    .current_side
+                    .map(|s| s.as_str())
+                    .unwrap_or("TIE");
+                let leader_tone = match leader {
+                    "UP" => "green",
+                    "DOWN" => "red",
+                    _ => "yellow",
+                };
+                lines.push(format!(
+                    "Mid Lead: {} | gap {:.2} | crosses {} (sig {}) | armed @8%",
+                    paint(leader, leader_tone),
+                    mc.lead_gap,
+                    mc.cross_count,
+                    mc.significant_cross_count
+                ));
+                if let (Some(from), Some(to), Some(tpct)) = (
+                    mc.last_cross_from,
+                    mc.last_cross_to,
+                    mc.last_cross_time_pct,
+                ) {
+                    let sig = if mc.last_cross_is_significant {
+                        paint("sig", "green")
+                    } else {
+                        paint("noise", "dim")
+                    };
+                    lines.push(format!(
+                        "Last Mid Cross: {}→{} @ {:.1}% | {} | ATR {:.1}",
+                        paint(from.as_str(), "yellow"),
+                        paint(to.as_str(), leader_tone),
+                        tpct,
+                        sig,
+                        mc.last_cross_atr
+                    ));
+                }
+            } else {
+                lines.push(format!(
+                    "Mid Lead: {}",
+                    paint("waiting for 8% window", "dim")
+                ));
+            }
+        }
+
+        if let (Some(spot), Some(ptb)) = (spot_price, m.price_to_beat) {
+            let now = get_now_ms();
+            let (secs_to_end, time_pct) = match chrono::DateTime::parse_from_rfc3339(&m.end_time) {
+                Ok(end) => {
+                    let secs = (end.timestamp_millis() - now) / 1000;
+                    let duration_sec = window_duration_sec(m);
+                    let elapsed = (duration_sec - secs as f64).clamp(0.0, duration_sec);
+                    let pct = if duration_sec > 0.0 {
+                        (elapsed / duration_sec) * 100.0
+                    } else {
+                        0.0
+                    };
+                    (secs, pct)
+                }
+                Err(_) => (0, 0.0),
+            };
+            let mut hold_parts = Vec::new();
+            for (side, bid) in [("UP", UP.bid), ("DOWN", DN.bid)] {
+                let shares = if side == "UP" {
+                    win.up_shares
+                } else {
+                    win.down_shares
+                };
+                if shares <= 0.0 || !side_is_itm(side, spot, ptb) {
+                    continue;
+                }
+                let gap_z = itm_gap_z(side, spot, ptb, current_atr, secs_to_end);
+                let fair_prob = if side == "UP" {
+                    0.5 + (gap_z * 0.08).min(0.45)
+                } else {
+                    0.5 - (gap_z * 0.08).min(0.45)
+                };
+                let cex_against = cex_micro
+                    .map(|c| cex_micro::cex_velocity_against_side(side, c))
+                    .unwrap_or(false);
+                let decision = evaluate_redeem_hold(&RedeemHoldInput {
+                    side,
+                    spot,
+                    ptb,
+                    secs_to_end,
+                    time_pct,
+                    current_atr,
+                    bid,
+                    fair_prob: fair_prob.clamp(0.05, 0.95),
+                    ptb_crossed: false,
+                    counter_velocity_against: false,
+                    cex_velocity_against: cex_against,
+                });
+                if decision.should_hold {
+                    hold_parts.push(format!(
+                        "{} ITM z={:.2} ({})",
+                        side, gap_z, decision.reason
+                    ));
+                }
+            }
+            if hold_parts.is_empty() {
+                lines.push(format!("Redeem Hold: {}", paint("inactive", "dim")));
+            } else {
+                lines.push(format!(
+                    "Redeem Hold: {}",
+                    paint(&hold_parts.join(" | "), "green")
+                ));
+            }
+        }
+
+        if let Some(cex) = cex_micro {
+            let vel3 = cex
+                .trade_velocity_3s
+                .map(|v| format!("{:.0}", v))
+                .unwrap_or_else(|| "n/a".to_string());
+            let lead = cex
+                .lead_vs_chainlink_bps
+                .map(|b| format!("{:+.1}bps", b))
+                .unwrap_or_else(|| "n/a".to_string());
+            lines.push(format!(
+                "CEX Micro: v3s {} USD/s | imb {:.2} | lead {}",
+                vel3, cex.buy_sell_imbalance_3s, lead
+            ));
+        }
+    }
     if let Some(forecast) = llm_forecast {
         let tone = if forecast.side == "UP" {
             "green"
@@ -2115,6 +2306,257 @@ fn append_signal_event(
             terminal_floor_gap,
             mtm,
             unrealized_pnl
+        ),
+    );
+}
+
+fn window_duration_sec(market: &MarketWindow) -> f64 {
+    match (
+        chrono::DateTime::parse_from_rfc3339(&market.start_time),
+        chrono::DateTime::parse_from_rfc3339(&market.end_time),
+    ) {
+        (Ok(s), Ok(e)) => ((e.timestamp_millis() - s.timestamp_millis()) as f64 / 1000.0).max(1.0),
+        _ => 900.0,
+    }
+}
+
+fn build_window_close_meta(
+    app: &AppState,
+    win: &WindowState,
+    secs_to_end: i64,
+) -> WindowCloseMeta {
+    let duration_sec = window_duration_sec(&win.market);
+    let elapsed_sec = (duration_sec - secs_to_end as f64).clamp(0.0, duration_sec);
+    let time_pct_at_close = (elapsed_sec / duration_sec) * 100.0;
+    let final_atr = app.volatility_mgr.get_current_atr();
+    let mid_snap = app.mid_cross_tracker.snapshot(win.window_number);
+
+    let final_gap_z = match (app.spot_price, win.market.price_to_beat) {
+        (Some(spot), Some(ptb)) if ptb > 0.0 => {
+            let expected =
+                redeem_hold::expected_move_usd(final_atr.max(REDEEM_HOLD_MIN_VALID_ATR), secs_to_end);
+            if expected > 0.0 {
+                Some((spot - ptb) / expected)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
+    let (entry_side, entry_reason) = win
+        .trades
+        .iter()
+        .find(|t| t.trade_type == "BUY")
+        .map(|t| (t.side.clone(), t.reason.clone()))
+        .unwrap_or_default();
+
+    let mut would_redeem_hold = false;
+    if let (Some(spot), Some(ptb)) = (app.spot_price, win.market.price_to_beat) {
+        for side in ["UP", "DOWN"] {
+            let shares = if side == "UP" {
+                win.up_shares
+            } else {
+                win.down_shares
+            };
+            if shares <= 0.0 {
+                continue;
+            }
+            let bid = if side == "UP" {
+                win.prices.up.bid
+            } else {
+                win.prices.down.bid
+            };
+            let gap_z = itm_gap_z(side, spot, ptb, final_atr, secs_to_end);
+            let fair_prob = if side == "UP" {
+                0.5 + (gap_z * 0.08).min(0.45)
+            } else {
+                0.5 - (gap_z * 0.08).min(0.45)
+            };
+            if evaluate_redeem_hold(&RedeemHoldInput {
+                side,
+                spot,
+                ptb,
+                secs_to_end,
+                time_pct: time_pct_at_close,
+                current_atr: final_atr,
+                bid,
+                fair_prob: fair_prob.clamp(0.05, 0.95),
+                ptb_crossed: false,
+                counter_velocity_against: false,
+                cex_velocity_against: false,
+            })
+            .should_hold
+            {
+                would_redeem_hold = true;
+                break;
+            }
+        }
+    }
+
+    WindowCloseMeta {
+        strategy_name: app.config.strategy.clone(),
+        time_pct_at_close,
+        final_gap_z,
+        final_atr,
+        mid_cross_count: mid_snap.cross_count,
+        significant_mid_cross_count: mid_snap.significant_cross_count,
+        entry_side,
+        entry_reason,
+        would_redeem_hold,
+    }
+}
+
+fn close_window_tracked(
+    app: &mut AppState,
+    win: &WindowState,
+    status: &str,
+    secs_to_end: i64,
+) -> WindowState {
+    let meta = build_window_close_meta(app, win, secs_to_end);
+    let winner = match (app.spot_price, win.market.price_to_beat) {
+        (Some(spot), Some(ptb)) if ptb > 0.0 && spot > ptb => "UP".to_string(),
+        (Some(_), Some(ptb)) if ptb > 0.0 => "DOWN".to_string(),
+        _ => String::new(),
+    };
+    let pnl;
+    {
+        let mut port = app.portfolio.lock().unwrap();
+        port.close_window(win.window_number, status, app.spot_price, Some(meta.clone()));
+        pnl = port
+            .windows
+            .get(&win.window_number)
+            .map(|w| w.cash_returned - w.spent)
+            .unwrap_or(0.0);
+    }
+
+    let utc_hour = chrono::Utc::now().format("%H").to_string().parse().unwrap_or(0);
+    app.window_stats.record_close(&WindowCloseRecord {
+        window_number: win.window_number,
+        slug: win.market.slug.clone(),
+        strategy_name: meta.strategy_name.clone(),
+        pnl,
+        spent: win.spent,
+        final_atr: meta.final_atr,
+        time_pct_at_close: meta.time_pct_at_close,
+        final_gap_z: meta.final_gap_z,
+        mid_cross_count: meta.mid_cross_count,
+        significant_mid_cross_count: meta.significant_mid_cross_count,
+        entry_side: meta.entry_side.clone(),
+        entry_reason: meta.entry_reason.clone(),
+        would_redeem_hold: meta.would_redeem_hold,
+        winner,
+        utc_hour,
+    });
+
+    record_llm_result(
+        app,
+        win.window_number,
+        &win.market,
+        app.spot_price,
+        &win.prices,
+    );
+    finalize_mid_cross_for_window(app, win.window_number, &win.market.slug);
+
+    app.portfolio
+        .lock()
+        .unwrap()
+        .get_or_create_window_state(win.window_number, "", &win.market)
+        .clone()
+}
+
+fn finalize_mid_cross_for_window(app: &mut AppState, window_number: usize, slug: &str) {
+    let summary = app.mid_cross_tracker.finalize_window(window_number);
+    if summary.cross_count > 0 || summary.final_side.is_some() {
+        append_mid_cross_window_summary(&app.run_log_dir, window_number, slug, &summary);
+    }
+    app.mid_cross_tracker.remove_window(window_number);
+}
+
+fn append_mid_cross_event(
+    log_dir: &str,
+    window_number: usize,
+    slug: &str,
+    event: &MidCrossEvent,
+    spot_price: Option<f64>,
+    market: &MarketWindow,
+    spot_signal: SpotSignalSnapshot,
+) {
+    let (ptb_delta_usd, _) = match (spot_price, market.price_to_beat) {
+        (Some(spot), Some(ptb)) if ptb > 0.0 => {
+            let delta = spot - ptb;
+            (Some(delta), Some((delta / ptb) * 100.0))
+        }
+        _ => (None, None),
+    };
+
+    append_csv_row(
+        log_dir,
+        "mid_cross_events.csv",
+        "timestamp,window_id,slug,event,from_side,to_side,up_mid,down_mid,lead_gap,peak_prev_gap,is_significant,cross_count,significant_cross_count,time_pct,secs_to_end,current_atr,spot_price,ptb,ptb_delta_usd,spot_velocity,spot_smoothed_velocity,spot_acceleration",
+        &format!(
+            "{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{},{},{},{:.2},{},{:.4},{},{},{},{},{},{}",
+            get_now_ms(),
+            window_number,
+            slug,
+            event.event,
+            event.from_side.map(|s| s.as_str()).unwrap_or(""),
+            event.to_side.as_str(),
+            event.up_mid,
+            event.down_mid,
+            event.lead_gap,
+            event.peak_prev_gap,
+            event.is_significant,
+            event.cross_count,
+            event.significant_cross_count,
+            event.time_pct,
+            event.secs_to_end,
+            event.current_atr,
+            spot_price
+                .map(|p| format!("{:.4}", p))
+                .unwrap_or_else(|| "".to_string()),
+            market
+                .price_to_beat
+                .map(|p| format!("{:.4}", p))
+                .unwrap_or_else(|| "".to_string()),
+            ptb_delta_usd
+                .map(|p| format!("{:.4}", p))
+                .unwrap_or_else(|| "".to_string()),
+            spot_signal
+                .raw_velocity_usd_per_sec
+                .map(|v| format!("{:.6}", v))
+                .unwrap_or_else(|| "".to_string()),
+            spot_signal
+                .smoothed_velocity_usd_per_sec
+                .map(|v| format!("{:.6}", v))
+                .unwrap_or_else(|| "".to_string()),
+            spot_signal
+                .acceleration_usd_per_sec2
+                .map(|v| format!("{:.6}", v))
+                .unwrap_or_else(|| "".to_string()),
+        ),
+    );
+}
+
+fn append_mid_cross_window_summary(
+    log_dir: &str,
+    window_number: usize,
+    slug: &str,
+    summary: &mid_cross_tracker::MidCrossWindowSummary,
+) {
+    append_csv_row(
+        log_dir,
+        "mid_cross_window_summary.csv",
+        "timestamp,window_id,slug,cross_count,significant_cross_count,final_side,last_cross_atr",
+        &format!(
+            "{},{},{},{},{},{},{}",
+            get_now_ms(),
+            window_number,
+            slug,
+            summary.cross_count,
+            summary.significant_cross_count,
+            summary.final_side.map(|s| s.as_str()).unwrap_or(""),
+            summary.last_cross_atr,
         ),
     );
 }

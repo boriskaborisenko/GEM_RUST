@@ -46,6 +46,19 @@ pub struct Portfolio {
     pub log_dir: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct WindowCloseMeta {
+    pub strategy_name: String,
+    pub time_pct_at_close: f64,
+    pub final_gap_z: Option<f64>,
+    pub final_atr: f64,
+    pub mid_cross_count: u32,
+    pub significant_mid_cross_count: u32,
+    pub entry_side: String,
+    pub entry_reason: String,
+    pub would_redeem_hold: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct PortfolioSnapshot {
     pub starting_bank: f64,
@@ -339,7 +352,13 @@ impl Portfolio {
         trades
     }
 
-    pub fn close_window(&mut self, window_number: usize, status: &str, spot_price: Option<f64>) {
+    pub fn close_window(
+        &mut self,
+        window_number: usize,
+        status: &str,
+        spot_price: Option<f64>,
+        meta: Option<WindowCloseMeta>,
+    ) {
         let mut redeemed = false;
         let mut terminal_trades: Vec<(String, TradeRecord)> = vec![];
 
@@ -464,12 +483,18 @@ impl Portfolio {
                     self.losses += 1;
                 }
 
+                let winner = match (spot_price, win.market.price_to_beat) {
+                    (Some(spot), Some(ptb)) if ptb > 0.0 && spot > ptb => "UP",
+                    (Some(_), Some(ptb)) if ptb > 0.0 => "DOWN",
+                    _ => "",
+                };
+                let meta = meta.unwrap_or_default();
                 Self::append_csv_row(
                     &self.log_dir,
                     "window_summary.csv",
-                    "timestamp,window_id,slug,status,spent,returned,pnl,close_spot,ptb,winner",
+                    "timestamp,window_id,slug,status,spent,returned,pnl,close_spot,ptb,winner,strategy,time_pct_at_close,final_gap_z,final_atr,mid_cross_count,significant_mid_cross_count,entry_side,entry_reason,would_redeem_hold",
                     &format!(
-                        "{},{},{},{},{:.4},{:.4},{:.4},{},{},{}",
+                        "{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{:.2},{},{:.4},{},{},{},{},{}",
                         get_now_ms(),
                         win.window_number,
                         win.market.slug,
@@ -484,11 +509,18 @@ impl Portfolio {
                             .price_to_beat
                             .map(|p| format!("{:.4}", p))
                             .unwrap_or_else(|| "".to_string()),
-                        match (spot_price, win.market.price_to_beat) {
-                            (Some(spot), Some(ptb)) if ptb > 0.0 && spot > ptb => "UP",
-                            (Some(_), Some(ptb)) if ptb > 0.0 => "DOWN",
-                            _ => "",
-                        }
+                        winner,
+                        meta.strategy_name,
+                        meta.time_pct_at_close,
+                        meta.final_gap_z
+                            .map(|z| format!("{:.4}", z))
+                            .unwrap_or_else(|| "".to_string()),
+                        meta.final_atr,
+                        meta.mid_cross_count,
+                        meta.significant_mid_cross_count,
+                        meta.entry_side,
+                        meta.entry_reason,
+                        meta.would_redeem_hold
                     ),
                 );
             }

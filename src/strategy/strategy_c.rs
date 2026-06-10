@@ -88,6 +88,8 @@ impl TradeStrategy for DynamicBreakEvenStrategy {
         secs_to_end: i64,
         _current_atr: f64,
         _spot_signal: crate::strategy::SpotSignalSnapshot,
+        _mid_cross: &crate::strategy::MidCrossSnapshot,
+        _cex_micro: &crate::strategy::CexMicroSnapshot,
     ) -> Vec<OrderSignal> {
         let mut signals = vec![];
         let window_number = win_state.window_number;

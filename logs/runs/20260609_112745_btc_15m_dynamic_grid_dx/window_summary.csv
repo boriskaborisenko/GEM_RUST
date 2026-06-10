@@ -1,0 +1,2 @@
+timestamp,window_id,slug,status,spent,returned,pnl,close_spot,ptb,winner
+1781006399657,2,btc-updown-15m-1781005500,CLOSED_TIME,9.0000,8.6925,-0.3075,62674.6865,62600.8626,UP
