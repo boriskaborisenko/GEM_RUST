@@ -1,3 +1,0 @@
-timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
-1781087692038,0,btc-updown-15m-1781087400,BUY,DOWN,dcross_cheap_entry_down_ask_0.39_fair_0.719_edge_+0.329_gap_z_-0.23_crosses_0_sig_0_atr_47.5,0.3900,65.38461538,25.5000,74.5000
-1781087705347,0,btc-updown-15m-1781087400,SELL,DOWN,dcross_grid_step1_target_0.49_bid_0.49_atr_volatile,0.4900,22.88461538,11.2135,85.7135

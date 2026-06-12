@@ -33,6 +33,7 @@ struct BucketStats {
 #[derive(Debug, Clone, Default)]
 pub struct WindowStatsAggregator {
     by_atr_regime: HashMap<String, BucketStats>,
+    by_utc_hour: HashMap<String, BucketStats>,
     by_mid_cross_bucket: HashMap<String, BucketStats>,
     by_strategy: HashMap<String, BucketStats>,
     redeem_hold_windows: u32,
@@ -60,6 +61,13 @@ impl WindowStatsAggregator {
             record.pnl,
         );
         update_bucket(
+            self.by_utc_hour
+                .entry(record.utc_hour.to_string())
+                .or_default(),
+            won,
+            record.pnl,
+        );
+        update_bucket(
             self.by_mid_cross_bucket
                 .entry(cross_bucket)
                 .or_default(),
@@ -79,9 +87,9 @@ impl WindowStatsAggregator {
         }
     }
 
-    pub fn session_summary_line(&self) -> String {
-        let dcross = self.by_strategy.get("dynamic_grid_dcross");
-        let (wr, avg_pnl) = match dcross {
+    pub fn session_summary_line(&self, strategy_name: &str) -> String {
+        let bucket = self.by_strategy.get(strategy_name);
+        let (wr, avg_pnl) = match bucket {
             Some(b) if b.count > 0 => (
                 (b.wins as f64 / b.count as f64) * 100.0,
                 b.total_pnl / b.count as f64,
@@ -89,8 +97,8 @@ impl WindowStatsAggregator {
             _ => (0.0, 0.0),
         };
         format!(
-            "Session stats: {} closed | D-CROSS WR {:.1}% avgPnL {:+.2} | redeem-hold windows {}",
-            self.total_closed, wr, avg_pnl, self.redeem_hold_windows
+            "Session stats: {} closed | {} WR {:.1}% avgPnL {:+.2} | redeem-hold windows {}",
+            self.total_closed, strategy_name, wr, avg_pnl, self.redeem_hold_windows
         )
     }
 
@@ -114,6 +122,7 @@ impl WindowStatsAggregator {
         let ts = get_now_ms();
         for (bucket_type, map) in [
             ("atr_regime", &self.by_atr_regime),
+            ("utc_hour", &self.by_utc_hour),
             ("mid_cross", &self.by_mid_cross_bucket),
             ("strategy", &self.by_strategy),
         ] {

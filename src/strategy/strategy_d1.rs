@@ -688,6 +688,7 @@ impl TradeStrategy for DynamicGridD1Strategy {
         current_btc_atr: f64,
         spot_signal: SpotSignalSnapshot,
         _llm_forecast: Option<crate::strategy::LlmForecast>,
+        _cex_micro: &crate::strategy::CexMicroSnapshot,
     ) -> Option<EntrySignal> {
         if !config.pre_start_entry.enabled || self.entered_windows.contains(&window_number) {
             return None;
@@ -893,6 +894,12 @@ impl TradeStrategy for DynamicGridD1Strategy {
             first_sold_side: None,
             ptb_crossed: false,
             ptb_baseline: None,
+            e_conviction_side: None,
+            e_tranches_done: 0,
+            e_grid_steps_done: 0,
+            h_entry_side: None,
+            h_entry_done: false,
+            h_salvage_done: false,
         });
         let cross_happened_now = update_ptb_cross_state(state, spot_price, market);
         let ptb_crossed = state.ptb_crossed;

@@ -1,0 +1,2 @@
+timestamp,window_id,slug,status,spent,returned,pnl,close_spot,ptb,winner,strategy,utc_hour,time_pct_at_close,final_gap_z,final_atr,mid_cross_count,significant_mid_cross_count,entry_side,entry_reason,would_redeem_hold
+1781214299194,1,btc-updown-15m-1781213400,CLOSED_TIME,20.2500,29.0458,8.7958,63470.1234,63418.8701,UP,dynamic_grid_e,21,100.00,14.9975,26.4714,12,2,UP,e_tranche1_value_up_ask_0.49_conv_0.007_gap_z_-0.07_lead_0.04,false

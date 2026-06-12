@@ -334,6 +334,7 @@ impl TradeStrategy for DynamicGridDCrossStrategy {
         _current_btc_atr: f64,
         _spot_signal: SpotSignalSnapshot,
         _llm_forecast: Option<crate::strategy::LlmForecast>,
+        _cex_micro: &crate::strategy::CexMicroSnapshot,
     ) -> Option<EntrySignal> {
         None
     }

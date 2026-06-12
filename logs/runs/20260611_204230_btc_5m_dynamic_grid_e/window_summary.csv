@@ -1,0 +1,5 @@
+timestamp,window_id,slug,status,spent,returned,pnl,close_spot,ptb,winner,strategy,time_pct_at_close,final_gap_z,final_atr,mid_cross_count,significant_mid_cross_count,entry_side,entry_reason,would_redeem_hold
+1781239799276,97,btc-updown-5m-1781239500,CLOSED_TIME,10.8000,5.2678,-5.5322,63625.1150,63629.0491,DOWN,dynamic_grid_e,100.00,-1.2574,24.2357,9,1,UP,e_tranche1_up_ask_0.49_conv_0.184_gap_z_+0.30,false
+1781240099276,98,btc-updown-5m-1781239800,CLOSED_TIME,20.2500,7.0298,-13.2202,63621.6153,63625.4437,DOWN,dynamic_grid_e,100.00,-1.3306,22.2857,10,1,UP,e_tranche1_up_ask_0.47_conv_0.169_gap_z_+0.26,false
+1781240399279,99,btc-updown-5m-1781240100,CLOSED_TIME,10.8000,3.9505,-6.8495,63612.6266,63618.4353,DOWN,dynamic_grid_e,100.00,-2.1842,20.6000,0,0,UP,e_tranche1_up_ask_0.38_conv_0.170_gap_z_+0.30,false
+1781240999284,101,btc-updown-5m-1781240700,CLOSED_TIME,10.8000,5.7757,-5.0243,63503.7449,63540.9925,DOWN,dynamic_grid_e,100.00,-9.8041,29.4286,6,4,UP,e_tranche1_up_ask_0.46_conv_0.146_gap_z_+0.22,false

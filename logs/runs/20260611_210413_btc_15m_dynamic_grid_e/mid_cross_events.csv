@@ -1,0 +1,5 @@
+timestamp,window_id,slug,event,from_side,to_side,up_mid,down_mid,lead_gap,peak_prev_gap,is_significant,cross_count,significant_cross_count,time_pct,secs_to_end,current_atr,spot_price,ptb,ptb_delta_usd,spot_velocity,spot_smoothed_velocity,spot_acceleration
+1781211854318,0,btc-updown-15m-1781211600,armed_init,,UP,0.6750,0.3250,0.3500,0.0000,false,0,0,28.33,645,29.3714,,,,,,
+1781212571933,1,btc-updown-15m-1781212500,armed_init,,DOWN,0.4150,0.5950,0.1800,0.0000,false,0,0,8.00,828,29.3714,63473.8309,63495.6836,-21.8527,-0.246451,-0.214383,0.016772
+1781213008485,1,btc-updown-15m-1781212500,mid_cross,DOWN,UP,0.5050,0.4950,0.0100,0.5600,true,1,1,56.56,391,25.1714,63493.7330,63495.6836,-1.9506,0.424129,0.376511,0.096185
+1781213031322,1,btc-updown-15m-1781212500,mid_cross,UP,DOWN,0.4900,0.5000,0.0100,0.1200,false,2,1,59.11,368,25.1714,63497.0350,63495.6836,1.3514,-0.040576,-0.108852,-0.089667

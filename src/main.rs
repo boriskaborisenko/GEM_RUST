@@ -386,7 +386,12 @@ async fn main() -> anyhow::Result<()> {
                 app_state
                     .window_stats
                     .flush_to_csv(&app_state.run_log_dir);
-                println!("  {}", app_state.window_stats.session_summary_line());
+                println!(
+                    "  {}",
+                    app_state
+                        .window_stats
+                        .session_summary_line(&app_state.config.strategy)
+                );
                 println!("\n=================================================================================");
                 println!("  \x1b[38;5;114mSESSION DONE!\x1b[0m - All active positions concluded.");
                 println!("=================================================================================\n");
@@ -432,9 +437,24 @@ async fn discover_initial_markets(
         app.exclude_slugs.push(active.slug.clone());
 
         let mut port = app.portfolio.lock().unwrap();
-        let win_state = port.get_or_create_window_state(0, "CURRENT", &active);
-        win_state.status = "LIVE".to_string(); // Live since startup
-        app.current_window = Some(win_state.clone());
+        let warmup_window = app.config.strategy == "dynamic_grid_e"
+            || app.config.strategy == "cheap_hold_h";
+        let promoted = {
+            let win_state = port.get_or_create_window_state(0, "CURRENT", &active);
+            if warmup_window {
+                win_state.status = "SKIPPED".to_string();
+            } else {
+                win_state.status = "LIVE".to_string(); // Live since startup
+            }
+            win_state.clone()
+        };
+        if warmup_window {
+            port.skipped_windows += 1;
+            app.system_logs.push(
+                "[Strategy E] Window #0 is warmup only — trading starts at window #1".to_string(),
+            );
+        }
+        app.current_window = Some(promoted);
         app.next_window_number = 1;
 
         // Subscribe prices
@@ -948,6 +968,7 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
                             secs_to_start,
                         )
                         .await;
+                        let cex_micro_snap = app.cex_micro_mgr.snapshot(app.spot_price);
                         let mut strat = app.strategy.lock().unwrap();
                         if let Some(entry) = strat.check_pre_start_entry(
                             &app.config,
@@ -959,6 +980,7 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
                             current_atr,
                             app.spot_series.snapshot(),
                             llm_forecast,
+                            &cex_micro_snap,
                         ) {
                             trigger_buy = true;
                             up_ask_val = entry.up_ask;
@@ -1355,6 +1377,12 @@ async fn process_event(
                     );
 
                     for sig in signals {
+                        if (app.config.strategy == "dynamic_grid_e"
+                            || app.config.strategy == "cheap_hold_h")
+                            && window_number == 0
+                        {
+                            continue;
+                        }
                         let executed = if sig.is_buy {
                             port.execute_buy(
                                 window_number,
@@ -1573,8 +1601,12 @@ fn render_dashboard(app: &AppState) {
         current_llm,
         current_mid_cross.as_ref(),
         Some(&cex_micro_snap),
+        &app.config.strategy,
     );
-    println!("  {}", app.window_stats.session_summary_line());
+    println!(
+        "  {}",
+        app.window_stats.session_summary_line(&app.config.strategy)
+    );
 
     let right_lines = render_window_block(
         &next_window,
@@ -1585,6 +1617,7 @@ fn render_dashboard(app: &AppState) {
         next_llm,
         None,
         None,
+        &app.config.strategy,
     );
 
     // Render blocks vertically
@@ -1633,6 +1666,7 @@ fn render_window_block(
     llm_forecast: Option<&LlmForecast>,
     mid_cross: Option<&MidCrossSnapshot>,
     cex_micro: Option<&CexMicroSnapshot>,
+    strategy_name: &str,
 ) -> Vec<String> {
     let mut lines = vec![];
 
@@ -1812,6 +1846,12 @@ fn render_window_block(
                 }
                 Err(_) => (0, 0.0),
             };
+            let ptb_crossed_terminal = strategy
+                .lock()
+                .unwrap()
+                .get_strategy_state(win.window_number)
+                .map(|s| s.ptb_crossed)
+                .unwrap_or(false);
             let mut hold_parts = Vec::new();
             for (side, bid) in [("UP", UP.bid), ("DOWN", DN.bid)] {
                 let shares = if side == "UP" {
@@ -1840,7 +1880,7 @@ fn render_window_block(
                     current_atr,
                     bid,
                     fair_prob: fair_prob.clamp(0.05, 0.95),
-                    ptb_crossed: false,
+                    ptb_crossed: ptb_crossed_terminal,
                     counter_velocity_against: false,
                     cex_velocity_against: cex_against,
                 });
@@ -1927,7 +1967,201 @@ fn render_window_block(
 
     // Strategy status
     let strat_engine = strategy.lock().unwrap();
-    if let Some(strat) = strat_engine.get_strategy_state(win.window_number) {
+    if strategy_name == "dynamic_grid_e" {
+        if win.window_number == 0 {
+            lines.push(paint(
+                "E: window #0 warmup — no trading until window #1",
+                "dim",
+            ));
+        } else if let Some(strat) = strat_engine.get_strategy_state(win.window_number) {
+            let conviction = strat
+                .e_conviction_side
+                .as_deref()
+                .unwrap_or("N/A");
+            let conviction_tone = match conviction {
+                "UP" => "green",
+                "DOWN" => "red",
+                _ => "dim",
+            };
+            lines.push(format!(
+                "E Conviction: {} | Tranches: {}/3 | Grid sells: {} (3 base + extend)",
+                paint(conviction, conviction_tone),
+                strat.e_tranches_done,
+                strat.e_grid_steps_done,
+            ));
+            let baseline = strat.ptb_baseline.as_deref().unwrap_or("N/A");
+            let crossed = if strat.ptb_crossed {
+                paint("YES", "green")
+            } else {
+                paint("NO", "yellow")
+            };
+            lines.push(format!(
+                "PTB baseline: {} | PTB crossed: {}",
+                paint(baseline, "cyan"),
+                crossed
+            ));
+            if label == "CURRENT" {
+                if let Some(mc) = mid_cross {
+                    if mc.armed {
+                        let now = get_now_ms();
+                        let time_pct = match chrono::DateTime::parse_from_rfc3339(&m.end_time) {
+                            Ok(end) => {
+                                let secs = (end.timestamp_millis() - now) / 1000;
+                                let duration_sec = window_duration_sec(m);
+                                let elapsed =
+                                    (duration_sec - secs as f64).clamp(0.0, duration_sec);
+                                if duration_sec > 0.0 {
+                                    (elapsed / duration_sec) * 100.0
+                                } else {
+                                    0.0
+                                }
+                            }
+                            Err(_) => 0.0,
+                        };
+                        let up_ask = win.prices.up.ask;
+                        let dn_ask = win.prices.down.ask;
+                        let cross_window = mc
+                            .last_cross_time_pct
+                            .map(|cp| time_pct >= cp && time_pct <= cp + 10.0)
+                            .unwrap_or(false);
+                        let entry_gate = if mc.cross_count >= 5 && time_pct < 40.0 {
+                            paint(
+                                &format!("BLOCKED chop ({} crosses)", mc.cross_count),
+                                "red",
+                            )
+                        } else if cross_window
+                            && mc.lead_gap >= 0.14
+                            && ((mc.current_side == Some(LeadSide::Up) && up_ask <= 0.58)
+                                || (mc.current_side == Some(LeadSide::Down) && dn_ask <= 0.58))
+                        {
+                            paint(
+                                &format!(
+                                    "READY cross lead {:.2} (UP {:.2} / DN {:.2})",
+                                    mc.lead_gap, up_ask, dn_ask
+                                ),
+                                "green",
+                            )
+                        } else if up_ask <= 0.50 || dn_ask <= 0.50 {
+                            paint(
+                                &format!("READY value (UP {:.2} / DN {:.2})", up_ask, dn_ask),
+                                "green",
+                            )
+                        } else {
+                            paint(
+                                &format!("WAIT no entry (UP {:.2} / DN {:.2})", up_ask, dn_ask),
+                                "yellow",
+                            )
+                        };
+                        lines.push(format!("E Entry gate: {}", entry_gate));
+                    }
+                }
+            }
+        } else if label == "NEXT" {
+            lines.push(paint(
+                "E: monitoring NEXT (live-only, no pre-entry)",
+                "dim",
+            ));
+        } else {
+            lines.push(paint("E: live-only — waiting for conviction entry", "dim"));
+        }
+    } else if strategy_name == "cheap_hold_h" {
+        if win.window_number == 0 {
+            lines.push(paint(
+                "H: window #0 warmup — no trading until window #1",
+                "dim",
+            ));
+        } else if let Some(strat) = strat_engine.get_strategy_state(win.window_number) {
+            let side = strat.h_entry_side.as_deref().unwrap_or("N/A");
+            let side_tone = match side {
+                "UP" => "green",
+                "DOWN" => "red",
+                _ => "dim",
+            };
+            let time_pct = match chrono::DateTime::parse_from_rfc3339(&m.end_time) {
+                Ok(end) => {
+                    let secs = (end.timestamp_millis() - now) / 1000;
+                    let duration_sec = window_duration_sec(m);
+                    let elapsed = (duration_sec - secs as f64).clamp(0.0, duration_sec);
+                    if duration_sec > 0.0 {
+                        (elapsed / duration_sec) * 100.0
+                    } else {
+                        0.0
+                    }
+                }
+                Err(_) => 0.0,
+            };
+            let phase = strategy::strategy_h::phase_label(
+                time_pct,
+                strat.h_entry_done,
+                strat.h_salvage_done,
+            );
+            let phase_tone = match phase {
+                "entry" => "green",
+                "salvage" => "yellow",
+                "hold" => "cyan",
+                "flat" => "dim",
+                _ => "red",
+            };
+            lines.push(format!(
+                "H Side: {} | Entry: {} | Phase: {}",
+                paint(side, side_tone),
+                if strat.h_entry_done {
+                    paint("done", "green")
+                } else {
+                    paint("waiting", "yellow")
+                },
+                paint(phase, phase_tone),
+            ));
+            if label == "CURRENT" {
+                let up_ask = win.prices.up.ask;
+                let dn_ask = win.prices.down.ask;
+                if let (Some(spot), Some(ptb)) = (spot_price, m.price_to_beat) {
+                    let secs_to_end = match chrono::DateTime::parse_from_rfc3339(&m.end_time) {
+                        Ok(end) => ((end.timestamp_millis() - now) / 1000).max(1),
+                        Err(_) => 600,
+                    };
+                    let expected = redeem_hold::expected_move_usd(
+                        current_atr.max(REDEEM_HOLD_MIN_VALID_ATR),
+                        secs_to_end,
+                    );
+                    let gap_z = if expected > 0.0 {
+                        (spot - ptb) / expected
+                    } else {
+                        0.0
+                    };
+                    lines.push(format!(
+                        "H gap_z: {:+.2} | UP ask {:.2} | DN ask {:.2}",
+                        gap_z, up_ask, dn_ask
+                    ));
+                    let entry_gate = if !strat.h_entry_done && time_pct <= 33.0 {
+                        let cheap_ok = strategy::strategy_h::pick_cheap_entry_side(&win.prices)
+                            .is_some();
+                        let gap_ok = strategy::strategy_h::gap_z_allows_entry(gap_z);
+                        if cheap_ok && gap_ok {
+                            paint("READY cheap ~0.38 near PTB", "green")
+                        } else if !gap_ok {
+                            paint("BLOCKED PTB gap too large", "red")
+                        } else {
+                            paint(
+                                &format!("WAIT ask band (UP {:.2} / DN {:.2})", up_ask, dn_ask),
+                                "yellow",
+                            )
+                        }
+                    } else {
+                        paint("n/a", "dim")
+                    };
+                    lines.push(format!("H Entry gate: {}", entry_gate));
+                }
+            }
+        } else if label == "NEXT" {
+            lines.push(paint(
+                "H: monitoring NEXT (live-only, no pre-entry)",
+                "dim",
+            ));
+        } else {
+            lines.push(paint("H: live-only — waiting for cheap entry", "dim"));
+        }
+    } else if let Some(strat) = strat_engine.get_strategy_state(win.window_number) {
         if strat.first_sold_side.is_none() {
             lines.push(format!(
                 "Exit Trigger: {} (Active both)",
@@ -2394,8 +2628,14 @@ fn build_window_close_meta(
         }
     }
 
+    let utc_hour = chrono::DateTime::parse_from_rfc3339(&win.market.start_time)
+        .ok()
+        .and_then(|dt| dt.format("%H").to_string().parse().ok())
+        .unwrap_or(0);
+
     WindowCloseMeta {
         strategy_name: app.config.strategy.clone(),
+        utc_hour,
         time_pct_at_close,
         final_gap_z,
         final_atr,
@@ -2430,7 +2670,6 @@ fn close_window_tracked(
             .unwrap_or(0.0);
     }
 
-    let utc_hour = chrono::Utc::now().format("%H").to_string().parse().unwrap_or(0);
     app.window_stats.record_close(&WindowCloseRecord {
         window_number: win.window_number,
         slug: win.market.slug.clone(),
@@ -2446,7 +2685,7 @@ fn close_window_tracked(
         entry_reason: meta.entry_reason.clone(),
         would_redeem_hold: meta.would_redeem_hold,
         winner,
-        utc_hour,
+        utc_hour: meta.utc_hour,
     });
 
     record_llm_result(

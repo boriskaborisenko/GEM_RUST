@@ -643,6 +643,7 @@ impl TradeStrategy for DynamicGridDxStrategy {
         _current_btc_atr: f64,
         _spot_signal: SpotSignalSnapshot,
         _llm_forecast: Option<crate::strategy::LlmForecast>,
+        _cex_micro: &crate::strategy::CexMicroSnapshot,
     ) -> Option<EntrySignal> {
         // Dx trades the active/current window only. NEXT/future windows are
         // observed and prepared by the runtime, but never bought pre-start.
@@ -688,6 +689,12 @@ impl TradeStrategy for DynamicGridDxStrategy {
             first_sold_side: None,
             ptb_crossed: false,
             ptb_baseline: None,
+            e_conviction_side: None,
+            e_tranches_done: 0,
+            e_grid_steps_done: 0,
+            h_entry_side: None,
+            h_entry_done: false,
+            h_salvage_done: false,
         });
         let cross_happened_now = update_ptb_cross_state(state, &live_market, spot_price);
         let ptb_crossed = state.ptb_crossed;

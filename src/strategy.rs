@@ -5,6 +5,8 @@ pub mod strategy_d;
 pub mod strategy_d1;
 pub mod strategy_d_cross;
 pub mod strategy_dx;
+pub mod strategy_e;
+pub mod strategy_h;
 
 pub use crate::cex_micro::CexMicroSnapshot;
 pub use crate::mid_cross_tracker::MidCrossSnapshot;
@@ -57,13 +59,19 @@ pub struct LlmForecast {
     pub risk_note: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StrategyState {
     pub up_sold: bool,
     pub down_sold: bool,
     pub first_sold_side: Option<String>,
     pub ptb_crossed: bool,
     pub ptb_baseline: Option<String>,
+    pub e_conviction_side: Option<String>,
+    pub e_tranches_done: u8,
+    pub e_grid_steps_done: u8,
+    pub h_entry_side: Option<String>,
+    pub h_entry_done: bool,
+    pub h_salvage_done: bool,
 }
 
 // ─── ИНТЕРФЕЙС ПЛАГИНОВ СТРАТЕГИЙ (Strategy Trait) ───
@@ -79,6 +87,7 @@ pub trait TradeStrategy {
         current_btc_atr: f64,
         spot_signal: SpotSignalSnapshot,
         llm_forecast: Option<LlmForecast>,
+        cex_micro: &CexMicroSnapshot,
     ) -> Option<EntrySignal>;
 
     fn process_live_tick(
@@ -112,6 +121,8 @@ impl StrategyEngine {
             "dynamic_grid_d1" => Box::new(strategy_d1::DynamicGridD1Strategy::new()),
             "dynamic_grid_dx" => Box::new(strategy_dx::DynamicGridDxStrategy::new()),
             "dynamic_grid_dcross" => Box::new(strategy_d_cross::DynamicGridDCrossStrategy::new()),
+            "dynamic_grid_e" => Box::new(strategy_e::ConvictionRouterStrategy::new()),
+            "cheap_hold_h" => Box::new(strategy_h::CheapHoldStrategy::new()),
             _ => Box::new(strategy_a::SimpleBothStrategy::new()),
         };
         Self {
@@ -130,6 +141,7 @@ impl StrategyEngine {
         current_btc_atr: f64,
         spot_signal: SpotSignalSnapshot,
         llm_forecast: Option<LlmForecast>,
+        cex_micro: &CexMicroSnapshot,
     ) -> Option<EntrySignal> {
         self.active_strategy.check_pre_start_entry(
             config,
@@ -141,6 +153,7 @@ impl StrategyEngine {
             current_btc_atr,
             spot_signal,
             llm_forecast,
+            cex_micro,
         )
     }
 

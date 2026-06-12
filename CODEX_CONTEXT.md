@@ -237,6 +237,20 @@ Primary questions for the first log review:
 - Redeem-hold: does it hold real ITM winners into redeem, and does counter-velocity disable it when the move reverses?
 - Expectancy: prioritize average win vs average loss and final equity over raw winrate.
 
+## Strategy E — post-test research (HIGH PRIORITY)
+
+After the first real `dynamic_grid_e` paper run, **must investigate** whether winrate and PnL correlate with:
+
+1. **Time of day (UTC)** — e.g. Asia / Europe / US session buckets.
+2. **ATR regime** — calm / normal / volatile / storm (`final_atr` in `window_summary.csv`, `atr_regime` in `session_stats.csv`).
+
+Do not hard-filter by hour or ATR until a run with enough closed windows (roughly 15–25 on 15m, 40+ on 5m) shows a stable pattern. Treat as hypothesis until sample size is there.
+
+Analysis sources:
+
+- `window_summary.csv` — per-window `pnl`, `final_atr`, `utc_hour`, `winner`, `entry_side`
+- `session_stats.csv` — aggregated buckets (`atr_regime`, `utc_hour`, `strategy`)
+
 ## Run Logs
 
 Each process creates a separated run directory:

@@ -41,6 +41,7 @@ impl TradeStrategy for AsymmetricLadderStrategy {
         _current_btc_atr: f64,
         _spot_signal: crate::strategy::SpotSignalSnapshot,
         _llm_forecast: Option<crate::strategy::LlmForecast>,
+        _cex_micro: &crate::strategy::CexMicroSnapshot,
     ) -> Option<EntrySignal> {
         if !config.pre_start_entry.enabled {
             return None;
@@ -150,6 +151,12 @@ impl TradeStrategy for AsymmetricLadderStrategy {
             first_sold_side: None,
             ptb_crossed: false,
             ptb_baseline: None,
+            e_conviction_side: None,
+            e_tranches_done: 0,
+            e_grid_steps_done: 0,
+            h_entry_side: None,
+            h_entry_done: false,
+            h_salvage_done: false,
         });
 
         // ─── EMERGENCY RULE: 15% remaining time stop (Unconditional!) ───────

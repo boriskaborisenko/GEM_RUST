@@ -49,6 +49,7 @@ pub struct Portfolio {
 #[derive(Debug, Clone, Default)]
 pub struct WindowCloseMeta {
     pub strategy_name: String,
+    pub utc_hour: u32,
     pub time_pct_at_close: f64,
     pub final_gap_z: Option<f64>,
     pub final_atr: f64,
@@ -492,9 +493,9 @@ impl Portfolio {
                 Self::append_csv_row(
                     &self.log_dir,
                     "window_summary.csv",
-                    "timestamp,window_id,slug,status,spent,returned,pnl,close_spot,ptb,winner,strategy,time_pct_at_close,final_gap_z,final_atr,mid_cross_count,significant_mid_cross_count,entry_side,entry_reason,would_redeem_hold",
+                    "timestamp,window_id,slug,status,spent,returned,pnl,close_spot,ptb,winner,strategy,utc_hour,time_pct_at_close,final_gap_z,final_atr,mid_cross_count,significant_mid_cross_count,entry_side,entry_reason,would_redeem_hold",
                     &format!(
-                        "{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{:.2},{},{:.4},{},{},{},{},{}",
+                        "{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{},{:.2},{},{:.4},{},{},{},{},{}",
                         get_now_ms(),
                         win.window_number,
                         win.market.slug,
@@ -511,6 +512,7 @@ impl Portfolio {
                             .unwrap_or_else(|| "".to_string()),
                         winner,
                         meta.strategy_name,
+                        meta.utc_hour,
                         meta.time_pct_at_close,
                         meta.final_gap_z
                             .map(|z| format!("{:.4}", z))

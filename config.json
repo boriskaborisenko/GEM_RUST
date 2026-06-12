@@ -1,5 +1,5 @@
 {
-  "strategy": "dynamic_grid_dcross",
+  "strategy": "cheap_hold_h",
   "llm": {
     "enabled": false,
     "model": "gemini-3.5-flash",
@@ -13,7 +13,7 @@
     "windowBudgetPct": 10.0
   },
   "preStartEntry": {
-    "enabled": true,
+    "enabled": false,
     "minSecondsBeforeStart": 5,
     "maxSecondsBeforeStart": 120,
     "minSideAsk": 0.42,
