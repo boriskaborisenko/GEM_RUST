@@ -1,0 +1,2 @@
+timestamp,window_id,slug,event,from_side,to_side,up_mid,down_mid,lead_gap,peak_prev_gap,is_significant,cross_count,significant_cross_count,time_pct,secs_to_end,current_atr,spot_price,ptb,ptb_delta_usd,spot_velocity,spot_smoothed_velocity,spot_acceleration
+1781247461330,0,btc-updown-15m-1781246700,armed_init,,UP,0.9650,0.0350,0.9300,0.0000,false,0,0,84.67,138,32.3500,,,,,,

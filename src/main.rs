@@ -9,6 +9,7 @@
 mod analytics;
 mod client;
 mod config;
+mod h_stats;
 mod llm;
 mod cex_micro;
 mod mid_cross_tracker;
@@ -386,6 +387,20 @@ async fn main() -> anyhow::Result<()> {
                 app_state
                     .window_stats
                     .flush_to_csv(&app_state.run_log_dir);
+                if app_state.config.strategy == "cheap_hold_h" {
+                    let p = app_state.portfolio.lock().unwrap();
+                    h_stats::log_h_window_close(
+                        &app_state.run_log_dir,
+                        0,
+                        "SESSION_END",
+                        p.overall_realized_pnl,
+                        &h_stats::HCloseStats::default(),
+                        p.h_market_wins,
+                        p.h_market_losses,
+                        p.h_salvage_escapes,
+                        p.h_salvage_wins,
+                    );
+                }
                 println!(
                     "  {}",
                     app_state
@@ -1538,6 +1553,20 @@ fn render_dashboard(app: &AppState) {
         paint(&p.losses.to_string(), "red"),
         loss_pct
     );
+    if app.config.strategy == "cheap_hold_h" {
+        println!(
+            "  {}",
+            paint(
+                &h_stats::format_h_session_line(
+                    p.h_market_wins,
+                    p.h_market_losses,
+                    p.h_salvage_escapes,
+                    p.h_salvage_wins,
+                ),
+                "cyan",
+            )
+        );
+    }
 
     let pnl_sign = if p.overall_realized_pnl >= 0.0 {
         "+"
@@ -2153,6 +2182,29 @@ fn render_window_block(
                     lines.push(format!("H Entry gate: {}", entry_gate));
                 }
             }
+            if win.status.starts_with("CLOSED") && win.spent > 0.0 {
+                let entry_side = strat
+                    .h_entry_side
+                    .as_deref()
+                    .or_else(|| first_buy(win).map(|t| t.side.as_str()))
+                    .unwrap_or("N/A");
+                let winner = match (spot_price, m.price_to_beat) {
+                    (Some(spot), Some(ptb)) if ptb > 0.0 && spot > ptb => "UP",
+                    (Some(_), Some(ptb)) if ptb > 0.0 => "DOWN",
+                    _ => "",
+                };
+                let h = h_stats::derive_h_close_stats(&win.trades, entry_side, winner);
+                let realized = win.cash_returned - win.spent;
+                let market = match h.market_win {
+                    Some(true) => paint("WIN", "green"),
+                    Some(false) => paint("LOSE", "red"),
+                    None => paint("n/a", "dim"),
+                };
+                lines.push(format!(
+                    "H Close: market={} | salvaged={} salvage_win={} | fin PnL {:+.2}",
+                    market, h.salvaged, h.salvage_win, realized
+                ));
+            }
         } else if label == "NEXT" {
             lines.push(paint(
                 "H: monitoring NEXT (live-only, no pre-entry)",
@@ -2668,6 +2720,24 @@ fn close_window_tracked(
             .get(&win.window_number)
             .map(|w| w.cash_returned - w.spent)
             .unwrap_or(0.0);
+    }
+
+    if meta.strategy_name == "cheap_hold_h" && win.spent > 0.0 {
+        let closed = app.portfolio.lock().unwrap();
+        if let Some(w) = closed.windows.get(&win.window_number) {
+            let h = h_stats::derive_h_close_stats(&w.trades, &meta.entry_side, &winner);
+            app.system_logs.push(format!(
+                "[H] #{} market={:?} salvaged={} salvage_win={} pnl={:+.2}",
+                win.window_number,
+                h.market_win,
+                h.salvaged,
+                h.salvage_win,
+                pnl
+            ));
+            if app.system_logs.len() > 30 {
+                app.system_logs.remove(0);
+            }
+        }
     }
 
     app.window_stats.record_close(&WindowCloseRecord {

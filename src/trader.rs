@@ -1,4 +1,5 @@
 use crate::client::{get_now_ms, MarketWindow, PricesState};
+use crate::h_stats::{self, HCloseStats};
 use std::collections::HashMap;
 
 const MIN_TRADE_USD: f64 = 1.0;
@@ -41,6 +42,10 @@ pub struct Portfolio {
     pub closed_windows: u32,
     pub wins: u32,
     pub losses: u32,
+    pub h_market_wins: u32,
+    pub h_market_losses: u32,
+    pub h_salvage_escapes: u32,
+    pub h_salvage_wins: u32,
     pub skipped_windows: u32,
     pub windows: HashMap<usize, WindowState>,
     pub log_dir: String,
@@ -70,6 +75,10 @@ pub struct PortfolioSnapshot {
     pub closed_windows: u32,
     pub wins: u32,
     pub losses: u32,
+    pub h_market_wins: u32,
+    pub h_market_losses: u32,
+    pub h_salvage_escapes: u32,
+    pub h_salvage_wins: u32,
     pub skipped_windows: u32,
 }
 
@@ -91,6 +100,10 @@ impl Portfolio {
             closed_windows: 0,
             wins: 0,
             losses: 0,
+            h_market_wins: 0,
+            h_market_losses: 0,
+            h_salvage_escapes: 0,
+            h_salvage_wins: 0,
             skipped_windows: 0,
             windows: HashMap::new(),
             log_dir,
@@ -152,6 +165,10 @@ impl Portfolio {
             closed_windows: self.closed_windows,
             wins: self.wins,
             losses: self.losses,
+            h_market_wins: self.h_market_wins,
+            h_market_losses: self.h_market_losses,
+            h_salvage_escapes: self.h_salvage_escapes,
+            h_salvage_wins: self.h_salvage_wins,
             skipped_windows: self.skipped_windows,
         }
     }
@@ -484,18 +501,63 @@ impl Portfolio {
                     self.losses += 1;
                 }
 
+                let meta = meta.unwrap_or_default();
+
                 let winner = match (spot_price, win.market.price_to_beat) {
                     (Some(spot), Some(ptb)) if ptb > 0.0 && spot > ptb => "UP",
                     (Some(_), Some(ptb)) if ptb > 0.0 => "DOWN",
                     _ => "",
                 };
-                let meta = meta.unwrap_or_default();
+
+                let h = if meta.strategy_name == "cheap_hold_h" {
+                    h_stats::derive_h_close_stats(&win.trades, &meta.entry_side, winner)
+                } else {
+                    HCloseStats::default()
+                };
+                if meta.strategy_name == "cheap_hold_h" {
+                    match h.market_win {
+                        Some(true) => self.h_market_wins += 1,
+                        Some(false) => self.h_market_losses += 1,
+                        None => {}
+                    }
+                    if h.salvaged {
+                        self.h_salvage_escapes += 1;
+                        if h.salvage_win {
+                            self.h_salvage_wins += 1;
+                        }
+                    }
+                    h_stats::log_h_window_close(
+                        &self.log_dir,
+                        win.window_number,
+                        &win.market.slug,
+                        realized,
+                        &h,
+                        self.h_market_wins,
+                        self.h_market_losses,
+                        self.h_salvage_escapes,
+                        self.h_salvage_wins,
+                    );
+                }
+
+                let (h_market_col, h_salvaged_col, h_salvage_win_col) =
+                    if meta.strategy_name == "cheap_hold_h" {
+                        (
+                            h.market_win
+                                .map(|v| v.to_string())
+                                .unwrap_or_default(),
+                            h.salvaged.to_string(),
+                            h.salvage_win.to_string(),
+                        )
+                    } else {
+                        (String::new(), String::new(), String::new())
+                    };
+
                 Self::append_csv_row(
                     &self.log_dir,
                     "window_summary.csv",
-                    "timestamp,window_id,slug,status,spent,returned,pnl,close_spot,ptb,winner,strategy,utc_hour,time_pct_at_close,final_gap_z,final_atr,mid_cross_count,significant_mid_cross_count,entry_side,entry_reason,would_redeem_hold",
+                    "timestamp,window_id,slug,status,spent,returned,pnl,close_spot,ptb,winner,strategy,utc_hour,time_pct_at_close,final_gap_z,final_atr,mid_cross_count,significant_mid_cross_count,entry_side,entry_reason,would_redeem_hold,h_market_win,h_salvaged,h_salvage_win",
                     &format!(
-                        "{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{},{:.2},{},{:.4},{},{},{},{},{}",
+                        "{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{},{:.2},{},{:.4},{},{},{},{},{},{},{},{}",
                         get_now_ms(),
                         win.window_number,
                         win.market.slug,
@@ -522,7 +584,10 @@ impl Portfolio {
                         meta.significant_mid_cross_count,
                         meta.entry_side,
                         meta.entry_reason,
-                        meta.would_redeem_hold
+                        meta.would_redeem_hold,
+                        h_market_col,
+                        h_salvaged_col,
+                        h_salvage_win_col,
                     ),
                 );
             }
