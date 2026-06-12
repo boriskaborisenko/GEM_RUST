@@ -531,6 +531,8 @@ impl Portfolio {
                         win.window_number,
                         &win.market.slug,
                         realized,
+                        &meta.entry_side,
+                        winner,
                         &h,
                         self.h_market_wins,
                         self.h_market_losses,

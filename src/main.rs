@@ -394,6 +394,8 @@ async fn main() -> anyhow::Result<()> {
                         0,
                         "SESSION_END",
                         p.overall_realized_pnl,
+                        "",
+                        "",
                         &h_stats::HCloseStats::default(),
                         p.h_market_wins,
                         p.h_market_losses,
@@ -2201,8 +2203,13 @@ fn render_window_block(
                     None => paint("n/a", "dim"),
                 };
                 lines.push(format!(
-                    "H Close: market={} | salvaged={} salvage_win={} | fin PnL {:+.2}",
-                    market, h.salvaged, h.salvage_win, realized
+                    "H Close: entry={} real_winner={} | market={} salvaged={} salvage_win={} | fin PnL {:+.2}",
+                    entry_side,
+                    if winner.is_empty() { "n/a" } else { winner },
+                    market,
+                    h.salvaged,
+                    h.salvage_win,
+                    realized
                 ));
             }
         } else if label == "NEXT" {
@@ -2727,8 +2734,10 @@ fn close_window_tracked(
         if let Some(w) = closed.windows.get(&win.window_number) {
             let h = h_stats::derive_h_close_stats(&w.trades, &meta.entry_side, &winner);
             app.system_logs.push(format!(
-                "[H] #{} market={:?} salvaged={} salvage_win={} pnl={:+.2}",
+                "[H] #{} entry={} real_winner={} market={:?} salvaged={} salvage_win={} pnl={:+.2}",
                 win.window_number,
+                meta.entry_side,
+                if winner.is_empty() { "n/a" } else { &winner },
                 h.market_win,
                 h.salvaged,
                 h.salvage_win,

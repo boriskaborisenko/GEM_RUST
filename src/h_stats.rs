@@ -61,6 +61,8 @@ pub fn log_h_window_close(
     window_id: usize,
     slug: &str,
     pnl: f64,
+    entry_side: &str,
+    real_winner_side: &str,
     h: &HCloseStats,
     cum_market_wins: u32,
     cum_market_losses: u32,
@@ -77,16 +79,18 @@ pub fn log_h_window_close(
     if new_file {
         let _ = writeln!(
             file,
-            "timestamp,window_id,slug,pnl,h_market_win,h_salvaged,h_salvage_win,entry_price,exit_price,cum_market_wins,cum_market_losses,cum_salvage_escapes,cum_salvage_wins"
+            "timestamp,window_id,slug,pnl,entry_side,real_winner_side,h_market_win,h_salvaged,h_salvage_win,entry_price,exit_price,cum_market_wins,cum_market_losses,cum_salvage_escapes,cum_salvage_wins"
         );
     }
     let _ = writeln!(
         file,
-        "{},{},{},{:.4},{},{},{},{:.4},{:.4},{},{},{},{}",
+        "{},{},{},{:.4},{},{},{},{},{},{:.4},{:.4},{},{},{},{}",
         crate::client::get_now_ms(),
         window_id,
         slug,
         pnl,
+        entry_side,
+        real_winner_side,
         h.market_win
             .map(|v| v.to_string())
             .unwrap_or_default(),
