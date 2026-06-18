@@ -7,9 +7,11 @@ pub mod strategy_d_cross;
 pub mod strategy_dx;
 pub mod strategy_e;
 pub mod strategy_h;
+pub mod strategy_j;
 
 pub use crate::cex_micro::CexMicroSnapshot;
 pub use crate::mid_cross_tracker::MidCrossSnapshot;
+pub use crate::trade_tape::TradeTapeSnapshot;
 
 use crate::client::{MarketWindow, PricesState};
 use crate::config::Config;
@@ -102,6 +104,7 @@ pub trait TradeStrategy {
         spot_signal: SpotSignalSnapshot,
         mid_cross: &MidCrossSnapshot,
         cex_micro: &CexMicroSnapshot,
+        tape: &TradeTapeSnapshot,
     ) -> Vec<OrderSignal>;
 
     fn get_strategy_state(&self, window_number: usize) -> Option<StrategyState>;
@@ -123,6 +126,7 @@ impl StrategyEngine {
             "dynamic_grid_dcross" => Box::new(strategy_d_cross::DynamicGridDCrossStrategy::new()),
             "dynamic_grid_e" => Box::new(strategy_e::ConvictionRouterStrategy::new()),
             "cheap_hold_h" => Box::new(strategy_h::CheapHoldStrategy::new()),
+            "j_endgame" => Box::new(strategy_j::JEndgameStrategy::new()),
             _ => Box::new(strategy_a::SimpleBothStrategy::new()),
         };
         Self {
@@ -169,6 +173,7 @@ impl StrategyEngine {
         spot_signal: SpotSignalSnapshot,
         mid_cross: &MidCrossSnapshot,
         cex_micro: &CexMicroSnapshot,
+        tape: &TradeTapeSnapshot,
     ) -> Vec<OrderSignal> {
         self.active_strategy.process_live_tick(
             config,
@@ -181,6 +186,7 @@ impl StrategyEngine {
             spot_signal,
             mid_cross,
             cex_micro,
+            tape,
         )
     }
 

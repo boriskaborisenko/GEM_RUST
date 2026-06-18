@@ -1,0 +1,61 @@
+{
+  "strategy": "cheap_hold_h",
+  "llm": {
+    "enabled": false,
+    "model": "gemini-3.5-flash",
+    "location": "global"
+  },
+  "minBtcAtr": 0.0,
+  "minEthAtr": 0.0,
+  "session": {
+    "startingBank": 500,
+    "minWindowBudget": 30.0,
+    "maxWindowBudget": 150.0,
+    "windowBudgetPct": 10.0
+  },
+  "preStartEntry": {
+    "enabled": false,
+    "minSecondsBeforeStart": 5,
+    "maxSecondsBeforeStart": 120,
+    "minSideAsk": 0.42,
+    "maxSideAsk": 0.58
+  },
+  "sellStrategy": {
+    "exitBid": 0.65
+  },
+  "asymmetricLadder": {
+    "strongSteps": [0.62, 0.72],
+    "weakSteps": [0.70, 0.85],
+    "decayEnabled": true
+  },
+  "exitBeforeEndSeconds": 25,
+  "forceCloseAtEnd": false,
+  "jEndgame": {
+    "endgameSecs": 120,
+    "minWinnerAsk": 0.88,
+    "impulseEnabled": true,
+    "impulseMaxAsk": 0.92,
+    "impulseMinGapZ": 0.7,
+    "impulseTierUsd": 8.0,
+    "impulseSweepClipsPerTick": 4,
+    "impulseRequireTape": true,
+    "cheapMaxAsk": 0.94,
+    "cheapMinGapZ": 1.0,
+    "cheapTierUsd": 10.0,
+    "cheapSweepClipsPerTick": 2,
+    "cheapRequireTape": false,
+    "lateMaxSecs": 50,
+    "lateMinGapZ": 0.65,
+    "lateTierUsd": 5.0,
+    "lateRequireTape": true,
+    "takerMaxAsk": 0.99,
+    "clipUsd": 1.0,
+    "maxUsdPerWindow": 23.0,
+    "maxClipsPerWindow": 23,
+    "sweepClipsPerTick": 5,
+    "tapeWindowMs": 5000,
+    "minTapeUsd": 5.0,
+    "minTapeBuys": 2,
+    "takerMode": true
+  }
+}

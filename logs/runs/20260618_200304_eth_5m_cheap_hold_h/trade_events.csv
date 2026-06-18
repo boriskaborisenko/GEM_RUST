@@ -1,0 +1,11 @@
+timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
+1781813454613,2,eth-updown-5m-1781813400,BUY,DOWN,h_entry_down_ask_0.39_gap_z_+0.10_active_xc1,0.3900,69.23076923,27.0000,473.0000
+1781813646236,2,eth-updown-5m-1781813400,SELL,DOWN,h_salvage_otm_bid_0.11_gap_z_+0.45,0.1100,69.23076923,7.6154,480.6154
+1781813796133,3,eth-updown-5m-1781813700,BUY,DOWN,h_entry_down_ask_0.37_gap_z_-0.08_aligned_xc1,0.3700,72.97297297,27.0000,453.6154
+1781813975165,3,eth-updown-5m-1781813700,SELL,DOWN,h_salvage_otm_bid_0.19_gap_z_+0.81,0.1900,72.97297297,13.8649,467.4802
+1781814677330,6,eth-updown-5m-1781814600,BUY,UP,h_entry_up_ask_0.38_gap_z_-0.08_active_xc2,0.3800,71.05263158,27.0000,440.4802
+1781814899172,6,eth-updown-5m-1781814600,REDEEM,UP,option_expired_itm_win_1.00,1.0000,71.05263158,71.0526,511.5329
+1781815275311,8,eth-updown-5m-1781815200,BUY,DOWN,h_entry_down_ask_0.39_gap_z_+0.19_active_xc2,0.3900,69.23076923,27.0000,484.5329
+1781815494762,8,eth-updown-5m-1781815200,SELL,DOWN,h_salvage_otm_bid_0.12_gap_z_+0.27,0.1200,69.23076923,8.3077,492.8406
+1781815844573,10,eth-updown-5m-1781815800,BUY,DOWN,h_entry_down_ask_0.39_gap_z_+0.14_active_xc4,0.3900,69.23076923,27.0000,465.8406
+1781816056939,10,eth-updown-5m-1781815800,SELL,DOWN,h_salvage_otm_bid_0.11_gap_z_+0.63,0.1100,69.23076923,7.6154,473.4560

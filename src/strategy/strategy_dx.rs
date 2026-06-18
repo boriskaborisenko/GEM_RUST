@@ -662,6 +662,7 @@ impl TradeStrategy for DynamicGridDxStrategy {
         spot_signal: SpotSignalSnapshot,
         _mid_cross: &MidCrossSnapshot,
         cex_micro: &CexMicroSnapshot,
+        tape: &crate::trade_tape::TradeTapeSnapshot,
     ) -> Vec<OrderSignal> {
         let mut signals = Vec::new();
         let window_number = win_state.window_number;

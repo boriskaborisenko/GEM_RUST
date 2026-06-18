@@ -1,0 +1,3 @@
+timestamp,window_id,slug,event,status_before,current_atr,spot_price,ptb,ptb_delta_usd,ptb_delta_pct,up_bid,up_ask,down_bid,down_ask
+1781820899121,1,eth-updown-5m-1781820900,promote_skipped,WAITING_ENTRY,1.0750,1705.0047,,,,0.5100,0.5200,0.4900,0.5000
+1781821199124,2,eth-updown-5m-1781821200,promote_skipped,WAITING_ENTRY,0.9943,1701.7694,,,,0.4900,0.5300,0.4900,0.5100

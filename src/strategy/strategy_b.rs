@@ -95,6 +95,7 @@ impl TradeStrategy for AsymmetricLadderStrategy {
         _spot_signal: crate::strategy::SpotSignalSnapshot,
         _mid_cross: &crate::strategy::MidCrossSnapshot,
         _cex_micro: &crate::strategy::CexMicroSnapshot,
+        _tape: &crate::trade_tape::TradeTapeSnapshot,
     ) -> Vec<OrderSignal> {
         let mut signals = vec![];
         let window_number = win_state.window_number;

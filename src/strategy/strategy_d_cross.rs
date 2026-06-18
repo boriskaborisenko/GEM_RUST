@@ -351,6 +351,7 @@ impl TradeStrategy for DynamicGridDCrossStrategy {
         spot_signal: SpotSignalSnapshot,
         mid_cross: &MidCrossSnapshot,
         cex_micro: &CexMicroSnapshot,
+        tape: &crate::trade_tape::TradeTapeSnapshot,
     ) -> Vec<OrderSignal> {
         let mut signals = Vec::new();
         let time_pct = time_pct_for(market, secs_to_end);

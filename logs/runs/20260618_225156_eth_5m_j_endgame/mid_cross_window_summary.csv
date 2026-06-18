@@ -1,0 +1,4 @@
+timestamp,window_id,slug,cross_count,significant_cross_count,final_side,last_cross_atr
+1781823299909,0,eth-updown-5m-1781823000,3,3,DOWN,1.1450000000000142
+1781823599912,1,eth-updown-5m-1781823300,5,3,DOWN,1.092142857142887
+1781823899914,2,eth-updown-5m-1781823600,14,6,DOWN,0.9571428571428474

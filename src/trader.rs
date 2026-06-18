@@ -194,8 +194,8 @@ impl Portfolio {
                 initial_down_shares: 0.0,
                 trades: vec![],
                 prices: PricesState {
-                    up: crate::client::ContractPrices { bid: 0.0, ask: 0.0 },
-                    down: crate::client::ContractPrices { bid: 0.0, ask: 0.0 },
+                    up: crate::client::ContractPrices::top(0.0, 0.0),
+                    down: crate::client::ContractPrices::top(0.0, 0.0),
                 },
             });
 

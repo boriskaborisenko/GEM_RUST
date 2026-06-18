@@ -1,0 +1,10 @@
+timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
+1781821059793,1,eth-updown-5m-1781820900,BUY,DOWN,j_impulse_taker_down_fill_0.88_ask_0.88_gap_z_-0.79_tape_$61/10_xc1,0.8800,1.13636364,1.0000,499.0000
+1781821059794,1,eth-updown-5m-1781820900,BUY,DOWN,j_impulse_taker_down_fill_0.88_ask_0.88_gap_z_-0.79_tape_$61/10_xc1,0.8800,1.13636364,1.0000,498.0000
+1781821059794,1,eth-updown-5m-1781820900,BUY,DOWN,j_impulse_taker_down_fill_0.88_ask_0.88_gap_z_-0.79_tape_$61/10_xc1,0.8800,1.13636364,1.0000,497.0000
+1781821059794,1,eth-updown-5m-1781820900,BUY,DOWN,j_impulse_taker_down_fill_0.88_ask_0.88_gap_z_-0.79_tape_$61/10_xc1,0.8800,1.13636364,1.0000,496.0000
+1781821059811,1,eth-updown-5m-1781820900,BUY,DOWN,j_impulse_taker_down_fill_0.88_ask_0.88_gap_z_-0.79_tape_$63/11_xc1,0.8800,1.13636364,1.0000,495.0000
+1781821059811,1,eth-updown-5m-1781820900,BUY,DOWN,j_impulse_taker_down_fill_0.88_ask_0.88_gap_z_-0.79_tape_$63/11_xc1,0.8800,1.13636364,1.0000,494.0000
+1781821059811,1,eth-updown-5m-1781820900,BUY,DOWN,j_impulse_taker_down_fill_0.88_ask_0.88_gap_z_-0.79_tape_$63/11_xc1,0.8800,1.13636364,1.0000,493.0000
+1781821059811,1,eth-updown-5m-1781820900,BUY,DOWN,j_impulse_taker_down_fill_0.88_ask_0.88_gap_z_-0.79_tape_$63/11_xc1,0.8800,1.13636364,1.0000,492.0000
+1781821199121,1,eth-updown-5m-1781820900,REDEEM,DOWN,option_expired_itm_win_1.00,1.0000,9.09090909,9.0909,501.0909

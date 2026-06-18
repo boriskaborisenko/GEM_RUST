@@ -1,0 +1,3 @@
+timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
+1781817548140,1,eth-updown-15m-1781817300,BUY,DOWN,h_entry_down_ask_0.37_gap_z_+0.06_active_xc1,0.3700,72.97297297,27.0000,473.0000
+1781818097350,1,eth-updown-15m-1781817300,SELL,DOWN,h_salvage_otm_bid_0.12_gap_z_+0.46,0.1200,72.97297297,8.7568,481.7568

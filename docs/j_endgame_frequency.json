@@ -1,0 +1,407 @@
+{
+  "params": {
+    "last_secs": 90,
+    "ask_min": 0.94,
+    "ask_max": 0.98,
+    "gap_z_min": 0.8
+  },
+  "runs_analyzed": 14,
+  "total_windows": 769,
+  "total_eligible_windows": 97,
+  "eligible_pct": 12.6,
+  "per_run": [
+    {
+      "run_dir": "20260611_204230_btc_5m_dynamic_grid_e",
+      "windows_with_signals": 5,
+      "windows_endgame_snipe_eligible": 1,
+      "eligible_pct": 20.0,
+      "late_snipe_ticks": 1,
+      "examples": [
+        {
+          "slug": "btc-updown-5m-1781240700",
+          "winner": "DOWN",
+          "ask": 0.97,
+          "gap_z": 7.542,
+          "secs_to_end": 35
+        }
+      ]
+    },
+    {
+      "run_dir": "20260612_053520_btc_5m_cheap_hold_h",
+      "windows_with_signals": 14,
+      "windows_endgame_snipe_eligible": 1,
+      "eligible_pct": 7.1,
+      "late_snipe_ticks": 1,
+      "examples": [
+        {
+          "slug": "btc-updown-5m-1781243400",
+          "winner": "DOWN",
+          "ask": 0.96,
+          "gap_z": 5.771,
+          "secs_to_end": 75
+        }
+      ]
+    },
+    {
+      "run_dir": "20260612_065427_btc_5m_cheap_hold_h",
+      "windows_with_signals": 1,
+      "windows_endgame_snipe_eligible": 0,
+      "eligible_pct": 0.0,
+      "late_snipe_ticks": 0,
+      "examples": []
+    },
+    {
+      "run_dir": "20260612_065739_btc_5m_cheap_hold_h",
+      "windows_with_signals": 3,
+      "windows_endgame_snipe_eligible": 0,
+      "eligible_pct": 0.0,
+      "late_snipe_ticks": 0,
+      "examples": []
+    },
+    {
+      "run_dir": "20260612_071609_btc_5m_cheap_hold_h",
+      "windows_with_signals": 9,
+      "windows_endgame_snipe_eligible": 0,
+      "eligible_pct": 0.0,
+      "late_snipe_ticks": 0,
+      "examples": []
+    },
+    {
+      "run_dir": "20260612_080229_btc_5m_cheap_hold_h",
+      "windows_with_signals": 40,
+      "windows_endgame_snipe_eligible": 4,
+      "eligible_pct": 10.0,
+      "late_snipe_ticks": 4,
+      "examples": [
+        {
+          "slug": "btc-updown-5m-1781257500",
+          "winner": "DOWN",
+          "ask": 0.95,
+          "gap_z": 3.073,
+          "secs_to_end": 75
+        },
+        {
+          "slug": "btc-updown-5m-1781258400",
+          "winner": "DOWN",
+          "ask": 0.94,
+          "gap_z": 4.801,
+          "secs_to_end": 75
+        },
+        {
+          "slug": "btc-updown-5m-1781260200",
+          "winner": "UP",
+          "ask": 0.96,
+          "gap_z": 5.864,
+          "secs_to_end": 67
+        },
+        {
+          "slug": "btc-updown-5m-1781261100",
+          "winner": "UP",
+          "ask": 0.96,
+          "gap_z": 4.96,
+          "secs_to_end": 75
+        }
+      ]
+    },
+    {
+      "run_dir": "20260614_142406_btc_5m_cheap_hold_h",
+      "windows_with_signals": 248,
+      "windows_endgame_snipe_eligible": 38,
+      "eligible_pct": 15.3,
+      "late_snipe_ticks": 38,
+      "examples": [
+        {
+          "slug": "btc-updown-5m-1781448600",
+          "winner": "UP",
+          "ask": 0.95,
+          "gap_z": 3.67,
+          "secs_to_end": 75
+        },
+        {
+          "slug": "btc-updown-5m-1781448900",
+          "winner": "UP",
+          "ask": 0.94,
+          "gap_z": 2.476,
+          "secs_to_end": 75
+        },
+        {
+          "slug": "btc-updown-5m-1781450400",
+          "winner": "UP",
+          "ask": 0.95,
+          "gap_z": 5.37,
+          "secs_to_end": 75
+        },
+        {
+          "slug": "btc-updown-5m-1781451000",
+          "winner": "DOWN",
+          "ask": 0.96,
+          "gap_z": 4.336,
+          "secs_to_end": 75
+        },
+        {
+          "slug": "btc-updown-5m-1781461800",
+          "winner": "UP",
+          "ask": 0.95,
+          "gap_z": 4.34,
+          "secs_to_end": 75
+        },
+        {
+          "slug": "btc-updown-5m-1781462100",
+          "winner": "UP",
+          "ask": 0.94,
+          "gap_z": 2.498,
+          "secs_to_end": 75
+        },
+        {
+          "slug": "btc-updown-5m-1781462700",
+          "winner": "UP",
+          "ask": 0.95,
+          "gap_z": 5.282,
+          "secs_to_end": 75
+        },
+        {
+          "slug": "btc-updown-5m-1781463000",
+          "winner": "UP",
+          "ask": 0.94,
+          "gap_z": 5.428,
+          "secs_to_end": 75
+        },
+        {
+          "slug": "btc-updown-5m-1781464200",
+          "winner": "UP",
+          "ask": 0.95,
+          "gap_z": 4.884,
+          "secs_to_end": 74
+        },
+        {
+          "slug": "btc-updown-5m-1781464800",
+          "winner": "DOWN",
+          "ask": 0.96,
+          "gap_z": 6.98,
+          "secs_to_end": 67
+        }
+      ]
+    },
+    {
+      "run_dir": "20260615_130302_btc_5m_cheap_hold_h",
+      "windows_with_signals": 3,
+      "windows_endgame_snipe_eligible": 1,
+      "eligible_pct": 33.3,
+      "late_snipe_ticks": 1,
+      "examples": [
+        {
+          "slug": "btc-updown-5m-1781528700",
+          "winner": "UP",
+          "ask": 0.96,
+          "gap_z": 7.574,
+          "secs_to_end": 45
+        }
+      ]
+    },
+    {
+      "run_dir": "20260615_132839_btc_5m_cheap_hold_h",
+      "windows_with_signals": 327,
+      "windows_endgame_snipe_eligible": 37,
+      "eligible_pct": 11.3,
+      "late_snipe_ticks": 37,
+      "examples": [
+        {
+          "slug": "btc-updown-5m-1781532000",
+          "winner": "DOWN",
+          "ask": 0.96,
+          "gap_z": 4.777,
+          "secs_to_end": 60
+        },
+        {
+          "slug": "btc-updown-5m-1781532900",
+          "winner": "UP",
+          "ask": 0.96,
+          "gap_z": 4.667,
+          "secs_to_end": 60
+        },
+        {
+          "slug": "btc-updown-5m-1781533200",
+          "winner": "DOWN",
+          "ask": 0.95,
+          "gap_z": 3.345,
+          "secs_to_end": 60
+        },
+        {
+          "slug": "btc-updown-5m-1781534100",
+          "winner": "DOWN",
+          "ask": 0.94,
+          "gap_z": 3.814,
+          "secs_to_end": 60
+        },
+        {
+          "slug": "btc-updown-5m-1781538000",
+          "winner": "UP",
+          "ask": 0.96,
+          "gap_z": 3.553,
+          "secs_to_end": 60
+        },
+        {
+          "slug": "btc-updown-5m-1781539800",
+          "winner": "UP",
+          "ask": 0.96,
+          "gap_z": 4.616,
+          "secs_to_end": 60
+        },
+        {
+          "slug": "btc-updown-5m-1781540400",
+          "winner": "UP",
+          "ask": 0.95,
+          "gap_z": 3.204,
+          "secs_to_end": 60
+        },
+        {
+          "slug": "btc-updown-5m-1781556600",
+          "winner": "UP",
+          "ask": 0.94,
+          "gap_z": 4.143,
+          "secs_to_end": 60
+        },
+        {
+          "slug": "btc-updown-5m-1781562900",
+          "winner": "UP",
+          "ask": 0.96,
+          "gap_z": 3.891,
+          "secs_to_end": 59
+        },
+        {
+          "slug": "btc-updown-5m-1781616900",
+          "winner": "UP",
+          "ask": 0.94,
+          "gap_z": 5.443,
+          "secs_to_end": 60
+        }
+      ]
+    },
+    {
+      "run_dir": "20260617_124829_btc_5m_cheap_hold_h",
+      "windows_with_signals": 79,
+      "windows_endgame_snipe_eligible": 13,
+      "eligible_pct": 16.5,
+      "late_snipe_ticks": 13,
+      "examples": [
+        {
+          "slug": "btc-updown-5m-1781705100",
+          "winner": "UP",
+          "ask": 0.97,
+          "gap_z": 5.914,
+          "secs_to_end": 36
+        },
+        {
+          "slug": "btc-updown-5m-1781706900",
+          "winner": "DOWN",
+          "ask": 0.95,
+          "gap_z": 5.395,
+          "secs_to_end": 60
+        },
+        {
+          "slug": "btc-updown-5m-1781712900",
+          "winner": "UP",
+          "ask": 0.97,
+          "gap_z": 5.4,
+          "secs_to_end": 42
+        },
+        {
+          "slug": "btc-updown-5m-1781715000",
+          "winner": "DOWN",
+          "ask": 0.96,
+          "gap_z": 5.09,
+          "secs_to_end": 53
+        },
+        {
+          "slug": "btc-updown-5m-1781718900",
+          "winner": "DOWN",
+          "ask": 0.96,
+          "gap_z": 4.076,
+          "secs_to_end": 60
+        },
+        {
+          "slug": "btc-updown-5m-1781732700",
+          "winner": "UP",
+          "ask": 0.95,
+          "gap_z": 1.127,
+          "secs_to_end": 16
+        },
+        {
+          "slug": "btc-updown-5m-1781733000",
+          "winner": "UP",
+          "ask": 0.96,
+          "gap_z": 3.994,
+          "secs_to_end": 60
+        },
+        {
+          "slug": "btc-updown-5m-1781734500",
+          "winner": "UP",
+          "ask": 0.95,
+          "gap_z": 3.712,
+          "secs_to_end": 60
+        },
+        {
+          "slug": "btc-updown-5m-1781737800",
+          "winner": "DOWN",
+          "ask": 0.96,
+          "gap_z": 3.391,
+          "secs_to_end": 60
+        },
+        {
+          "slug": "btc-updown-5m-1781754000",
+          "winner": "DOWN",
+          "ask": 0.97,
+          "gap_z": 6.271,
+          "secs_to_end": 52
+        }
+      ]
+    },
+    {
+      "run_dir": "20260618_064535_btc_5m_cheap_hold_h",
+      "windows_with_signals": 1,
+      "windows_endgame_snipe_eligible": 0,
+      "eligible_pct": 0.0,
+      "late_snipe_ticks": 0,
+      "examples": []
+    },
+    {
+      "run_dir": "20260618_065914_btc_5m_cheap_hold_h",
+      "windows_with_signals": 34,
+      "windows_endgame_snipe_eligible": 2,
+      "eligible_pct": 5.9,
+      "late_snipe_ticks": 2,
+      "examples": [
+        {
+          "slug": "btc-updown-5m-1781767500",
+          "winner": "UP",
+          "ask": 0.97,
+          "gap_z": 5.612,
+          "secs_to_end": 57
+        },
+        {
+          "slug": "btc-updown-5m-1781787600",
+          "winner": "DOWN",
+          "ask": 0.96,
+          "gap_z": 4.786,
+          "secs_to_end": 60
+        }
+      ]
+    },
+    {
+      "run_dir": "20260618_200258_btc_5m_cheap_hold_h",
+      "windows_with_signals": 2,
+      "windows_endgame_snipe_eligible": 0,
+      "eligible_pct": 0.0,
+      "late_snipe_ticks": 0,
+      "examples": []
+    },
+    {
+      "run_dir": "20260618_210326_btc_5m_cheap_hold_h",
+      "windows_with_signals": 3,
+      "windows_endgame_snipe_eligible": 0,
+      "eligible_pct": 0.0,
+      "late_snipe_ticks": 0,
+      "examples": []
+    }
+  ]
+}

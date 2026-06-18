@@ -1,0 +1,13 @@
+timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
+1781820594001,1,btc-updown-5m-1781820300,BUY,UP,j_late_taker_up_fill_0.98_ask_0.98_gap_z_+0.70_tape_$304/36_xc5,0.9800,1.02040816,1.0000,499.0000
+1781820594003,1,btc-updown-5m-1781820300,BUY,UP,j_late_taker_up_fill_0.98_ask_0.98_gap_z_+0.70_tape_$304/36_xc5,0.9800,1.02040816,1.0000,498.0000
+1781820594003,1,btc-updown-5m-1781820300,BUY,UP,j_late_taker_up_fill_0.98_ask_0.98_gap_z_+0.70_tape_$304/36_xc5,0.9800,1.02040816,1.0000,497.0000
+1781820594003,1,btc-updown-5m-1781820300,BUY,UP,j_late_taker_up_fill_0.98_ask_0.98_gap_z_+0.70_tape_$304/36_xc5,0.9800,1.02040816,1.0000,496.0000
+1781820594010,1,btc-updown-5m-1781820300,BUY,UP,j_late_taker_up_fill_0.99_ask_0.99_gap_z_+0.70_tape_$304/36_xc5,0.9900,1.01010101,1.0000,495.0000
+1781820599777,1,btc-updown-5m-1781820300,REDEEM,UP,option_expired_itm_win_1.00,1.0000,5.09173366,5.0917,500.0917
+1781820898003,2,btc-updown-5m-1781820600,BUY,DOWN,j_late_taker_down_fill_0.89_ask_0.89_gap_z_-0.66_tape_$2049/97_xc19,0.8900,1.12359551,1.0000,499.0917
+1781820898003,2,btc-updown-5m-1781820600,BUY,DOWN,j_late_taker_down_fill_0.89_ask_0.89_gap_z_-0.66_tape_$2049/97_xc19,0.8900,1.12359551,1.0000,498.0917
+1781820898004,2,btc-updown-5m-1781820600,BUY,DOWN,j_late_taker_down_fill_0.89_ask_0.89_gap_z_-0.66_tape_$2049/97_xc19,0.8900,1.12359551,1.0000,497.0917
+1781820898004,2,btc-updown-5m-1781820600,BUY,DOWN,j_late_taker_down_fill_0.89_ask_0.89_gap_z_-0.66_tape_$2049/97_xc19,0.8900,1.12359551,1.0000,496.0917
+1781820898004,2,btc-updown-5m-1781820600,BUY,DOWN,j_late_taker_down_fill_0.89_ask_0.89_gap_z_-0.66_tape_$2049/97_xc19,0.8900,1.12359551,1.0000,495.0917
+1781820899779,2,btc-updown-5m-1781820600,REDEEM,DOWN,option_expired_itm_win_1.00,1.0000,5.61797753,5.6180,500.7097

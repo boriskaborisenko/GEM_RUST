@@ -316,14 +316,8 @@ mod tests {
 
     fn prices(up_bid: f64, up_ask: f64, dn_bid: f64, dn_ask: f64) -> PricesState {
         PricesState {
-            up: ContractPrices {
-                bid: up_bid,
-                ask: up_ask,
-            },
-            down: ContractPrices {
-                bid: dn_bid,
-                ask: dn_ask,
-            },
+            up: ContractPrices::top(up_bid, up_ask),
+            down: ContractPrices::top(dn_bid, dn_ask),
         }
     }
 

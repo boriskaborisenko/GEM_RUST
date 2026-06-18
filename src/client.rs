@@ -6,6 +6,31 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
+use crate::orderbook::{parse_levels, sort_asks, sort_bids, SideBook};
+use crate::trade_tape::{infer_trade_usd, is_aggressive_buy};
+
+fn parse_level_size(m: &Value) -> Option<f64> {
+    m.get("size")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .or_else(|| m.get("size").and_then(|v| v.as_f64()))
+}
+
+fn parse_ws_side(m: &Value) -> Option<String> {
+    m.get("side")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_uppercase())
+}
+
+fn contract_from_ws_book(bids: Option<&Vec<Value>>, asks: Option<&Vec<Value>>) -> ContractPrices {
+    let bids = sort_bids(parse_levels(bids));
+    let asks = sort_asks(parse_levels(asks));
+    ContractPrices {
+        bid: bids.first().map(|l| l.price).unwrap_or(0.0),
+        ask: asks.first().map(|l| l.price).unwrap_or(0.0),
+        book: SideBook { bids, asks },
+    }
+}
 const GAMMA_API: &str = "https://gamma-api.polymarket.com";
 const CLOB_REST: &str = "https://clob.polymarket.com";
 const CLOB_WS: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
@@ -61,10 +86,23 @@ impl MarketWindow {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ContractPrices {
     pub bid: f64,
     pub ask: f64,
+    #[serde(skip)]
+    pub book: SideBook,
+}
+
+impl ContractPrices {
+    /// Top-of-book only (tests / price_change updates).
+    pub fn top(bid: f64, ask: f64) -> Self {
+        Self {
+            bid,
+            ask,
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +125,15 @@ pub enum MarketEvent {
         role: String,
         market: MarketWindow,
         prices: PricesState,
+        timestamp: i64,
+    },
+    TradePrint {
+        window_number: usize,
+        role: String,
+        side: String,
+        price: f64,
+        usd: f64,
+        is_buy: bool,
         timestamp: i64,
     },
 }
@@ -132,7 +179,7 @@ pub async fn fetch_time_offset() -> anyhow::Result<i64> {
 }
 
 /**
- * Search Gamma API for BTC/ETH/SOL Up/Down windows using exact-match slug lookups
+ * Search Gamma API for BTC/ETH/SOL/XRP/DOGE Up/Down windows using exact-match slug lookups
  * similar to the implementation in proto_v08_Rust's polymarket connector.
  */
 pub async fn find_upcoming_markets(asset: &str, interval: &str) -> Vec<MarketWindow> {
@@ -251,71 +298,42 @@ pub async fn find_next_market(
 /**
  * Fetch orderbook snapshot for a token via CLOB REST.
  */
-pub async fn get_book_snapshot(token_id: &str) -> (f64, f64) {
+pub async fn get_book_snapshot(token_id: &str) -> ContractPrices {
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
     {
         Ok(c) => c,
-        Err(_) => return (0.0, 0.0),
+        Err(_) => return ContractPrices::default(),
     };
 
     let url = format!("{}/book?token_id={}", CLOB_REST, token_id);
     if let Ok(res) = client.get(&url).send().await {
         if let Ok(book) = res.json::<Value>().await {
-            let mut bids = vec![];
-            let mut asks = vec![];
-
-            if let Some(bids_arr) = book.get("bids").and_then(|v| v.as_array()) {
-                for b in bids_arr {
-                    if let (Some(px), Some(sz)) = (
-                        b.get("price").and_then(|v| v.as_str()),
-                        b.get("size").and_then(|v| v.as_str()),
-                    ) {
-                        if let (Ok(price), Ok(_)) = (px.parse::<f64>(), sz.parse::<f64>()) {
-                            bids.push(price);
-                        }
-                    }
-                }
-            }
-
-            if let Some(asks_arr) = book.get("asks").and_then(|v| v.as_array()) {
-                for a in asks_arr {
-                    if let (Some(px), Some(sz)) = (
-                        a.get("price").and_then(|v| v.as_str()),
-                        a.get("size").and_then(|v| v.as_str()),
-                    ) {
-                        if let (Ok(price), Ok(_)) = (px.parse::<f64>(), sz.parse::<f64>()) {
-                            asks.push(price);
-                        }
-                    }
-                }
-            }
-
-            bids.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-            asks.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-            let best_bid = bids.first().cloned().unwrap_or(0.0);
-            let best_ask = asks.first().cloned().unwrap_or(0.0);
-            return (best_bid, best_ask);
+            let bids = sort_bids(parse_levels(
+                book.get("bids").and_then(|v| v.as_array()),
+            ));
+            let asks = sort_asks(parse_levels(
+                book.get("asks").and_then(|v| v.as_array()),
+            ));
+            let side_book = SideBook {
+                bids: bids.clone(),
+                asks: asks.clone(),
+            };
+            return ContractPrices {
+                bid: bids.first().map(|l| l.price).unwrap_or(0.0),
+                ask: asks.first().map(|l| l.price).unwrap_or(0.0),
+                book: side_book,
+            };
         }
     }
-    (0.0, 0.0)
+    ContractPrices::default()
 }
 
 pub async fn get_market_snapshot(market: &MarketWindow) -> PricesState {
-    let (up_bid, up_ask) = get_book_snapshot(&market.tokens.up.token_id).await;
-    let (dn_bid, dn_ask) = get_book_snapshot(&market.tokens.down.token_id).await;
-    PricesState {
-        up: ContractPrices {
-            bid: up_bid,
-            ask: up_ask,
-        },
-        down: ContractPrices {
-            bid: dn_bid,
-            ask: dn_ask,
-        },
-    }
+    let up = get_book_snapshot(&market.tokens.up.token_id).await;
+    let down = get_book_snapshot(&market.tokens.down.token_id).await;
+    PricesState { up, down }
 }
 
 // ─── Real-time Event-Driven Streams with Robust Reconnect ───────
@@ -401,102 +419,21 @@ pub fn subscribe_prices(
                                 None
                             };
 
-                            if let Some(side) = side {
+                            if let Some(token_side) = side {
                                 if event_type == "book" {
                                     let bids = m.get("bids").and_then(|v| v.as_array());
                                     let asks = m.get("asks").and_then(|v| v.as_array());
 
-                                    let mut up_bid = prices.up.bid;
-                                    let mut up_ask = prices.up.ask;
-                                    let mut dn_bid = prices.down.bid;
-                                    let mut dn_ask = prices.down.ask;
-
-                                    if side == "UP" {
-                                        if let Some(b) = bids {
-                                            let mut parsed: Vec<f64> = b
-                                                .iter()
-                                                .filter_map(|v| {
-                                                    v.get("price")
-                                                        .and_then(|p| p.as_str())
-                                                        .and_then(|p| p.parse().ok())
-                                                })
-                                                .collect();
-                                            parsed.sort_by(|x, y| {
-                                                y.partial_cmp(x)
-                                                    .unwrap_or(std::cmp::Ordering::Equal)
-                                            });
-                                            if let Some(best) = parsed.first() {
-                                                up_bid = *best;
-                                            }
-                                        }
-                                        if let Some(a) = asks {
-                                            let mut parsed: Vec<f64> = a
-                                                .iter()
-                                                .filter_map(|v| {
-                                                    v.get("price")
-                                                        .and_then(|p| p.as_str())
-                                                        .and_then(|p| p.parse().ok())
-                                                })
-                                                .collect();
-                                            parsed.sort_by(|x, y| {
-                                                x.partial_cmp(y)
-                                                    .unwrap_or(std::cmp::Ordering::Equal)
-                                            });
-                                            if let Some(best) = parsed.first() {
-                                                up_ask = *best;
-                                            }
-                                        }
+                                    if token_side == "UP" {
+                                        prices.up = contract_from_ws_book(bids, asks);
                                     } else {
-                                        if let Some(b) = bids {
-                                            let mut parsed: Vec<f64> = b
-                                                .iter()
-                                                .filter_map(|v| {
-                                                    v.get("price")
-                                                        .and_then(|p| p.as_str())
-                                                        .and_then(|p| p.parse().ok())
-                                                })
-                                                .collect();
-                                            parsed.sort_by(|x, y| {
-                                                y.partial_cmp(x)
-                                                    .unwrap_or(std::cmp::Ordering::Equal)
-                                            });
-                                            if let Some(best) = parsed.first() {
-                                                dn_bid = *best;
-                                            }
-                                        }
-                                        if let Some(a) = asks {
-                                            let mut parsed: Vec<f64> = a
-                                                .iter()
-                                                .filter_map(|v| {
-                                                    v.get("price")
-                                                        .and_then(|p| p.as_str())
-                                                        .and_then(|p| p.parse().ok())
-                                                })
-                                                .collect();
-                                            parsed.sort_by(|x, y| {
-                                                x.partial_cmp(y)
-                                                    .unwrap_or(std::cmp::Ordering::Equal)
-                                            });
-                                            if let Some(best) = parsed.first() {
-                                                dn_ask = *best;
-                                            }
-                                        }
+                                        prices.down = contract_from_ws_book(bids, asks);
                                     }
-
-                                    prices = PricesState {
-                                        up: ContractPrices {
-                                            bid: up_bid,
-                                            ask: up_ask,
-                                        },
-                                        down: ContractPrices {
-                                            bid: dn_bid,
-                                            ask: dn_ask,
-                                        },
-                                    };
                                     updated = true;
                                 } else if event_type == "price_change"
                                     || event_type == "tick_size_change"
                                     || event_type == "last_trade_price"
+                                    || event_type == "trade"
                                 {
                                     if let Some(px_val) =
                                         m.get("price").or_else(|| m.get("last_trade_price"))
@@ -504,7 +441,18 @@ pub fn subscribe_prices(
                                         let px_str = px_val.as_str().unwrap_or("0");
                                         if let Ok(price) = px_str.parse::<f64>() {
                                             if price > 0.0 {
-                                                if side == "UP" {
+                                                let (bid, ask) = if token_side == "UP" {
+                                                    (prices.up.bid, prices.up.ask)
+                                                } else {
+                                                    (prices.down.bid, prices.down.ask)
+                                                };
+                                                let ws_side = parse_ws_side(&m);
+                                                let is_buy = ws_side
+                                                    .as_deref()
+                                                    .is_some_and(|s| s == "BUY")
+                                                    || ws_side.is_none()
+                                                        && is_aggressive_buy(price, bid, ask);
+                                                if token_side == "UP" {
                                                     prices.up.bid = price;
                                                     if prices.up.ask <= price {
                                                         prices.up.ask = price + 0.01;
@@ -516,6 +464,23 @@ pub fn subscribe_prices(
                                                     }
                                                 }
                                                 updated = true;
+                                                if is_buy {
+                                                    let usd = infer_trade_usd(
+                                                        price,
+                                                        parse_level_size(&m),
+                                                        1.0,
+                                                    );
+                                                    tx.send(MarketEvent::TradePrint {
+                                                        window_number,
+                                                        role: role.clone(),
+                                                        side: token_side.to_string(),
+                                                        price,
+                                                        usd,
+                                                        is_buy: true,
+                                                        timestamp: get_now_ms(),
+                                                    })
+                                                    .unwrap_or_default();
+                                                }
                                             }
                                         }
                                     }
@@ -752,6 +717,7 @@ fn parse_market(m: &Value, asset: &str, interval: &str) -> Option<MarketWindow> 
     if price_to_beat.is_none() {
         let question = m.get("question").and_then(|v| v.as_str()).unwrap_or("");
         price_to_beat = parse_strike_from_text(question, asset);
+        // SOL/XRP/DOGE questions often have no $ strike — Chainlink captures PTB at window open.
     }
 
     Some(MarketWindow {
@@ -830,29 +796,41 @@ fn parse_strike_from_text(text: &str, asset: &str) -> Option<f64> {
         }
     }
 
-    // Filter candidates strictly by valid price range for the specified asset
-    let min_allowed = match asset_upper.as_str() {
-        "BTC" => 10000.0,
-        "ETH" => 1000.0,
-        "SOL" => 10.0,
-        _ => 0.0,
-    };
+    let min_allowed = crate::asset_price::strike_min(&asset_upper);
+    let max_allowed = crate::asset_price::strike_max(&asset_upper);
 
-    let mut filtered: Vec<(f64, bool)> = candidates
+    // Only trust explicit $-prefixed strikes. Non-dollar numbers in titles are usually dates/times
+    // (e.g. "June 18, 6:35PM" → 35 for SOL) and must not become PTB.
+    candidates
         .into_iter()
-        .filter(|&(val, _)| val >= min_allowed)
-        .collect();
+        .find_map(|(val, dollar)| {
+            if dollar && val >= min_allowed && val <= max_allowed {
+                Some(val)
+            } else {
+                None
+            }
+        })
+}
 
-    if filtered.is_empty() {
-        return None;
+#[cfg(test)]
+mod strike_parse_tests {
+    use super::parse_strike_from_text;
+
+    #[test]
+    fn sol_datetime_question_has_no_dollar_strike() {
+        let q = "Solana Up or Down - June 18, 6:30PM-6:35PM ET";
+        assert_eq!(parse_strike_from_text(q, "SOL"), None);
     }
 
-    // Heuristic 1: If there's any valid candidate directly preceded by '$', return it first!
-    if let Some(&(val, _)) = filtered.iter().find(|(_, dollar)| *dollar) {
-        return Some(val);
+    #[test]
+    fn btc_dollar_strike_parsed() {
+        let q = "Bitcoin Up or Down - $95,432.50 at 3:00PM ET";
+        assert_eq!(parse_strike_from_text(q, "BTC"), Some(95432.50));
     }
 
-    // Fallback: return the largest remaining candidate (sorted descending)
-    filtered.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    filtered.first().map(|&(val, _)| val)
+    #[test]
+    fn xrp_datetime_question_has_no_dollar_strike() {
+        let q = "XRP Up or Down - June 18, 6:35PM-6:40PM ET";
+        assert_eq!(parse_strike_from_text(q, "XRP"), None);
+    }
 }

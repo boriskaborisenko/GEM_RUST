@@ -1,16 +1,17 @@
 {
-  "strategy": "cheap_hold_h",
+  "strategy": "j_endgame",
   "llm": {
     "enabled": false,
     "model": "gemini-3.5-flash",
     "location": "global"
   },
   "minBtcAtr": 0.0,
+  "minEthAtr": 0.0,
   "session": {
     "startingBank": 100,
-    "minWindowBudget": 30.0,
-    "maxWindowBudget": 150.0,
-    "windowBudgetPct": 10.0
+    "minWindowBudget": 9.0,
+    "maxWindowBudget": 21.0,
+    "windowBudgetPct": 21.0
   },
   "preStartEntry": {
     "enabled": false,
@@ -28,5 +29,40 @@
     "decayEnabled": true
   },
   "exitBeforeEndSeconds": 25,
-  "forceCloseAtEnd": false
+  "forceCloseAtEnd": false,
+  "jEndgame": {
+    "endgameSecs": 120,
+    "minWinnerAsk": 0.88,
+    "impulseEnabled": false,
+    "cheapMaxAsk": 0.88,
+    "cheapMinGapZ": 1.0,
+    "cheapMinElapsedPct": 50.0,
+    "cheapMaxClips": 3,
+    "cheapTierUsd": 9.0,
+    "cheapSweepClipsPerTick": 1,
+    "cheapRequireTape": false,
+    "lateMaxSecs": 25,
+    "lateMinGapZ": 0.85,
+    "lateTierUsd": 12.0,
+    "lateHeavySecs": 15,
+    "lateHeavySweepClips": 4,
+    "lateRequireTape": true,
+    "flipHedgeEnabled": true,
+    "flipMinSigCrosses": 2,
+    "flipMinCrosses": 6,
+    "flipMinGapZ": 0.4,
+    "flipTierUsd": 12.0,
+    "flipSweepClipsPerTick": 4,
+    "flipMaxAsk": 0.97,
+    "flipRequireTape": false,
+    "takerMaxAsk": 0.99,
+    "clipUsd": 3.0,
+    "maxUsdPerWindow": 21.0,
+    "maxClipsPerWindow": 7,
+    "sweepClipsPerTick": 2,
+    "tapeWindowMs": 5000,
+    "minTapeUsd": 5.0,
+    "minTapeBuys": 2,
+    "takerMode": true
+  }
 }

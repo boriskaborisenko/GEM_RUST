@@ -1,0 +1,4 @@
+timestamp,window_id,slug,status,spent,returned,pnl,close_spot,ptb,winner,strategy,utc_hour,time_pct_at_close,final_gap_z,final_atr,mid_cross_count,significant_mid_cross_count,entry_side,entry_reason,would_redeem_hold,h_market_win,h_salvaged,h_salvage_win
+1781817599244,3,btc-updown-5m-1781817300,CLOSED_TIME,27.0000,0.0000,-27.0000,62938.4828,62850.7593,UP,cheap_hold_h,21,100.00,16.8372,40.3571,9,1,DOWN,h_entry_down_ask_0.39_gap_z_+0.08_active_xc9,false,false,false,false
+1781817899243,4,btc-updown-5m-1781817600,CLOSED_TIME,27.0000,69.2308,42.2308,62958.0244,62947.1630,UP,cheap_hold_h,21,100.00,1.8809,44.7286,29,3,UP,h_entry_up_ask_0.39_gap_z_-0.08_active_xc12,false,true,false,false
+1781818499245,6,btc-updown-5m-1781818200,CLOSED_TIME,27.0000,8.3077,-18.6923,62908.2404,62887.2147,UP,cheap_hold_h,21,100.00,5.7915,28.1214,3,0,DOWN,h_entry_down_ask_0.39_gap_z_+0.07_active_xc3,false,false,true,false

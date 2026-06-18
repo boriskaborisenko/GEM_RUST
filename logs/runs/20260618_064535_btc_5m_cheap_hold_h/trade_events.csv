@@ -1,0 +1,2 @@
+timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
+1781765440879,1,btc-updown-5m-1781765400,BUY,UP,h_entry_up_ask_0.39_gap_z_+0.05_aligned_xc1,0.3900,69.23076923,27.0000,473.0000

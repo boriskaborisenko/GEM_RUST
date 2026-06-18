@@ -475,6 +475,7 @@ impl TradeStrategy for ConvictionRouterStrategy {
         spot_signal: SpotSignalSnapshot,
         mid_cross: &MidCrossSnapshot,
         cex_micro: &CexMicroSnapshot,
+        tape: &crate::trade_tape::TradeTapeSnapshot,
     ) -> Vec<OrderSignal> {
         let mut signals = Vec::new();
         let window_number = win_state.window_number;
@@ -863,14 +864,8 @@ mod tests {
     #[test]
     fn cheap_entry_picks_cheaper_ask_under_cap() {
         let prices = PricesState {
-            up: crate::client::ContractPrices {
-                bid: 0.20,
-                ask: 0.22,
-            },
-            down: crate::client::ContractPrices {
-                bid: 0.77,
-                ask: 0.79,
-            },
+            up: crate::client::ContractPrices::top(0.20, 0.22),
+            down: crate::client::ContractPrices::top(0.77, 0.79),
         };
         assert_eq!(cheap_entry_side(&prices), Some("UP"));
     }
@@ -878,14 +873,8 @@ mod tests {
     #[test]
     fn cross_entry_prioritized_inside_window() {
         let prices = PricesState {
-            up: crate::client::ContractPrices {
-                bid: 0.40,
-                ask: 0.42,
-            },
-            down: crate::client::ContractPrices {
-                bid: 0.55,
-                ask: 0.56,
-            },
+            up: crate::client::ContractPrices::top(0.40, 0.42),
+            down: crate::client::ContractPrices::top(0.55, 0.56),
         };
         let mid = MidCrossSnapshot {
             armed: true,

@@ -1,0 +1,9 @@
+timestamp,window_id,slug,status,spent,returned,pnl,close_spot,ptb,winner,strategy,utc_hour,time_pct_at_close,final_gap_z,final_atr,mid_cross_count,significant_mid_cross_count,entry_side,entry_reason,would_redeem_hold,h_market_win,h_salvaged,h_salvage_win
+1781249099134,1,btc-updown-5m-1781248800,CLOSED_TIME,27.0000,31.0500,4.0500,62968.8522,62947.4708,UP,cheap_hold_h,7,100.00,4.6984,35.2500,6,3,DOWN,h_entry_down_ask_0.40_gap_z_+0.17,false,false,true,true
+1781249399136,2,btc-updown-5m-1781249100,CLOSED_TIME,27.0000,6.9231,-20.0769,62948.1415,62966.7391,DOWN,cheap_hold_h,7,100.00,-4.0867,35.2500,0,0,UP,h_entry_up_ask_0.39_gap_z_-0.14,false,false,true,false
+1781249699138,3,btc-updown-5m-1781249400,CLOSED_TIME,27.0000,26.3077,-0.6923,62932.6173,62945.2902,DOWN,cheap_hold_h,7,100.00,-2.7652,35.5000,16,6,DOWN,h_entry_down_ask_0.39_gap_z_+0.07,false,true,true,false
+1781249999141,4,btc-updown-5m-1781249700,CLOSED_TIME,27.0000,29.0250,2.0250,62983.0608,62932.5738,UP,cheap_hold_h,7,100.00,11.0695,35.3286,20,6,DOWN,h_entry_down_ask_0.40_gap_z_+0.02,false,false,true,true
+1781250299140,5,btc-updown-5m-1781250000,CLOSED_TIME,27.0000,22.2750,-4.7250,62980.9117,62986.0745,DOWN,cheap_hold_h,7,100.00,-1.0219,39.1357,31,8,DOWN,h_entry_down_ask_0.40_gap_z_+0.12,false,true,true,false
+1781250599143,6,btc-updown-5m-1781250300,CLOSED_TIME,27.0000,37.8000,10.8000,62963.0787,62977.3327,DOWN,cheap_hold_h,7,100.00,-3.2271,34.2143,12,4,UP,h_entry_up_ask_0.40_gap_z_-0.09,false,false,true,true
+1781250899145,7,btc-updown-5m-1781250600,CLOSED_TIME,27.0000,8.7750,-18.2250,62926.9758,62963.4308,DOWN,cheap_hold_h,7,100.00,-12.7321,22.1786,0,0,UP,h_entry_up_ask_0.40_gap_z_+0.00,false,false,true,false
+1781251199144,8,btc-updown-5m-1781250900,CLOSED_TIME,27.0000,0.0000,-27.0000,63013.8741,62928.4631,UP,cheap_hold_h,7,100.00,18.0375,36.6786,0,0,DOWN,h_entry_down_ask_0.40_gap_z_-0.03,false,false,false,false
