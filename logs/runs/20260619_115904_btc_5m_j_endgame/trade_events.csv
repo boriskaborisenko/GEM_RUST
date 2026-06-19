@@ -191,3 +191,14 @@ timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
 1781883899487,45,btc-updown-5m-1781883600,REDEEM,UP,option_expired_itm_win_1.00,1.0000,24.24242424,24.2424,524.8576
 1781884777287,48,btc-updown-5m-1781884500,BUY,DOWN,j_final_seal_taker_down_fill_0.98_ask_0.99_gap_z_-1.37_phase_late_pnl_proj_+0.00_tape_$577/42_xc11,0.9800,8.16326531,8.0000,516.8576
 1781884799492,48,btc-updown-5m-1781884500,REDEEM,DOWN,option_expired_itm_win_1.00,1.0000,8.16326531,8.1633,525.0208
+1781885005847,49,btc-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.94_ask_0.94_gap_z_-1.35_phase_accumulate_pnl_proj_+0.00_tape_$1147/52_xc2,0.9400,8.51063830,8.0000,517.0208
+1781885009355,49,btc-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.94_ask_0.94_gap_z_-1.33_phase_accumulate_pnl_proj_+0.51_tape_$420/30_xc2,0.9400,5.54519004,5.2125,511.8084
+1781885012363,49,btc-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.94_ask_0.94_gap_z_-1.37_phase_accumulate_pnl_proj_+0.84_tape_$527/23_xc2,0.9400,8.51063830,8.0000,503.8084
+1781885015374,49,btc-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.94_ask_0.94_gap_z_-1.41_phase_accumulate_pnl_proj_+1.35_tape_$166/13_xc2,0.9400,8.51063830,8.0000,495.8084
+1781885018657,49,btc-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.94_ask_0.95_gap_z_-1.43_phase_accumulate_pnl_proj_+1.86_tape_$236/16_xc2,0.9400,8.51063830,8.0000,487.8084
+1781885021740,49,btc-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.95_ask_0.96_gap_z_-1.43_phase_accumulate_pnl_proj_+2.38_tape_$242/17_xc2,0.9500,6.36331788,6.0452,481.7632
+1781885055262,49,btc-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.98_ask_0.99_gap_z_-1.63_phase_accumulate_pnl_proj_+2.69_tape_$602/38_xc2,0.9800,5.17806172,5.0745,476.6887
+1781885058295,49,btc-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.99_ask_0.99_gap_z_-1.71_phase_accumulate_pnl_proj_+2.80_tape_$818/44_xc2,0.9900,7.66951757,7.5928,469.0959
+1781885061300,49,btc-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.99_ask_0.99_gap_z_-1.78_phase_accumulate_pnl_proj_+2.87_tape_$1017/48_xc2,0.9900,8.08080808,8.0000,461.0959
+1781885074173,49,btc-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.99_ask_0.99_gap_z_-2.27_phase_late_pnl_proj_+2.95_tape_$1028/39_xc2,0.9900,5.35940983,5.3058,455.7901
+1781885099492,49,btc-updown-5m-1781884800,REDEEM,DOWN,option_expired_itm_win_1.00,1.0000,72.23885831,72.2389,528.0289

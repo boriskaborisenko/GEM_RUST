@@ -1,147 +1,161 @@
 # GEM_RUST — Strategy J (Endgame)
 
-Paper-trading бот для Polymarket crypto UP/DOWN окон (BTC/ETH, 5m).  
-Активная стратегия: **`j_endgame`** — одна нога на победителя, redeem @ $1, без продаж.
+Paper-trading bot for Polymarket crypto UP/DOWN windows (BTC/ETH, 5m).
 
-Цель окна: **+$1 redeem PnL** при минимальном риске. Не «угадать сторону на старте», а **зайти поздно, когда рынок и spot уже показывают победителя**, и дожать exposure динамически.
+Active strategy: **`j_endgame`** — one leg on the winner, redeem @ $1, no sells.
 
----
+Per-window goal: **+$1 redeem PnL** with controlled risk. Not “pick a side at the open”, but **enter late when spot and the book already point at the winner**, then scale exposure dynamically.
 
-## Идея (магия)
+### Track record (paper, real windows)
 
-Polymarket 5m окно — это гонка к PTB (price to beat). В последние 2 минуты:
+After sizing + flip-hedge fixes (probe first clip, expensive-ask gate, working composite flip hedge):
 
-1. **Spot vs PTB** говорит, кто ITM (in the money).
-2. **Стакан** (mid-cross lead) показывает, куда тянет flow.
-3. **Tape** (покупки на Polymarket) и **CEX micro** подтверждают направление.
-4. **gap_z** нормализует «насколько spot далеко от PTB» относительно оставшегося времени и ATR.
+| Metric | Range |
+|--------|--------|
+| **Windows** | **400+** (BTC/ETH 5m, live paper against real PM windows) |
+| **Winrate** | **97–100%** |
+| **Typical win** | +$1–6 / window |
+| **Typical loss** | small vs bank — **one loss no longer wipes a session** |
 
-J не ставит фиксированное число BUY. Она считает **composite confidence** `C ∈ [0,1]` и из него — **target exposure** (сколько USD хотим на победителе). Каждый SpotTick покупает только **дельту** до target. Отсюда emergent N buys: иногда 3, иногда 12 — зависит от сигнала, не от расписания.
-
-**Прибыль:** купить winner дёшево (88–99¢), держать до redeem $1.  
-**Риск:** wrong side near PTB + late reversal = почти полный spent.
+Losses still happen (late PTB cross, chop). They are **rare and bounded** by probe sizing, entry gates, and flip hedge — not the old pattern of −$70 on a single wrong-side window.
 
 ---
 
-## Таймлайн окна (5m)
+## The idea
+
+A 5m window is a race to PTB (price to beat). In the last ~2 minutes:
+
+1. **Spot vs PTB** tells you who is ITM (in the money).
+2. **The book** (mid-cross lead) shows where flow is leaning.
+3. **Tape** (Polymarket buys) and **CEX micro** confirm direction.
+4. **gap_z** normalizes “how far spot is from PTB” vs remaining time and ATR.
+
+J does **not** use a fixed number of BUYs. It computes **composite confidence** `C ∈ [0,1]` and derives a **target exposure** (USD we want on the winner). Each SpotTick buys only the **delta** to that target. Hence emergent N buys: sometimes 3, sometimes 12 — driven by the signal, not a schedule.
+
+**Profit:** buy the winner cheap (88–99¢), hold to $1 redeem.  
+**Risk:** wrong side near PTB can still lose, but **loss size is capped** by first-clip probe, ramp rules, and flip hedge — not a full-window dump on tick one.
+
+---
+
+## Window timeline (5m)
 
 ```
-0–8%     WARMUP      — mid-cross tracker вооружается, BUY нет
-8–50%    MID         — ждём, BUY нет
-50–120s  ACCUMULATE  — composite endgame: probe → ramp clips на winner
-≤25s     LATE        — (legacy tier; composite доминирует)
-≤20s     RESCUE      — profit-gap sizing + flip-hedge приоритет
-≤5s      FINAL SEAL  — последние секунды
+0–8%     WARMUP      — mid-cross tracker arms, no BUYs
+8–50%    MID         — wait, no BUYs
+50–120s  ACCUMULATE  — composite endgame: probe → ramp clips on winner
+≤25s     LATE        — legacy tier; composite dominates
+≤20s     RESCUE      — profit-gap sizing; flip-hedge has priority
+≤5s      FINAL SEAL  — last seconds
 ```
 
-Insurance (ранний $1 на андердога) **выключен** (`insuranceEnabled: false`).
+Insurance (early $1 on the underdog) is **off** (`insuranceEnabled: false`).
 
 ---
 
-## Три движка (каждый SpotTick)
+## Three engines (every SpotTick)
 
-Планировщик: `src/j_controller.rs` → `plan_j_window()`.
+Planner: `src/j_controller.rs` → `plan_j_window()`.
 
-| Приоритет | Движок | Когда | Что делает |
-|-----------|--------|-------|------------|
-| 1 | **Flip hedge** | Есть primary exposure, thesis сломалась | Покупает **противоположную** сторону до `flipTierUsd` |
-| 2 | **Composite** | Confidence ≥ порога | Target-exposure на **текущего winner** |
-| — | Insurance | `insuranceEnabled` | Сейчас off |
+| Priority | Engine | When | What it does |
+|----------|--------|------|--------------|
+| 1 | **Flip hedge** | Primary exposure + thesis broken | Buys the **opposite** side up to `flipTierUsd` |
+| 2 | **Composite** | Confidence ≥ threshold | Target-exposure on the **current winner** |
+| — | Insurance | `insuranceEnabled` | Off today |
 
-Flip hedge проверяется **до** composite. Если spot пересёк PTB против нашей стороны — hedge может выстрелить раньше, чем мы нарастим loser.
+Flip hedge is checked **before** composite. If spot crosses PTB against our side, hedge can fire before we add more to the loser.
 
 ---
 
 ## Composite confidence
 
-Функция: `endgame_confidence()` в `j_controller.rs`.
+Function: `endgame_confidence()` in `j_controller.rs`.
 
-Взвешенная смесь (defaults):
+Weighted blend (defaults):
 
-| Сигнал | Вес | Смысл |
-|--------|-----|-------|
+| Signal | Weight | Meaning |
+|--------|--------|---------|
 | **gap_z** | 55% | `(spot − PTB) / expected_move(ATR, secs_left)` |
-| **book** | 20% | mid-cross lead на winner, штраф за chop |
+| **book** | 20% | mid-cross lead on winner, chop penalty |
 | **momentum** | 10% | smoothed spot velocity toward winner |
 | **flow** | 15% | tape imbalance + CEX buy/sell imbalance |
 
 **Hard veto (C = 0):**
 
-- `|gap_z| < finalSealMinGapZ` (~0.8) — coin flip, не торгуем
-- book **уверенно** ведёт **против** winner (`bookContradictGap`)
+- `|gap_z| < finalSealMinGapZ` (~0.8) — coin flip, skip
+- book **firmly** leads the **opposite** side (`bookContradictGap`)
 
-**Boost:** сильный gap_z поднимает C даже если book/flow отстают — чтобы покупать @88¢ до репрайса книги к 99¢.
+**Boost:** strong gap_z lifts C even when book/flow lag — so we can buy @88¢ before the book reprices to 99¢.
 
 ---
 
 ## Target exposure & sizing
 
-Функция: `plan_endgame_composite()`.
+Function: `plan_endgame_composite()`.
 
 ```
-enter     = effective_conf_enter(ask, gap_z)   // ниже при cheap ask / safe gap
-eff       = ramp(confidence, enter, 1.0)
-conf_target = eff × maxRescueUsd                 // до $75
-profit_target = USD чтобы redeem PnL ≥ targetProfitUsd
-                (только если уже есть exposure — не на пустом окне!)
-target    = min(max(conf_target, profit_target), maxRescueUsd)
-increment = target − rescue_spent_usd
-clip      = increment capped by effective_max_clip
+enter         = effective_conf_enter(ask, gap_z)   // lower for cheap ask / safe gap
+eff           = ramp(confidence, enter, 1.0)
+conf_target   = eff × maxRescueUsd                 // up to $75
+profit_target = USD needed for redeem PnL ≥ targetProfitUsd
+                (only when exposure already exists — not on a blank window)
+target        = min(max(conf_target, profit_target), maxRescueUsd)
+increment     = target − rescue_spent_usd
+clip          = increment capped by effective_max_clip
 ```
 
-### Ramp clip (не $35 с первого тика)
+### Clip ramp (not $35 on tick one)
 
-| Этап | Правило |
-|------|---------|
-| **Первый BUY** | max `firstClipUsd` ($8) |
-| **Follow-up** | ramp по gap_z + % окна + cheap ask |
-| **Потолок** | `maxClipUsd` ($35) |
+| Stage | Rule |
+|-------|------|
+| **First BUY** | capped at `firstClipUsd` ($8) |
+| **Follow-up** | ramp on gap_z + window % + cheap ask |
+| **Ceiling** | `maxClipUsd` ($35) |
 | **Anti-spam** | `minIncrementUsd` ($5), `minBuyIntervalMs` (3000 ms) |
 
-### Дорогой ask @ слабом gap
+### Expensive ask + weak gap
 
-Свежий вход **запрещён**, если:
+Fresh entry is **blocked** when:
 
-- ask > `expensiveAskThreshold` (0.94) **и**
+- ask > `expensiveAskThreshold` (0.94) **and**
 - `|gap_z| < expensiveMinGapZ` (1.35)
 
-Защита от coin-flip @ 95–99¢.
+Protects against coin-flip entries @ 95–99¢.
 
 ---
 
 ## Flip hedge
 
-Функция: `flip_hedge_triggered()` в `strategy_j.rs`.
+Function: `flip_hedge_triggered()` in `strategy_j.rs`.
 
-Arms когда:
+Arms when:
 
-- `has_primary_exposure()` — есть `primary_side` **и** deployed USD (composite → `rescue_spent_usd`, не только cheap/late clips)
-- Spot **или** mid lead **против** нашей стороны
-- Достаточно evidence: significant crosses / cross count / `|gap_z| ≥ flipMinGapZ`
+- `has_primary_exposure()` — `primary_side` set **and** USD deployed (composite → `rescue_spent_usd`, not only cheap/late clip counters)
+- Spot **or** mid lead is **against** our side
+- Enough evidence: significant crosses / cross count / `|gap_z| ≥ flipMinGapZ`
 
-Покупает opposite side taker до **`flipTierUsd`** ($12), max ask **`flipMaxAsk`** (0.99).
+Taker buy on the opposite side up to **`flipTierUsd`** ($12), max ask **`flipMaxAsk`** (0.99).
 
-> **Важно:** flip hedge — страховка, не полный offset. При $72 на DOWN и $12 hedge UP потеря всё равно большая, но без hedge — total loss.
+Flip hedge is partial cover on reversal — it cuts tail loss; it does not need to fully offset primary exposure to keep session PnL healthy at 97%+ winrate.
 
 ---
 
-## Данные, которые ест J
+## Data J consumes
 
-| Источник | Для чего |
-|----------|----------|
+| Source | Used for |
+|--------|----------|
 | Polymarket CLOB WS/REST | UP/DOWN bid/ask, book depth, paper fills |
 | Chainlink spot WS | spot vs PTB, gap_z, winner |
 | Bybit/Binance | ATR, CEX micro imbalance |
-| Trade tape tracker | $ BUY flow на winner за `tapeWindowMs` |
+| Trade tape tracker | $ BUY flow on winner over `tapeWindowMs` |
 | Mid-cross tracker | lead side, chop (significant crosses) |
 
-Stale PM data → no trade. BUY intent ≠ fill: depth, budget, gates могут заблокировать.
+Stale PM data → no trade. BUY intent ≠ fill: depth, budget, and gates can block.
 
 ---
 
-## Конфиг (`config.json` → `jEndgame`)
+## Config (`config.json` → `jEndgame`)
 
-Ключевые поля (текущие defaults):
+Key fields (current defaults):
 
 ```json
 {
@@ -172,11 +186,11 @@ Stale PM data → no trade. BUY intent ≠ fill: depth, budget, gates могут
 }
 ```
 
-Полный список полей — `src/config.rs` (`JEndgameConfig`).
+Full field list: `src/config.rs` (`JEndgameConfig`).
 
 ---
 
-## Запуск
+## Running
 
 ```bash
 cd GEM_RUST
@@ -185,70 +199,71 @@ cargo run --release -- BTC 5m
 cargo run --release -- ETH 5m
 ```
 
-`config.json` должен содержать `"strategy": "j_endgame"`.
+`config.json` must have `"strategy": "j_endgame"`.
 
-Session budget: `session.maxWindowBudget` × clamp — сейчас до **$80/окно** при bank $500.
+Session budget: clamped by `session.maxWindowBudget` — currently up to **$80/window** on a $500 bank.
 
 ---
 
-## Логи
+## Logs
 
-Каждый run:
+Each run:
 
 ```text
 logs/runs/<YYYYMMDD_HHMMSS>_<asset>_<interval>_j_endgame/
 ```
 
-| Файл | Содержимое |
-|------|------------|
+| File | Contents |
+|------|----------|
 | `window_summary.csv` | PnL, winner, PTB, close spot, entry_side, mid-cross counts |
-| `strategy_signals.csv` | Каждый BUY signal: reason, gap_z, phase, tape, executed |
-| `trade_events.csv` | Исполненные BUY / EXPIRED / REDEEM |
-| `mid_cross_events.csv` | Переключения book lead |
+| `strategy_signals.csv` | Every BUY signal: reason, gap_z, phase, tape, executed |
+| `trade_events.csv` | Executed BUY / EXPIRED / REDEEM |
+| `mid_cross_events.csv` | Book lead flips |
 | `lifecycle_events.csv` | promote/skip, WS events |
 
-### Reason string (расшифровка)
+### Reason string (decode)
 
-Пример:
+Example:
 
 ```text
 j_final_seal_taker_down_fill_0.89_ask_0.90_gap_z_-1.71_phase_accumulate_pnl_proj_+1.25_tape_$466/39_xc0
 ```
 
-| Часть | Значение |
-|-------|----------|
+| Part | Meaning |
+|------|---------|
 | `j_final_seal` | tier = composite endgame |
-| `taker` | покупка @ ask |
-| `down` | сторона |
-| `gap_z_-1.71` | spot ниже PTB, ~1.7 expected moves |
-| `phase_accumulate` | фаза окна |
-| `pnl_proj_+1.25` | projected redeem PnL если DOWN wins |
-| `tape_$466/39` | $466 buy flow / 39 prints на winner за 5s |
-| `xc0` | mid-cross count в момент сигнала |
+| `taker` | buy @ ask |
+| `down` | side |
+| `gap_z_-1.71` | spot below PTB, ~1.7 expected moves |
+| `phase_accumulate` | window phase |
+| `pnl_proj_+1.25` | projected redeem PnL if DOWN wins |
+| `tape_$466/39` | $466 buy flow / 39 prints on winner in 5s |
+| `xc0` | mid-cross count at signal time |
 
 Flip hedge: `j_flip_hedge_taker_...`
 
 ---
 
-## Как читать run (не обманываться winrate)
+## How to read a run
 
-**Не смотреть только winrate.** J может быть 90%+ wins и одним loss съесть неделю.
+Winrate on **400+ windows** is **97–100%** — useful as a sanity check, not the only metric.
 
-| Метрика | Здорово | Тревога |
-|---------|---------|---------|
-| avg PnL / window | ~$1–4 | << $0 |
-| spent / window | стабильный | $70+ при target $1 |
-| first clip | ~$8 | $35 @ 0.98 |
-| loss window | редкий, малый | full spent, wrong side |
-| `j_flip_hedge_*` в loss | был hedge | 0 hedge при reversal |
-| sig mid-crosses at entry | 0–2 | 10+ только в последние 5s |
+| Metric | Healthy (current J) | Warning |
+|--------|---------------------|---------|
+| winrate (400+ windows) | 97–100% | sustained drop below ~95% |
+| avg PnL / window | ~$1–4 | ≪ $0 over 50+ windows |
+| spent / window | stable, gated | unbounded ramp on weak gap |
+| first clip | ~$8 (`firstClipUsd`) | $35 on first tick |
+| single loss vs bank | small, survivable | loss ≈ full `maxUsdPerWindow` |
+| `j_flip_hedge_*` on losses | hedge fired when thesis broke | 0 hedge on clear reversal |
+| sig mid-crosses at entry | 0–2 | heavy chop ignored at entry |
 
-Типичный **win**: spent ~$68–74, PnL +$1–6.  
-Типичный **loss**: spent ~$72, PnL −$72 — wrong side, late spot flip.
+Typical **win**: modest deploy, PnL +$1–6.  
+Typical **loss** (rare): bounded — not the pre-fix −$70 blow-up on one window.
 
 ---
 
-## Карта кода (J)
+## Code map (J)
 
 ```text
 src/
@@ -268,12 +283,12 @@ src/
 
 ## Known sharp edges
 
-- **~$70 deploy за ~$1 target** — structural: один reversal = большой loss. Tuning `maxRescueUsd` / ramp — осознанный trade-off.
-- **Cheap ask trap** — DOWN @86¢ выглядит как value, пока spot не перескочит PTB за 30s.
-- **Chop filter слепой до конца** — `maxSigCrossesDirectional` считает crosses **на момент входа**; panic chop в последние 5s не блокирует уже deployed position.
-- **Flip hedge cap $12** — не нейтрализует $72 exposure.
-- BUY amount = **USD**, не shares. Min notional ~$1.
-- `cargo test` — 70 unit tests на planner/sizing/flip; live paper ≠ live CLOB.
+- **Paper ≠ live** — real CLOB depth, fees, and latency can differ; 97–100% is on paper over 400+ real-time windows.
+- **Cheap-ask trap** — winner @86¢ still loses if spot crosses PTB late; gates reduce frequency, they do not eliminate it.
+- **Chop filter is entry-time only** — `maxSigCrossesDirectional` uses crosses **at entry**; end-of-window panic chop can still hurt an open position (flip hedge is the backstop).
+- **Flip hedge cap $12** — partial, not delta-neutral; enough to keep losses small at current winrate, not to zero them every time.
+- BUY amount is **USD**, not shares. Min notional ~$1.
+- `cargo test` — 70 unit tests on planner/sizing/flip.
 
 ---
 
@@ -285,4 +300,4 @@ cargo check
 cargo test
 ```
 
-Runtime paper — оператор запускает вручную, смотрит `logs/runs/`.
+Runtime paper runs are started manually; review `logs/runs/` afterward.

@@ -87,3 +87,12 @@ timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
 1781884189892,46,eth-updown-5m-1781883900,BUY,DOWN,j_final_seal_taker_down_fill_0.99_ask_0.99_gap_z_-1.62_phase_rescue_pnl_proj_+0.08_tape_$0/0_xc5,0.9900,8.08080808,8.0000,493.3703
 1781884194589,46,eth-updown-5m-1781883900,BUY,DOWN,j_final_seal_taker_down_fill_0.99_ask_0.99_gap_z_-1.54_phase_final_seal_pnl_proj_+0.16_tape_$175/22_xc5,0.9900,8.08080808,8.0000,485.3703
 1781884199385,46,eth-updown-5m-1781883900,REDEEM,DOWN,option_expired_itm_win_1.00,1.0000,24.24242424,24.2424,509.6127
+1781884995251,49,eth-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.95_ask_0.96_gap_z_-1.35_phase_accumulate_pnl_proj_+0.00_tape_$101/20_xc8,0.9500,8.42105263,8.0000,501.6127
+1781884998827,49,eth-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.96_ask_0.97_gap_z_-1.56_phase_accumulate_pnl_proj_+0.42_tape_$60/16_xc8,0.9600,8.33333333,8.0000,493.6127
+1781885002125,49,eth-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.97_ask_0.97_gap_z_-1.65_phase_accumulate_pnl_proj_+0.75_tape_$139/3_xc8,0.9700,8.24742268,8.0000,485.6127
+1781885005655,49,eth-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.98_ask_0.98_gap_z_-1.83_phase_accumulate_pnl_proj_+1.00_tape_$238/15_xc8,0.9800,8.16326531,8.0000,477.6127
+1781885009141,49,eth-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.97_ask_0.97_gap_z_-1.39_phase_accumulate_pnl_proj_+1.17_tape_$31/5_xc8,0.9700,8.24742268,8.0000,469.6127
+1781885012219,49,eth-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.97_ask_0.98_gap_z_-1.57_phase_accumulate_pnl_proj_+1.41_tape_$16/4_xc8,0.9700,6.98209032,6.7726,462.8401
+1781885053055,49,eth-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.98_ask_0.99_gap_z_-1.76_phase_accumulate_pnl_proj_+1.62_tape_$21/2_xc8,0.9800,8.16326531,8.0000,454.8401
+1781885058151,49,eth-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.99_ask_0.99_gap_z_-1.95_phase_accumulate_pnl_proj_+1.79_tape_$127/4_xc8,0.9900,8.08080808,8.0000,446.8401
+1781885099389,49,eth-updown-5m-1781884800,REDEEM,DOWN,option_expired_itm_win_1.00,1.0000,64.63866034,64.6387,511.4788

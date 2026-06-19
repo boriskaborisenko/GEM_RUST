@@ -48,3 +48,4 @@ timestamp,window_id,slug,event,status_before,current_atr,spot_price,ptb,ptb_delt
 1781884199387,47,eth-updown-5m-1781884200,promote_skipped,WAITING_ENTRY,1.9636,1706.2930,,,,0.4800,0.4900,0.5200,0.5300
 1781884499389,48,eth-updown-5m-1781884500,promote_skipped,WAITING_ENTRY,1.9800,1706.2489,,,,0.4900,0.5000,0.5100,0.5200
 1781884799389,49,eth-updown-5m-1781884800,promote_skipped,WAITING_ENTRY,1.3057,1706.1155,,,,0.4900,0.5000,0.5100,0.5300
+1781885099391,50,eth-updown-5m-1781885100,promote_skipped,WAITING_ENTRY,1.1750,1704.8989,,,,0.5100,0.5200,0.4900,0.5000
