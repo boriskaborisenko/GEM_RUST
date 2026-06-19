@@ -189,3 +189,5 @@ timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
 1781883782073,45,btc-updown-5m-1781883600,BUY,UP,j_final_seal_taker_up_fill_0.99_ask_0.99_gap_z_+1.81_phase_accumulate_pnl_proj_+0.08_tape_$1503/74_xc1,0.9900,8.08080808,8.0000,508.6151
 1781883785093,45,btc-updown-5m-1781883600,BUY,UP,j_final_seal_taker_up_fill_0.99_ask_0.99_gap_z_+1.94_phase_accumulate_pnl_proj_+0.16_tape_$1941/101_xc1,0.9900,8.08080808,8.0000,500.6151
 1781883899487,45,btc-updown-5m-1781883600,REDEEM,UP,option_expired_itm_win_1.00,1.0000,24.24242424,24.2424,524.8576
+1781884777287,48,btc-updown-5m-1781884500,BUY,DOWN,j_final_seal_taker_down_fill_0.98_ask_0.99_gap_z_-1.37_phase_late_pnl_proj_+0.00_tape_$577/42_xc11,0.9800,8.16326531,8.0000,516.8576
+1781884799492,48,btc-updown-5m-1781884500,REDEEM,DOWN,option_expired_itm_win_1.00,1.0000,8.16326531,8.1633,525.0208

@@ -1,255 +1,288 @@
-# GEM_RUST
+# GEM_RUST — Strategy J (Endgame)
 
-`GEM_RUST` is a Rust paper-trading engine for short Polymarket crypto UP/DOWN windows.
+Paper-trading бот для Polymarket crypto UP/DOWN окон (BTC/ETH, 5m).  
+Активная стратегия: **`j_endgame`** — одна нога на победителя, redeem @ $1, без продаж.
 
-Current focus: `dynamic_grid_d1` for BTC `5m` and `15m` windows. The 15m interval is the priority because it gives more time for PTB crossings and post-open management; 5m is mostly used to collect fast behavioral statistics.
+Цель окна: **+$1 redeem PnL** при минимальном риске. Не «угадать сторону на старте», а **зайти поздно, когда рынок и spot уже показывают победителя**, и дожать exposure динамически.
 
-This project is experimental research code. It is designed for paper execution, log analysis, and strategy iteration.
+---
 
-## What It Watches
+## Идея (магия)
 
-- Polymarket Gamma REST for market discovery.
-- Polymarket CLOB REST/WebSocket for UP/DOWN bid and ask prices.
-- Polymarket Chainlink WebSocket for live crypto spot.
-- Bybit REST/WebSocket for BTC 1m ATR, with Binance REST fallback for warmup.
-- Optional Google Vertex AI for one-window LLM directional forecasts.
+Polymarket 5m окно — это гонка к PTB (price to beat). В последние 2 минуты:
 
-## Current Strategy
+1. **Spot vs PTB** говорит, кто ITM (in the money).
+2. **Стакан** (mid-cross lead) показывает, куда тянет flow.
+3. **Tape** (покупки на Polymarket) и **CEX micro** подтверждают направление.
+4. **gap_z** нормализует «насколько spot далеко от PTB» относительно оставшегося времени и ATR.
 
-`config.json` currently selects:
+J не ставит фиксированное число BUY. Она считает **composite confidence** `C ∈ [0,1]` и из него — **target exposure** (сколько USD хотим на победителе). Каждый SpotTick покупает только **дельту** до target. Отсюда emergent N buys: иногда 3, иногда 12 — зависит от сигнала, не от расписания.
+
+**Прибыль:** купить winner дёшево (88–99¢), держать до redeem $1.  
+**Риск:** wrong side near PTB + late reversal = почти полный spent.
+
+---
+
+## Таймлайн окна (5m)
+
+```
+0–8%     WARMUP      — mid-cross tracker вооружается, BUY нет
+8–50%    MID         — ждём, BUY нет
+50–120s  ACCUMULATE  — composite endgame: probe → ramp clips на winner
+≤25s     LATE        — (legacy tier; composite доминирует)
+≤20s     RESCUE      — profit-gap sizing + flip-hedge приоритет
+≤5s      FINAL SEAL  — последние секунды
+```
+
+Insurance (ранний $1 на андердога) **выключен** (`insuranceEnabled: false`).
+
+---
+
+## Три движка (каждый SpotTick)
+
+Планировщик: `src/j_controller.rs` → `plan_j_window()`.
+
+| Приоритет | Движок | Когда | Что делает |
+|-----------|--------|-------|------------|
+| 1 | **Flip hedge** | Есть primary exposure, thesis сломалась | Покупает **противоположную** сторону до `flipTierUsd` |
+| 2 | **Composite** | Confidence ≥ порога | Target-exposure на **текущего winner** |
+| — | Insurance | `insuranceEnabled` | Сейчас off |
+
+Flip hedge проверяется **до** composite. Если spot пересёк PTB против нашей стороны — hedge может выстрелить раньше, чем мы нарастим loser.
+
+---
+
+## Composite confidence
+
+Функция: `endgame_confidence()` в `j_controller.rs`.
+
+Взвешенная смесь (defaults):
+
+| Сигнал | Вес | Смысл |
+|--------|-----|-------|
+| **gap_z** | 55% | `(spot − PTB) / expected_move(ATR, secs_left)` |
+| **book** | 20% | mid-cross lead на winner, штраф за chop |
+| **momentum** | 10% | smoothed spot velocity toward winner |
+| **flow** | 15% | tape imbalance + CEX buy/sell imbalance |
+
+**Hard veto (C = 0):**
+
+- `|gap_z| < finalSealMinGapZ` (~0.8) — coin flip, не торгуем
+- book **уверенно** ведёт **против** winner (`bookContradictGap`)
+
+**Boost:** сильный gap_z поднимает C даже если book/flow отстают — чтобы покупать @88¢ до репрайса книги к 99¢.
+
+---
+
+## Target exposure & sizing
+
+Функция: `plan_endgame_composite()`.
+
+```
+enter     = effective_conf_enter(ask, gap_z)   // ниже при cheap ask / safe gap
+eff       = ramp(confidence, enter, 1.0)
+conf_target = eff × maxRescueUsd                 // до $75
+profit_target = USD чтобы redeem PnL ≥ targetProfitUsd
+                (только если уже есть exposure — не на пустом окне!)
+target    = min(max(conf_target, profit_target), maxRescueUsd)
+increment = target − rescue_spent_usd
+clip      = increment capped by effective_max_clip
+```
+
+### Ramp clip (не $35 с первого тика)
+
+| Этап | Правило |
+|------|---------|
+| **Первый BUY** | max `firstClipUsd` ($8) |
+| **Follow-up** | ramp по gap_z + % окна + cheap ask |
+| **Потолок** | `maxClipUsd` ($35) |
+| **Anti-spam** | `minIncrementUsd` ($5), `minBuyIntervalMs` (3000 ms) |
+
+### Дорогой ask @ слабом gap
+
+Свежий вход **запрещён**, если:
+
+- ask > `expensiveAskThreshold` (0.94) **и**
+- `|gap_z| < expensiveMinGapZ` (1.35)
+
+Защита от coin-flip @ 95–99¢.
+
+---
+
+## Flip hedge
+
+Функция: `flip_hedge_triggered()` в `strategy_j.rs`.
+
+Arms когда:
+
+- `has_primary_exposure()` — есть `primary_side` **и** deployed USD (composite → `rescue_spent_usd`, не только cheap/late clips)
+- Spot **или** mid lead **против** нашей стороны
+- Достаточно evidence: significant crosses / cross count / `|gap_z| ≥ flipMinGapZ`
+
+Покупает opposite side taker до **`flipTierUsd`** ($12), max ask **`flipMaxAsk`** (0.99).
+
+> **Важно:** flip hedge — страховка, не полный offset. При $72 на DOWN и $12 hedge UP потеря всё равно большая, но без hedge — total loss.
+
+---
+
+## Данные, которые ест J
+
+| Источник | Для чего |
+|----------|----------|
+| Polymarket CLOB WS/REST | UP/DOWN bid/ask, book depth, paper fills |
+| Chainlink spot WS | spot vs PTB, gap_z, winner |
+| Bybit/Binance | ATR, CEX micro imbalance |
+| Trade tape tracker | $ BUY flow на winner за `tapeWindowMs` |
+| Mid-cross tracker | lead side, chop (significant crosses) |
+
+Stale PM data → no trade. BUY intent ≠ fill: depth, budget, gates могут заблокировать.
+
+---
+
+## Конфиг (`config.json` → `jEndgame`)
+
+Ключевые поля (текущие defaults):
 
 ```json
 {
-  "strategy": "dynamic_grid_d1",
-  "llm": {
-    "enabled": false,
-    "model": "gemini-3.5-flash",
-    "location": "global"
+  "strategy": "j_endgame",
+  "jEndgame": {
+    "endgameSecs": 120,
+    "cheapMinElapsedPct": 50.0,
+    "targetProfitUsd": 1.0,
+    "maxRescueUsd": 75.0,
+    "maxUsdPerWindow": 80.0,
+    "firstClipUsd": 8.0,
+    "maxClipUsd": 35.0,
+    "minIncrementUsd": 5.0,
+    "minBuyIntervalMs": 3000,
+    "expensiveAskThreshold": 0.94,
+    "expensiveMinGapZ": 1.35,
+    "confEnter": 0.58,
+    "fullSizeGapZ": 1.8,
+    "finalSealMinGapZ": 0.8,
+    "flipHedgeEnabled": true,
+    "flipTierUsd": 12.0,
+    "insuranceEnabled": false,
+    "takerMode": true,
+    "takerMaxAsk": 0.99,
+    "maxSigCrossesDirectional": 3,
+    "minPtbDistPct": 0.05
   }
 }
 ```
 
-### Dynamic Grid D1
+Полный список полей — `src/config.rs` (`JEndgameConfig`).
 
-D1 is a one-leg pair-builder strategy:
+---
 
-1. Before the next window starts, D1 buys one side, `UP` or `DOWN`, near parity.
-2. After the window opens, it protects the runner only when the first side is genuinely deteriorating or the opposite side becomes cheap enough.
-3. It tries not to over-hedge correctly guessed windows, because an unhedged correct side can redeem at `1.00`.
-4. It sells winners in small surplus layers and preserves clear near-expiry winners for redeem when probability supports that.
-5. It sells weak/OTM tails only late or when the bid overpays the modeled probability.
-
-Important semantics:
-
-- BUY signal amount is USD.
-- SELL signal amount is shares.
-- BUY orders below `$1.00` are rejected.
-- SELL can be any size, including dust/tails.
-- PTB distance must be interpreted as percent and ATR/time-adjusted z-score, not raw dollars only.
-
-### D1 Pre-Start Side Selection
-
-D1 chooses the first side by priority:
-
-1. Strong local directional/fair signal when PTB and spot context are available.
-2. Momentum signal from spot velocity/acceleration.
-3. First-window bootstrap fallback only when there is no signal history.
-
-LLM is currently disabled and D1 ignores LLM forecasts for BUY side selection. Recent logs showed that `llm_prior` entries had negative expectancy and weak directional accuracy, especially on the priority 15m interval.
-
-Current ask range:
-
-```json
-"preStartEntry": {
-  "minSideAsk": 0.42,
-  "maxSideAsk": 0.58
-}
-```
-
-So normal future-window prices around `0.47-0.54` are allowed.
-
-## LLM Forecasting
-
-LLM is optional and configured under `llm` in `config.json`, but it is currently disabled.
-
-Credentials:
-
-- Put the Google service account JSON at `GEM_RUST/llm.json`.
-- `llm.json` is ignored by git.
-- The code reads `llm.json` at runtime and does not copy or hardcode its contents.
-
-Startup behavior:
-
-- If `llm.enabled = true`, the bot immediately runs a real Vertex `hello` health check.
-- If the check passes, `SYSTEM EVENT LOG` shows `[LLM] OK ...`.
-- If the check fails, LLM is disabled for that process and the bot continues without it.
-
-Runtime behavior:
-
-- When enabled for research, one forecast is requested per upcoming window.
-- The forecast prompt includes rolling context from the last 10 closed windows in the same process: avg/median PnL, max drawdown, entry-side accuracy, LLM accuracy, runner redeem rate, hedge cost/rescue PnL, tail liquidation value, slippage sensitivity, winner counts, and compact per-window rows.
-- Terminal shows LLM status, model, location, right/wrong count, and accuracy.
-- Forecast rows and result rows are written to `llm_forecasts.csv`.
-- Entry rows can include LLM side/confidence next to the actual entry side, but D1 does not use LLM to choose BUY side.
-
-## Project Map
-
-```text
-src/
-├── main.rs                  # Runtime loop, dashboard, market lifecycle, logging.
-├── client.rs                # Polymarket market discovery, CLOB WS/REST, Chainlink spot.
-├── config.rs                # config.json parsing.
-├── llm.rs                   # Vertex AI directional forecaster.
-├── trader.rs                # Paper portfolio, buys, sells, redeem, CSV trade logs.
-├── volatility.rs            # BTC ATR warmup/tracking.
-├── analytics.rs             # Optional offline Vertex helper; not wired into main.rs.
-├── strategy.rs              # Strategy trait, signals, router.
-└── strategy/
-    ├── strategy_a.rs        # Simple Both baseline.
-    ├── strategy_b.rs        # Asymmetric Ladder.
-    ├── strategy_c.rs        # Dynamic Break-Even.
-    ├── strategy_d.rs        # Older Dynamic Grid / TVDS / WeakScalp.
-    └── strategy_d1.rs       # Current one-leg D1 strategy.
-```
-
-## Configuration
-
-Main fields in `config.json`:
-
-```json
-{
-  "strategy": "dynamic_grid_d1",
-  "llm": {
-    "enabled": true,
-    "model": "gemini-3.5-flash",
-    "location": "global"
-  },
-  "minBtcAtr": 0.0,
-  "session": {
-    "startingBank": 100,
-    "minWindowBudget": 30.0,
-    "maxWindowBudget": 150.0,
-    "windowBudgetPct": 10.0
-  },
-  "preStartEntry": {
-    "enabled": true,
-    "minSecondsBeforeStart": 5,
-    "maxSecondsBeforeStart": 120,
-    "minSideAsk": 0.42,
-    "maxSideAsk": 0.58
-  }
-}
-```
-
-Budget logic:
-
-- Raw budget = current equity * `windowBudgetPct / 100`.
-- It is clamped to `minWindowBudget..maxWindowBudget`.
-- D1 then applies its own ATR-regime multiplier.
-- In storm/high-volatility regimes D1 currently scouts smaller instead of hard-skipping.
-
-## Running
-
-From the project root:
+## Запуск
 
 ```bash
 cd GEM_RUST
-cargo check
+cargo build --release
+cargo run --release -- BTC 5m
+cargo run --release -- ETH 5m
 ```
 
-Runtime examples:
+`config.json` должен содержать `"strategy": "j_endgame"`.
 
-```bash
-cargo run -- BTC 5m
-cargo run -- BTC 15m
-```
+Session budget: `session.maxWindowBudget` × clamp — сейчас до **$80/окно** при bank $500.
 
-Common test setup:
+---
 
-- Run `BTC 5m` in one terminal.
-- Run `BTC 15m` in another terminal.
-- Let 5m collect faster statistics.
-- Let 15m collect the priority signal sample.
+## Логи
 
-## Logs
-
-Each run creates a separate directory:
+Каждый run:
 
 ```text
-logs/runs/<YYYYMMDD_HHMMSS>_<asset>_<interval>_<strategy>/
+logs/runs/<YYYYMMDD_HHMMSS>_<asset>_<interval>_j_endgame/
 ```
 
-Files:
+| Файл | Содержимое |
+|------|------------|
+| `window_summary.csv` | PnL, winner, PTB, close spot, entry_side, mid-cross counts |
+| `strategy_signals.csv` | Каждый BUY signal: reason, gap_z, phase, tape, executed |
+| `trade_events.csv` | Исполненные BUY / EXPIRED / REDEEM |
+| `mid_cross_events.csv` | Переключения book lead |
+| `lifecycle_events.csv` | promote/skip, WS events |
 
-- `window_summary.csv`: closed-window PnL, winner, PTB, close spot.
-- `entry_events.csv`: accepted pre-start entries, actual side, LLM side, confidence, ATR, ask prices, budget, shares.
-- `llm_forecasts.csv`: LLM forecast rows plus result rows with `result_winner` and `result_correct`.
-- `strategy_signals.csv`: every strategy BUY/SELL signal and reason, with spot velocity, PTB delta, shares, MTM, and probability context.
-- `trade_events.csv`: executed paper BUY/SELL/REDEEM/EXPIRED rows.
-- `lifecycle_events.csv`: market discovery, promotion, skip/entry lifecycle, WS status.
+### Reason string (расшифровка)
 
-Recommended review order:
+Пример:
 
-1. `window_summary.csv`
-2. `entry_events.csv`
-3. `llm_forecasts.csv`
-4. `strategy_signals.csv`
-5. `trade_events.csv`
-6. `lifecycle_events.csv`
+```text
+j_final_seal_taker_down_fill_0.89_ask_0.90_gap_z_-1.71_phase_accumulate_pnl_proj_+1.25_tape_$466/39_xc0
+```
 
-## Terminal Dashboard
+| Часть | Значение |
+|-------|----------|
+| `j_final_seal` | tier = composite endgame |
+| `taker` | покупка @ ask |
+| `down` | сторона |
+| `gap_z_-1.71` | spot ниже PTB, ~1.7 expected moves |
+| `phase_accumulate` | фаза окна |
+| `pnl_proj_+1.25` | projected redeem PnL если DOWN wins |
+| `tape_$466/39` | $466 buy flow / 39 prints на winner за 5s |
+| `xc0` | mid-cross count в момент сигнала |
 
-The dashboard shows:
+Flip hedge: `j_flip_hedge_taker_...`
 
-- strategy, asset, interval;
-- LLM enabled/disabled, model, location, right/wrong/accuracy;
-- started time, runtime, ATR;
-- total/entered/closed/open/skipped windows;
-- closed-only win/loss percentages;
-- bank, cash, equity, realized PnL;
-- current and next window details;
-- bid/ask, combined ask, PTB, live spot deviation;
-- spent, returned, estimated value, paired floor, break-even gap;
-- trade log with side, shares, price, USD value, cash, and reason;
-- system event log, including LLM startup status.
+---
 
-## Strategy Review Principles
+## Как читать run (не обманываться winrate)
 
-Do not judge a run only by winrate.
+**Не смотреть только winrate.** J может быть 90%+ wins и одним loss съесть неделю.
 
-Look at:
+| Метрика | Здорово | Тревога |
+|---------|---------|---------|
+| avg PnL / window | ~$1–4 | << $0 |
+| spent / window | стабильный | $70+ при target $1 |
+| first clip | ~$8 | $35 @ 0.98 |
+| loss window | редкий, малый | full spent, wrong side |
+| `j_flip_hedge_*` в loss | был hedge | 0 hedge при reversal |
+| sig mid-crosses at entry | 0–2 | 10+ только в последние 5s |
 
-- avg PnL per window;
-- median PnL;
-- max drawdown;
-- expectancy: average win vs average loss;
-- entry side accuracy;
-- runner held-to-redeem rate;
-- hedge cost vs hedge rescue value;
-- tail liquidation loss;
-- slippage sensitivity at `+/-0.01` and `+/-0.02`;
-- whether the chosen first side matches the eventual winner;
-- whether any future LLM observer mode provides useful signal before re-enabling it;
-- whether correct runners are left alone long enough to redeem;
-- whether hedge buys are timely and not too early;
-- whether weak tails are sold only when bid overpays probability;
-- whether 15m entry count is high enough.
+Типичный **win**: spent ~$68–74, PnL +$1–6.  
+Типичный **loss**: spent ~$72, PnL −$72 — wrong side, late spot flip.
 
-## Known Sharp Edges
+---
 
-- `volatility.rs` tracks BTC ATR even when the CLI asset is ETH/SOL.
-- BUY amount is USD while SELL amount is shares; this interface is easy to misuse.
-- `analytics.rs` is an offline helper and is not part of the live runtime path.
-- `CLOB price_change` handling approximates ask as `price + 0.01` when needed.
-- `static mut TIME_OFFSET_MS` exists for clock offset and should be treated carefully.
+## Карта кода (J)
 
-## Verification
+```text
+src/
+├── main.rs                 # runtime loop, dashboard, logging
+├── j_controller.rs         # phases, confidence, composite planner, flip plan
+├── strategy/strategy_j.rs  # TradeStrategy impl, flip_hedge_triggered, fills
+├── config.rs               # JEndgameConfig from config.json
+├── mid_cross_tracker.rs    # book lead / chop
+├── trade_tape.rs           # Polymarket tape window
+├── cex_micro.rs            # CEX imbalance
+├── orderbook.rs            # paper taker fill simulation
+├── j_fees.rs               # crypto fee model
+└── trader.rs               # portfolio, redeem, CSV logs
+```
 
-Allowed quick checks:
+---
+
+## Known sharp edges
+
+- **~$70 deploy за ~$1 target** — structural: один reversal = большой loss. Tuning `maxRescueUsd` / ramp — осознанный trade-off.
+- **Cheap ask trap** — DOWN @86¢ выглядит как value, пока spot не перескочит PTB за 30s.
+- **Chop filter слепой до конца** — `maxSigCrossesDirectional` считает crosses **на момент входа**; panic chop в последние 5s не блокирует уже deployed position.
+- **Flip hedge cap $12** — не нейтрализует $72 exposure.
+- BUY amount = **USD**, не shares. Min notional ~$1.
+- `cargo test` — 70 unit tests на planner/sizing/flip; live paper ≠ live CLOB.
+
+---
+
+## Verify
 
 ```bash
 cargo fmt
 cargo check
+cargo test
 ```
 
-Runtime tests are started manually by the operator.
+Runtime paper — оператор запускает вручную, смотрит `logs/runs/`.
