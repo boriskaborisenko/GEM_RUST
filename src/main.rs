@@ -11,6 +11,7 @@ mod asset_price;
 mod client;
 mod config;
 mod h_stats;
+mod j_controller;
 mod j_fees;
 mod orderbook;
 mod llm;
@@ -697,6 +698,86 @@ async fn get_or_request_llm_forecast(
                 None,
             );
             None
+        }
+    }
+}
+
+fn run_j_endgame_live_tick(
+    app: &mut AppState,
+    window_number: usize,
+    market: &MarketWindow,
+    prices: &PricesState,
+    timestamp: i64,
+) {
+    if app.config.strategy != "j_endgame" || window_number == 0 {
+        return;
+    }
+    let Ok(end) = chrono::DateTime::parse_from_rfc3339(&market.end_time) else {
+        return;
+    };
+    let secs_to_end = (end.timestamp_millis() - timestamp) / 1000;
+    if secs_to_end <= 0 {
+        return;
+    }
+
+    let mut port = app.portfolio.lock().unwrap();
+    let win_state = port
+        .get_or_create_window_state(window_number, "CURRENT", market)
+        .clone();
+    let current_atr = app.volatility_mgr.get_current_atr();
+    let spot_signal = app.spot_series.snapshot();
+    let mid_cross_snap = app.mid_cross_tracker.snapshot(window_number);
+    let cex_micro_snap = app.cex_micro_mgr.snapshot(app.spot_price);
+    let tape_snap = app.trade_tape.snapshot(
+        window_number,
+        timestamp,
+        app.config.j_endgame.tape_window_ms,
+    );
+    let cash = port.available_cash;
+    let mut strat = app.strategy.lock().unwrap();
+    strat.set_runtime_cash(cash);
+    let signals = strat.process_live_tick(
+        &app.config,
+        prices,
+        app.spot_price,
+        market,
+        &win_state,
+        secs_to_end,
+        current_atr,
+        spot_signal,
+        &mid_cross_snap,
+        &cex_micro_snap,
+        &tape_snap,
+    );
+    drop(strat);
+
+    for sig in signals {
+        if sig.is_buy {
+            if port
+                .execute_buy(
+                    window_number,
+                    &sig.side,
+                    sig.amount,
+                    sig.price,
+                    &sig.reason,
+                )
+                .is_some()
+            {
+                append_signal_event(
+                    &app.run_log_dir,
+                    window_number,
+                    &market.slug,
+                    &sig,
+                    true,
+                    current_atr,
+                    app.spot_price,
+                    market,
+                    prices,
+                    &win_state,
+                    secs_to_end,
+                    spot_signal,
+                );
+            }
         }
     }
 }
@@ -1403,6 +1484,16 @@ async fn process_event(
                     }
                 }
             }
+
+            if let Some(curr) = app.current_window.clone() {
+                run_j_endgame_live_tick(
+                    app,
+                    curr.window_number,
+                    &curr.market,
+                    &curr.prices,
+                    timestamp_ms,
+                );
+            }
         }
         MarketEvent::MarketTick {
             window_number,
@@ -1479,6 +1570,8 @@ async fn process_event(
                         app.config.j_endgame.tape_window_ms,
                     );
 
+                    let cash = port.available_cash;
+                    strat.set_runtime_cash(cash);
                     let signals = strat.process_live_tick(
                         &app.config,
                         &prices,
@@ -1592,7 +1685,9 @@ async fn process_event(
                     timestamp,
                     app.config.j_endgame.tape_window_ms,
                 );
+                let cash = port.available_cash;
                 let mut strat = app.strategy.lock().unwrap();
+                strat.set_runtime_cash(cash);
                 let signals = strat.process_live_tick(
                     &app.config,
                     &prices,
@@ -1810,9 +1905,9 @@ fn render_dashboard(app: &AppState) {
         current_llm,
         current_mid_cross.as_ref(),
         Some(&cex_micro_snap),
-        &app.config.strategy,
-        &app.config.j_endgame,
+        &app.config,
         current_tape.as_ref(),
+        p.available_cash,
     );
     println!(
         "  {}",
@@ -1828,9 +1923,9 @@ fn render_dashboard(app: &AppState) {
         next_llm,
         None,
         None,
-        &app.config.strategy,
-        &app.config.j_endgame,
+        &app.config,
         None,
+        p.available_cash,
     );
 
     // Render blocks vertically
@@ -1879,10 +1974,12 @@ fn render_window_block(
     llm_forecast: Option<&LlmForecast>,
     mid_cross: Option<&MidCrossSnapshot>,
     cex_micro: Option<&CexMicroSnapshot>,
-    strategy_name: &str,
-    j_endgame: &config::JEndgameConfig,
+    config: &config::Config,
     tape: Option<&TradeTapeSnapshot>,
+    available_cash: f64,
 ) -> Vec<String> {
+    let strategy_name = config.strategy.as_str();
+    let j_endgame = &config.j_endgame;
     let mut lines = vec![];
 
     let label_colored = if label == "CURRENT" {
@@ -2304,7 +2401,11 @@ fn render_window_block(
             lines.push(format!(
                 "J endgame clips: {}/{} | entry: {}",
                 clips,
-                j_endgame.max_clips_per_window,
+                if j_endgame.max_clips_per_window == 0 {
+                    "∞".to_string()
+                } else {
+                    j_endgame.max_clips_per_window.to_string()
+                },
                 if strat.h_entry_done {
                     paint("active/done", "green")
                 } else {
@@ -2341,18 +2442,61 @@ fn render_window_block(
                         0.0
                     };
                     let elapsed = strategy::strategy_j::window_elapsed_pct(m, secs_to_end);
-                    let plan = strategy::strategy_j::plan_endgame_tier(
-                        secs_to_end,
-                        winner_ask,
-                        gz.abs(),
+                    let phase = j_controller::detect_phase(
                         elapsed,
+                        secs_to_end,
                         j_endgame,
-                        0.0,
-                        0.0,
-                        0.0,
-                        0,
-                        0,
+                        mid_cross.unwrap_or(&MidCrossSnapshot::default()),
                     );
+                    let fee_bps = j_endgame
+                        .fee_rate_bps
+                        .unwrap_or(j_fees::DEFAULT_CRYPTO_FEE_RATE_BPS);
+                    let proj_pnl = j_controller::projected_redeem_pnl(win, winner, fee_bps);
+                    lines.push(format!(
+                        "J phase: {} | target +${:.2} | redeem PnL proj {:+.2}",
+                        paint(phase.label(), "cyan"),
+                        j_endgame.target_profit_usd,
+                        proj_pnl,
+                    ));
+                    let plan = mid_cross.map(|mc| {
+                        let allow = strategy::strategy_j::directional_entry_allowed(
+                            j_endgame,
+                            0.0,
+                            current_atr.max(1.0),
+                            spot,
+                            ptb,
+                            mc,
+                        );
+                        let confidence = if winner == "TIE" {
+                            0.0
+                        } else {
+                            j_controller::endgame_confidence(
+                                j_endgame,
+                                winner,
+                                gz,
+                                &SpotSignalSnapshot::default(),
+                                mc,
+                                cex_micro.unwrap_or(&CexMicroSnapshot::default()),
+                                tape.unwrap_or(&TradeTapeSnapshot::default()),
+                            )
+                        };
+                        j_controller::plan_j_window(
+                            config,
+                            &strategy::strategy_j::JWindowState::default(),
+                            win,
+                            &win.prices,
+                            spot,
+                            ptb,
+                            secs_to_end,
+                            elapsed,
+                            current_atr.max(1.0),
+                            0.0,
+                            mc,
+                            allow,
+                            confidence,
+                            available_cash,
+                        )
+                    }).flatten();
                     let flip_armed = mid_cross
                         .map(|mc| {
                             strategy::strategy_j::flip_hedge_armed_display(
@@ -2378,6 +2522,15 @@ fn render_window_block(
                             String::new()
                         },
                         match plan {
+                            Some(p) if p.tier == strategy::strategy_j::EndgameTier::Insurance => {
+                                paint(&format!("INSURANCE ≤{:.0}¢ | ${:.0} clip", j_endgame.insurance_max_ask * 100.0, j_endgame.insurance_clip_usd), "cyan")
+                            }
+                            Some(p) if p.tier == strategy::strategy_j::EndgameTier::Rescue => {
+                                paint("RESCUE solve → +$target", "red")
+                            }
+                            Some(p) if p.tier == strategy::strategy_j::EndgameTier::FlipHedge => {
+                                paint("FLIP HEDGE", "red")
+                            }
                             Some(p) if p.tier == strategy::strategy_j::EndgameTier::Impulse => {
                                 paint(&format!("IMPULSE ≤{:.0}¢ + tape", j_endgame.impulse_max_ask * 100.0), "green")
                             }
@@ -2415,9 +2568,9 @@ fn render_window_block(
                 }
             }
         } else if label == "NEXT" {
-            lines.push(paint("J: monitoring NEXT (endgame last 90s)", "dim"));
+            lines.push(paint("J: monitoring NEXT (timeline controller)", "dim"));
         } else {
-            lines.push(paint("J: endgame snipe — last 90s only", "dim"));
+            lines.push(paint("J: hold-to-redeem | target +$1/window", "dim"));
         }
     } else if strategy_name == "cheap_hold_h" {
         if win.window_number == 0 {

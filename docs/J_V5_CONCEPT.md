@@ -32,7 +32,7 @@ window_pnl = payout − spent_total
 Если за `T` секунд до конца видим, что `window_pnl < target` при текущем winner (spot vs PTB + tape/mid):
 
 ```
-need_payout � target_profit − window_pnl + fee_buffer
+need_payout = target_profit − window_pnl + fee_buffer
 rescue_usd  ≈ need_payout × winner_ask / (1 − effective_fee)
 rescue_usd  = min(rescue_usd, cash_left, max_rescue_per_window)
 ```
@@ -42,15 +42,40 @@ rescue_usd  = min(rescue_usd, cash_left, max_rescue_per_window)
 
 ---
 
-## Operating modes (3 phases, all dynamic)
+## Operating modes (4 phases, all dynamic)
 
 | Phase | When | Size | Logic |
 |-------|------|------|--------|
-| **Probe** | Whole window (after warmup), when edge exists | ~**$1**/clip, rate-limited | Докуп winner (or cheap side) only if `edge_per_$ > ε` and PTB/gap/tape gates pass |
+| **Insurance** *(TBD)* | First **30%** of window | ~**$1** @ **≤25¢** ask | Only if **\|PTB dist\|** small (spot ≈ strike); 1–2 clips on **cheap / underdog** leg — optionality + averaging if flip later |
+| **Probe** | Rest of window (after warmup), when edge exists | ~**$1**/clip, rate-limited | Докуп winner only if `edge_per_$ > ε` and PTB/gap/tape gates pass |
 | **Accumulate** | 2nd half + endgame zone | $1–$3 scaled by **confidence** | Больше size при высоком `\|gap_z\|`, hot tape, stable mid — меньше при шуме |
 | **Rescue** | Last **10–25s** | **Computed sweep** (not fixed clips) | Solve for `rescue_usd` to hit `target_profit`; optional hedge on flip |
 
 **v4 → v5 shift:** budgets не «3 cheap + 4 late», а **continuous controller** с одной целью на окно.
+
+### Early insurance @ ~25¢ (idea #2 — validate tomorrow)
+
+**Hypothesis:** когда в **первые 30%** окна spot **близко к PTB** (маленький dist / низкий `|gap_z|`), underdog часто торгуется **~20–30¢**. Пара **$1** страховочных покупок:
+
+- дешёвые shares (4× leverage vs $1 @ $1)
+- если окно потом уходит в эту ногу — **сильно усредняют** rescue math в конце
+- если нет — потеря **~$0.50–$1**, не $3 @ 88¢
+
+**Gates (draft):**
+
+- `elapsed_pct ≤ 30%`
+- `|ptb_delta_pct| < X` (e.g. 0.03–0.05%) or `|gap_z| < 0.5`
+- underdog ask ≤ **0.28** (target ~25¢)
+- max **2 clips × $1** per window for insurance bucket (separate from main budget)
+- **no insurance** if mid already shows strong leader (lead_gap > 15%)
+
+**Open for log analysis:**
+
+- How often does underdog @ 25¢ in first 30% **win** the window?
+- Does early insurance + end rescue beat **winner-only** path on PnL?
+- Correlation: small PTB dist at open → flip rate (mid_cross count)?
+
+**Verdict until logs:** plausible **as small separate bucket**, not default behavior. Could poison bank if every window gets $2 lottery tickets.
 
 ---
 
@@ -136,6 +161,48 @@ each tick:
 | `rescueZoneSecs` | 20 | Start solve-for-target |
 | `minEdgeBps` | 50 | Min edge after fees to probe |
 | `abortRescueIfAskAbove` | 0.97 | Don't rescue into 97¢+ if math fails |
+| `insuranceEnabled` | false | Off until log study |
+| `insuranceMaxElapsedPct` | 30 | First 30% of window only |
+| `insuranceMaxAsk` | 0.28 | Target ~25¢ underdog |
+| `insuranceMaxPtbDistPct` | 0.04 | Small PTB distance gate |
+| `insuranceMaxClips` | 2 | Max insurance clips |
+| `insuranceClipUsd` | 1.0 | Per insurance clip |
+
+---
+
+## Idea backlog (all in one place)
+
+| # | Idea | Status |
+|---|------|--------|
+| 1 | **Profit-target rescue** — solve USD to close at +$1 | v5 core |
+| 2 | **Early insurance @ 25¢** — first 30%, small PTB dist | TBD after logs |
+| 3 | **Dynamic $1 probes** full window | v5 probe phase |
+| 4 | **Flip hedge** (v4) | shipped, tune thresholds |
+| 5 | **Value 88¢** second half, gap_z ≥ 1 (v4) | shipped |
+| 6 | Per-asset targets / disabled insurance on alts | TBD |
+
+---
+
+## Why Rust (execution edge, not magic)
+
+- **Event-driven:** react on every CLOB trade print + Chainlink tick — no 1 Hz polling lag.
+- **Single binary, no GC:** predictable latency vs Node/Python bots on hot path.
+- **Book + tape in-process:** taker sweep simulation without round-trips.
+- **v5 solver** (future): microsecond `rescue_usd` recalc every tick in last 20s — cheap in Rust, painful in interpreted loops.
+
+Rust doesn't guarantee profit; it guarantees we **execute the plan first** when the window is chaotic.
+
+---
+
+## Tomorrow: log analysis checklist (v4 paper)
+
+Before any v5 / insurance code:
+
+1. `window_summary.csv` — PnL distribution, % windows ≥ +$1
+2. `trade_events.csv` — clip sizes ($3?), tier reasons, flip_hedge fired?
+3. `mid_cross_events.csv` — flip rate when PTB dist small at 8–30% elapsed
+4. Hypothetical: windows where underdog ask ≤ 28¢ in first 90s — what would 2×$1 insurance have paid?
+5. Rescue-impossible cases — spent wrong leg + late ask > 95¢
 
 ---
 
@@ -161,9 +228,10 @@ each tick:
 
 - Target $1 fixed or `bank × 1%`?
 - Probe on loser leg ever (true hedge) or winner-only?
+- **Insurance @ 25¢:** net +EV after fees vs lottery drag?
 - Rescue once per window or iterative each tick in last 20s?
 - Include **sell** (scalp loser) in solver or buy-only?
 
 ---
 
-*Concept only. No code until v4 overnight logs reviewed.*
+*Concept only. No code until v4 overnight logs reviewed (insurance decision deferred to that session).*

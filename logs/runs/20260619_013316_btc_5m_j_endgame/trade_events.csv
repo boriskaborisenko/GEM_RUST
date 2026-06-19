@@ -1,0 +1,8 @@
+timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
+1781832979972,1,btc-updown-5m-1781832900,BUY,DOWN,j_insurance_taker_down_fill_0.28_ask_0.28_gap_z_+0.42_phase_insurance_pnl_proj_+0.00_tape_$85/13_xc2,0.2800,3.57142857,1.0000,499.0000
+1781832979978,1,btc-updown-5m-1781832900,BUY,DOWN,j_insurance_taker_down_fill_0.28_ask_0.28_gap_z_+0.42_phase_insurance_pnl_proj_+2.57_tape_$85/13_xc2,0.2800,3.57142857,1.0000,498.0000
+1781833149911,1,btc-updown-5m-1781832900,BUY,UP,j_final_seal_taker_up_fill_0.99_ask_0.99_gap_z_+1.94_phase_accumulate_pnl_proj_-2.00_tape_$416/21_xc2,0.9900,2.84911088,2.8206,495.1794
+1781833150184,1,btc-updown-5m-1781832900,BUY,UP,j_final_seal_taker_up_fill_0.99_ask_0.99_gap_z_+1.96_phase_accumulate_pnl_proj_-1.97_tape_$414/21_xc2,0.9900,1.24920199,1.2367,493.9427
+1781833151008,1,btc-updown-5m-1781832900,BUY,UP,j_final_seal_taker_up_fill_0.99_ask_0.99_gap_z_+1.98_phase_accumulate_pnl_proj_-1.96_tape_$403/23_xc2,0.9900,2.30256037,2.2795,491.6631
+1781833199736,1,btc-updown-5m-1781832900,REDEEM,UP,option_expired_itm_win_1.00,1.0000,6.40087323,6.4009,498.0640
+1781833199736,1,btc-updown-5m-1781832900,EXPIRED,DOWN,option_expired_otm_loss_0.00,0.0000,7.14285714,0.0000,498.0640

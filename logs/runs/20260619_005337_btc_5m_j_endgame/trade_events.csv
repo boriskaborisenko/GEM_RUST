@@ -1,0 +1,12 @@
+timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
+1781830779139,1,btc-updown-5m-1781830500,BUY,DOWN,j_rescue_taker_down_fill_0.80_ask_0.81_gap_z_-1.07_phase_rescue_pnl_proj_+0.00_tape_$83/20_xc0,0.8045,61.49777464,49.4725,450.5275
+1781830779156,1,btc-updown-5m-1781830500,BUY,DOWN,j_rescue_taker_down_fill_0.81_ask_0.81_gap_z_-1.07_phase_rescue_pnl_proj_+12.03_tape_$88/21_xc0,0.8054,61.42567587,49.4725,401.0550
+1781830779260,1,btc-updown-5m-1781830500,BUY,DOWN,j_rescue_taker_down_fill_0.81_ask_0.81_gap_z_-1.07_phase_rescue_pnl_proj_+23.98_tape_$88/21_xc0,0.8054,61.42567587,49.4725,351.5825
+1781830779280,1,btc-updown-5m-1781830500,BUY,DOWN,j_rescue_taker_down_fill_0.80_ask_0.81_gap_z_-1.07_phase_rescue_pnl_proj_+35.93_tape_$98/22_xc0,0.8033,61.58370056,49.4725,302.1100
+1781830779325,1,btc-updown-5m-1781830500,BUY,DOWN,j_rescue_taker_down_fill_0.80_ask_0.81_gap_z_-1.08_phase_rescue_pnl_proj_+48.04_tape_$96/21_xc0,0.8034,61.88103821,49.7133,252.3967
+1781830779325,1,btc-updown-5m-1781830500,BUY,DOWN,j_rescue_taker_down_fill_0.80_ask_0.80_gap_z_-1.08_phase_rescue_pnl_proj_+60.21_tape_$96/21_xc0,0.8000,62.14167618,49.7133,202.6833
+1781830779342,1,btc-updown-5m-1781830500,BUY,DOWN,j_rescue_taker_down_fill_0.80_ask_0.80_gap_z_-1.08_phase_rescue_pnl_proj_+72.64_tape_$97/22_xc0,0.8000,62.14167618,49.7133,152.9700
+1781830779342,1,btc-updown-5m-1781830500,BUY,DOWN,j_rescue_taker_down_fill_0.80_ask_0.81_gap_z_-1.08_phase_rescue_pnl_proj_+85.07_tape_$97/22_xc0,0.8000,62.14167618,49.7133,103.2566
+1781830779673,1,btc-updown-5m-1781830500,BUY,DOWN,j_rescue_taker_down_fill_0.80_ask_0.81_gap_z_-1.08_phase_rescue_pnl_proj_+97.50_tape_$97/22_xc0,0.8000,62.14167618,49.7133,53.5433
+1781830779673,1,btc-updown-5m-1781830500,BUY,DOWN,j_rescue_taker_down_fill_0.80_ask_0.80_gap_z_-1.08_phase_rescue_pnl_proj_+109.92_tape_$97/22_xc0,0.8000,62.14167618,49.7133,3.8300
+1781830799887,1,btc-updown-5m-1781830500,EXPIRED,DOWN,option_expired_otm_loss_0.00,0.0000,618.52224606,0.0000,3.8300

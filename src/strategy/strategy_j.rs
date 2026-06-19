@@ -7,6 +7,7 @@ use crate::strategy::{
     CexMicroSnapshot, MidCrossSnapshot, OrderSignal, SpotSignalSnapshot, StrategyState,
     TradeStrategy,
 };
+use crate::mid_cross_tracker::LeadSide;
 use crate::trade_tape::{TradeTapeSnapshot, TradeTapeTracker};
 use crate::trader::WindowState;
 use std::collections::HashMap;
@@ -15,25 +16,33 @@ const J_MIN_TRADEABLE_WINDOW: usize = 1;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct JWindowState {
-    endgame_spent_usd: f64,
-    impulse_spent_usd: f64,
-    cheap_spent_usd: f64,
-    late_spent_usd: f64,
-    hedge_spent_usd: f64,
-    cheap_clips: u16,
-    late_clips: u16,
-    hedge_clips: u16,
-    clips_filled: u16,
-    primary_side: Option<String>,
-    winner_side: Option<String>,
+    pub(crate) impulse_spent_usd: f64,
+    pub(crate) cheap_spent_usd: f64,
+    pub(crate) late_spent_usd: f64,
+    pub(crate) hedge_spent_usd: f64,
+    pub(crate) insurance_spent_usd: f64,
+    /// USD deployed on the winner during the composite endgame this window.
+    /// Used as the "already deployed" term for target-exposure throttling.
+    pub(crate) rescue_spent_usd: f64,
+    pub(crate) cheap_clips: u16,
+    pub(crate) late_clips: u16,
+    pub(crate) hedge_clips: u16,
+    pub(crate) insurance_clips: u16,
+    pub(crate) clips_filled: u16,
+    pub(crate) primary_side: Option<String>,
+    pub(crate) insurance_side: Option<String>,
+    pub(crate) winner_side: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndgameTier {
+    Insurance,
     Impulse,
     Cheap,
     Late,
     FlipHedge,
+    Rescue,
+    FinalSeal,
 }
 
 #[derive(Debug, Clone)]
@@ -43,18 +52,22 @@ pub struct TierPlan {
     pub need_tape: bool,
     pub budget_left: f64,
     pub sweep_clips: u8,
-    /// When set, buy this side (flip hedge on the new winner leg).
+    /// When set, buy this side (flip hedge / insurance / rescue).
     pub side: Option<String>,
+    /// Per-action clip size; 0 = use config default.
+    pub clip_usd: f64,
 }
 
 pub struct JEndgameStrategy {
     windows: HashMap<usize, JWindowState>,
+    available_cash: f64,
 }
 
 impl JEndgameStrategy {
     pub fn new() -> Self {
         Self {
             windows: HashMap::new(),
+            available_cash: 0.0,
         }
     }
 }
@@ -75,7 +88,7 @@ fn side_book<'a>(side: &str, prices: &'a PricesState) -> &'a SideBook {
     }
 }
 
-fn side_ask(side: &str, prices: &PricesState) -> f64 {
+pub(crate) fn side_ask(side: &str, prices: &PricesState) -> f64 {
     if side == "UP" {
         prices.up.ask
     } else {
@@ -83,7 +96,7 @@ fn side_ask(side: &str, prices: &PricesState) -> f64 {
     }
 }
 
-fn winner_side(spot: f64, ptb: f64) -> Option<&'static str> {
+pub(crate) fn winner_side(spot: f64, ptb: f64) -> Option<&'static str> {
     if spot > ptb {
         Some("UP")
     } else if spot < ptb {
@@ -129,6 +142,45 @@ pub(crate) fn window_elapsed_pct(market: &MarketWindow, secs_to_end: i64) -> f64
     ((total - secs_to_end.max(0)) as f64 / total as f64) * 100.0
 }
 
+pub(crate) fn ptb_dist_pct(spot: f64, ptb: f64) -> f64 {
+    if ptb.abs() > 1e-12 {
+        ((spot - ptb) / ptb).abs() * 100.0
+    } else {
+        f64::NAN
+    }
+}
+
+pub(crate) fn effective_max_clips(cfg: &crate::config::JEndgameConfig) -> u16 {
+    if cfg.max_clips_per_window == 0 {
+        u16::MAX
+    } else {
+        cfg.max_clips_per_window
+    }
+}
+
+pub(crate) fn directional_entry_allowed(
+    cfg: &crate::config::JEndgameConfig,
+    min_atr: f64,
+    current_atr: f64,
+    spot: f64,
+    ptb: f64,
+    mid_cross: &MidCrossSnapshot,
+) -> bool {
+    if min_atr > 0.0 && current_atr < min_atr {
+        return false;
+    }
+    let dist = ptb_dist_pct(spot, ptb);
+    if cfg.min_ptb_dist_pct > 0.0 && dist.is_finite() && dist < cfg.min_ptb_dist_pct {
+        return false;
+    }
+    if cfg.max_sig_crosses_directional > 0
+        && mid_cross.significant_cross_count >= cfg.max_sig_crosses_directional
+    {
+        return false;
+    }
+    true
+}
+
 pub(crate) fn flip_hedge_triggered(
     cfg: &crate::config::JEndgameConfig,
     state: &JWindowState,
@@ -142,18 +194,30 @@ pub(crate) fn flip_hedge_triggered(
     if !cfg.flip_hedge_enabled || state.primary_clips() == 0 {
         return false;
     }
-    if primary_side == current_winner {
-        return false;
-    }
     let spot_against_primary =
         (primary_side == "UP" && spot < ptb) || (primary_side == "DOWN" && spot > ptb);
-    if !spot_against_primary {
+    let mid_against_primary = mid_cross
+        .current_side
+        .filter(|s| *s != LeadSide::Tie)
+        .map(|s| s.as_str() != primary_side)
+        .unwrap_or(false);
+
+    if primary_side == current_winner && !mid_against_primary {
         return false;
     }
+    if !spot_against_primary && !mid_against_primary {
+        return false;
+    }
+
     let sharp = mid_cross.significant_cross_count >= cfg.flip_min_sig_crosses
         || mid_cross.cross_count >= cfg.flip_min_crosses
         || mid_cross.last_cross_is_significant;
-    sharp || gz.abs() >= cfg.flip_min_gap_z
+
+    if spot_against_primary {
+        return sharp || gz.abs() >= cfg.flip_min_gap_z;
+    }
+    // Mid lead flipped before spot crossed PTB — require chaos evidence.
+    sharp
 }
 
 impl JWindowState {
@@ -189,116 +253,6 @@ pub(crate) fn flip_hedge_armed_display(
         gz,
         mid_cross,
     )
-}
-
-pub(crate) fn plan_flip_hedge(
-    cfg: &crate::config::JEndgameConfig,
-    state: &JWindowState,
-    current_winner: &str,
-    spot: f64,
-    ptb: f64,
-    gz: f64,
-    hedge_ask: f64,
-    mid_cross: &MidCrossSnapshot,
-) -> Option<TierPlan> {
-    let primary = state.primary_side.as_deref()?;
-    if !flip_hedge_triggered(cfg, state, primary, current_winner, spot, ptb, gz, mid_cross) {
-        return None;
-    }
-    if state.hedge_spent_usd + 1e-9 >= cfg.flip_tier_usd || hedge_ask > cfg.flip_max_ask {
-        return None;
-    }
-    Some(TierPlan {
-        tier: EndgameTier::FlipHedge,
-        max_pay: hedge_ask.min(cfg.flip_max_ask),
-        need_tape: cfg.flip_require_tape,
-        budget_left: cfg.flip_tier_usd - state.hedge_spent_usd,
-        sweep_clips: cfg.flip_sweep_clips_per_tick,
-        side: Some(current_winner.to_string()),
-    })
-}
-
-pub(crate) fn plan_endgame_tier(
-    secs_to_end: i64,
-    winner_ask: f64,
-    abs_gap_z: f64,
-    elapsed_pct: f64,
-    cfg: &crate::config::JEndgameConfig,
-    impulse_spent: f64,
-    cheap_spent: f64,
-    late_spent: f64,
-    cheap_clips: u16,
-    late_clips: u16,
-) -> Option<TierPlan> {
-    if secs_to_end <= 0 || winner_ask < cfg.min_winner_ask {
-        return None;
-    }
-
-    // IMPULSE: disabled by default; only mid-window with strong gap + tape.
-    if cfg.impulse_enabled
-        && cfg.impulse_tier_usd > 0.0
-        && secs_to_end > cfg.late_max_secs
-        && secs_to_end > cfg.endgame_secs
-        && elapsed_pct >= cfg.cheap_min_elapsed_pct
-        && abs_gap_z >= cfg.impulse_min_gap_z
-        && winner_ask <= cfg.impulse_max_ask
-        && impulse_spent + 1e-9 < cfg.impulse_tier_usd
-    {
-        return Some(TierPlan {
-            tier: EndgameTier::Impulse,
-            max_pay: winner_ask.min(cfg.impulse_max_ask),
-            need_tape: cfg.impulse_require_tape,
-            budget_left: cfg.impulse_tier_usd - impulse_spent,
-            sweep_clips: cfg.impulse_sweep_clips_per_tick,
-            side: None,
-        });
-    }
-
-    if secs_to_end > cfg.endgame_secs {
-        return None;
-    }
-
-    // Late: last N sec — reserve bulk of budget for endgame sweep.
-    if secs_to_end <= cfg.late_max_secs
-        && abs_gap_z >= cfg.late_min_gap_z
-        && winner_ask <= cfg.taker_max_ask
-        && late_spent + 1e-9 < cfg.late_tier_usd
-        && late_clips < cfg.max_clips_per_window.saturating_sub(cfg.cheap_max_clips)
-    {
-        let sweep = if secs_to_end <= cfg.late_heavy_secs {
-            cfg.late_heavy_sweep_clips
-        } else {
-            cfg.sweep_clips_per_tick.min(2)
-        };
-        return Some(TierPlan {
-            tier: EndgameTier::Late,
-            max_pay: winner_ask.min(cfg.taker_max_ask),
-            need_tape: cfg.late_require_tape,
-            budget_left: cfg.late_tier_usd - late_spent,
-            sweep_clips: sweep,
-            side: None,
-        });
-    }
-
-    // Value/Cheap: 2–3 clips @ ~88¢ in 2nd half of window, meaningful PTB gap only.
-    if secs_to_end > cfg.late_max_secs
-        && elapsed_pct >= cfg.cheap_min_elapsed_pct
-        && abs_gap_z >= cfg.cheap_min_gap_z
-        && winner_ask <= cfg.cheap_max_ask
-        && cheap_spent + 1e-9 < cfg.cheap_tier_usd
-        && cheap_clips < cfg.cheap_max_clips
-    {
-        return Some(TierPlan {
-            tier: EndgameTier::Cheap,
-            max_pay: winner_ask.min(cfg.cheap_max_ask),
-            need_tape: cfg.cheap_require_tape,
-            budget_left: cfg.cheap_tier_usd - cheap_spent,
-            sweep_clips: cfg.cheap_sweep_clips_per_tick,
-            side: None,
-        });
-    }
-
-    None
 }
 
 pub(crate) fn tape_hot(
@@ -396,30 +350,46 @@ impl TradeStrategy for JEndgameStrategy {
         }
 
         let jcfg = &config.j_endgame;
-        let clip_usd = jcfg.clip_usd.max(1.0);
+        let fee_bps = jcfg
+            .fee_rate_bps
+            .unwrap_or(DEFAULT_CRYPTO_FEE_RATE_BPS);
+        let default_clip = jcfg.clip_usd.max(jcfg.probe_clip_usd);
         let state = self.windows.entry(window_number).or_insert(JWindowState {
-            endgame_spent_usd: 0.0,
             impulse_spent_usd: 0.0,
             cheap_spent_usd: 0.0,
             late_spent_usd: 0.0,
             hedge_spent_usd: 0.0,
+            insurance_spent_usd: 0.0,
+            rescue_spent_usd: 0.0,
             cheap_clips: 0,
             late_clips: 0,
             hedge_clips: 0,
+            insurance_clips: 0,
             clips_filled: 0,
             primary_side: None,
+            insurance_side: None,
             winner_side: None,
         });
 
-        if state.endgame_spent_usd >= jcfg.max_usd_per_window
-            || state.clips_filled >= jcfg.max_clips_per_window
+        let window_cap = jcfg
+            .max_usd_per_window
+            .min(config.session.max_window_budget);
+        if win_state.spent >= window_cap - 1e-9
+            || state.clips_filled >= effective_max_clips(jcfg)
         {
-            return signals;
+            // allow final seal / rescue even at window budget cap
+            if secs_to_end > jcfg.final_seal_secs {
+                return signals;
+            }
         }
 
         let (Some(spot), Some(ptb)) = (spot_price, market.price_to_beat) else {
             return signals;
         };
+
+        let min_atr = config.min_atr_for(&market.asset);
+        let allow_directional =
+            directional_entry_allowed(jcfg, min_atr, current_atr, spot, ptb, mid_cross);
 
         let Some(current_winner) = winner_side(spot, ptb) else {
             return signals;
@@ -431,32 +401,34 @@ impl TradeStrategy for JEndgameStrategy {
         }
 
         let elapsed_pct = window_elapsed_pct(market, secs_to_end);
-        let hedge_ask = side_ask(current_winner, prices);
+        let phase = crate::j_controller::detect_phase(elapsed_pct, secs_to_end, jcfg, mid_cross);
 
-        let plan = plan_flip_hedge(
+        let confidence = crate::j_controller::endgame_confidence(
             jcfg,
-            state,
             current_winner,
+            gz,
+            &_spot_signal,
+            mid_cross,
+            _cex_micro,
+            tape,
+        );
+
+        let plan = crate::j_controller::plan_j_window(
+            config,
+            state,
+            win_state,
+            prices,
             spot,
             ptb,
-            gz,
-            hedge_ask,
+            secs_to_end,
+            elapsed_pct,
+            current_atr,
+            min_atr,
             mid_cross,
-        )
-        .or_else(|| {
-            plan_endgame_tier(
-                secs_to_end,
-                side_ask(current_winner, prices),
-                gz.abs(),
-                elapsed_pct,
-                jcfg,
-                state.impulse_spent_usd,
-                state.cheap_spent_usd,
-                state.late_spent_usd,
-                state.cheap_clips,
-                state.late_clips,
-            )
-        });
+            allow_directional,
+            confidence,
+            self.available_cash,
+        );
 
         let Some(plan) = plan else {
             return signals;
@@ -467,6 +439,11 @@ impl TradeStrategy for JEndgameStrategy {
             .as_deref()
             .unwrap_or(current_winner);
         let winner_ask = side_ask(side, prices);
+        let clip_usd = if plan.clip_usd > 0.0 {
+            plan.clip_usd
+        } else {
+            default_clip
+        };
 
         if plan.need_tape && !tape_hot(tape, side, jcfg) {
             return signals;
@@ -479,7 +456,14 @@ impl TradeStrategy for JEndgameStrategy {
                 .clamp(jcfg.min_winner_ask, plan.max_pay)
         };
 
-        if max_pay < jcfg.min_winner_ask && plan.tier != EndgameTier::FlipHedge {
+        let cheap_tier = matches!(
+            plan.tier,
+            EndgameTier::Insurance
+                | EndgameTier::FlipHedge
+                | EndgameTier::Rescue
+                | EndgameTier::FinalSeal
+        );
+        if max_pay < jcfg.min_winner_ask && !cheap_tier {
             return signals;
         }
 
@@ -491,9 +475,11 @@ impl TradeStrategy for JEndgameStrategy {
             return signals;
         }
 
-        let remaining = plan
-            .budget_left
-            .min(jcfg.max_usd_per_window - state.endgame_spent_usd);
+        let remaining = if matches!(plan.tier, EndgameTier::Rescue | EndgameTier::FinalSeal) {
+            plan.budget_left
+        } else {
+            plan.budget_left.min((window_cap - win_state.spent).max(0.0))
+        };
         let mut prices_mut = prices.clone();
         let fills = sweep_endgame_clips(
             side,
@@ -504,15 +490,19 @@ impl TradeStrategy for JEndgameStrategy {
             plan.sweep_clips,
             remaining,
             state.clips_filled,
-            jcfg.max_clips_per_window,
+            effective_max_clips(jcfg),
         );
 
         let (tape_usd, tape_count) = TradeTapeTracker::winner_stats(tape, side);
+        let projected_pnl = crate::j_controller::projected_redeem_pnl(win_state, side, fee_bps);
         let tier_label = match plan.tier {
+            EndgameTier::Insurance => "insurance",
             EndgameTier::Impulse => "impulse",
             EndgameTier::Cheap => "value",
             EndgameTier::Late => "late",
             EndgameTier::FlipHedge => "flip_hedge",
+            EndgameTier::Rescue => "rescue",
+            EndgameTier::FinalSeal => "final_seal",
         };
         let mode = if jcfg.taker_mode { "taker" } else { "limit" };
 
@@ -523,20 +513,34 @@ impl TradeStrategy for JEndgameStrategy {
                 amount: usd,
                 price: fill_price,
                 reason: format!(
-                    "j_{}_{}_{}_fill_{:.2}_ask_{:.2}_gap_z_{:+.2}_tape_${:.0}/{}_xc{}",
+                    "j_{}_{}_{}_fill_{:.2}_ask_{:.2}_gap_z_{:+.2}_phase_{}_pnl_proj_{:+.2}_tape_${:.0}/{}_xc{}",
                     tier_label,
                     mode,
                     side.to_lowercase(),
                     fill_price,
                     winner_ask,
                     gz,
+                    phase.label(),
+                    projected_pnl,
                     tape_usd,
                     tape_count,
                     mid_cross.cross_count,
                 ),
             });
-            state.endgame_spent_usd += usd;
             match plan.tier {
+                EndgameTier::Insurance => {
+                    state.insurance_spent_usd += usd;
+                    state.insurance_clips += 1;
+                    if state.insurance_side.is_none() {
+                        state.insurance_side = Some(side.to_string());
+                    }
+                }
+                EndgameTier::Rescue | EndgameTier::FinalSeal => {
+                    state.rescue_spent_usd += usd;
+                    if state.primary_side.is_none() {
+                        state.primary_side = Some(side.to_string());
+                    }
+                }
                 EndgameTier::Impulse => state.impulse_spent_usd += usd,
                 EndgameTier::Cheap => {
                     state.cheap_spent_usd += usd;
@@ -579,6 +583,10 @@ impl TradeStrategy for JEndgameStrategy {
             h_salvage_done: false,
         })
     }
+
+    fn set_runtime_cash(&mut self, cash: f64) {
+        self.available_cash = cash.max(0.0);
+    }
 }
 
 #[cfg(test)]
@@ -597,7 +605,7 @@ mod tests {
             session: SessionConfig {
                 starting_bank: 500.0,
                 min_window_budget: 30.0,
-                max_window_budget: 150.0,
+                max_window_budget: 500.0,
                 window_budget_pct: 10.0,
             },
             pre_start_entry: PreStartConfig {
@@ -614,6 +622,12 @@ mod tests {
             force_close_at_end: false,
             j_endgame: JEndgameConfig::default(),
         }
+    }
+
+    fn strat_with_cash() -> JEndgameStrategy {
+        let mut s = JEndgameStrategy::new();
+        s.set_runtime_cash(500.0);
+        s
     }
 
     fn sample_market() -> MarketWindow {
@@ -651,8 +665,8 @@ mod tests {
     }
 
     #[test]
-    fn taker_sweep_on_hot_tape() {
-        let mut strat = JEndgameStrategy::new();
+    fn composite_fires_on_strong_consensus() {
+        let mut strat = strat_with_cash();
         let prices = PricesState {
             up: ContractPrices {
                 bid: 0.87,
@@ -661,11 +675,11 @@ mod tests {
                     asks: vec![
                         BookLevel {
                             price: 0.88,
-                            size: 20.0,
+                            size: 50.0,
                         },
                         BookLevel {
                             price: 0.88,
-                            size: 20.0,
+                            size: 50.0,
                         },
                     ],
                     ..Default::default()
@@ -687,6 +701,22 @@ mod tests {
             trades: vec![],
             prices: prices.clone(),
         };
+        // All signals agree the winner (UP) holds: book leads UP, spot momentum
+        // up, tape + CEX flow up => composite confidence high => buys.
+        let mid = MidCrossSnapshot {
+            armed: true,
+            current_side: Some(LeadSide::Up),
+            lead_gap: 0.20,
+            ..Default::default()
+        };
+        let spot_sig = SpotSignalSnapshot {
+            smoothed_velocity_usd_per_sec: Some(3.0),
+            ..Default::default()
+        };
+        let cex = CexMicroSnapshot {
+            buy_sell_imbalance_3s: 1.0,
+            ..Default::default()
+        };
         let signals = strat.process_live_tick(
             &test_config(),
             &prices,
@@ -695,19 +725,22 @@ mod tests {
             &win,
             60,
             40.0,
-            SpotSignalSnapshot::default(),
-            &MidCrossSnapshot::default(),
-            &CexMicroSnapshot::default(),
+            spot_sig,
+            &mid,
+            &cex,
             &hot_tape(),
         );
         assert!(!signals.is_empty());
-        assert!(signals[0].reason.starts_with("j_value_taker"));
-        assert!((signals[0].price - 0.88).abs() < 0.02);
+        assert!(
+            signals[0].reason.starts_with("j_final_seal"),
+            "reason={}",
+            signals[0].reason
+        );
     }
 
     #[test]
     fn late_no_entry_without_tape() {
-        let mut strat = JEndgameStrategy::new();
+        let mut strat = strat_with_cash();
         let prices = PricesState {
             up: ContractPrices {
                 bid: 0.95,
@@ -753,8 +786,8 @@ mod tests {
     }
 
     #[test]
-    fn late_tier_needs_tape() {
-        let mut strat = JEndgameStrategy::new();
+    fn composite_skips_without_consensus() {
+        let mut strat = strat_with_cash();
         let prices = PricesState {
             up: ContractPrices {
                 bid: 0.95,
@@ -783,40 +816,42 @@ mod tests {
             trades: vec![],
             prices: prices.clone(),
         };
-        let no_tape = strat.process_live_tick(
+        // gap_z alone is huge, but with no book/momentum/flow agreement the
+        // composite confidence stays below conf_enter => 0 buys (no coin-flip bet).
+        let gap_only = strat.process_live_tick(
             &test_config(),
             &prices,
             Some(60_100.0),
             &win.market,
             &win,
-            20,
+            22,
             40.0,
             SpotSignalSnapshot::default(),
             &MidCrossSnapshot::default(),
             &CexMicroSnapshot::default(),
             &TradeTapeSnapshot::default(),
         );
-        assert!(no_tape.is_empty());
-        let with_tape = strat.process_live_tick(
+        assert!(gap_only.is_empty());
+        // Even hot tape by itself isn't enough consensus to fire.
+        let tape_only = strat.process_live_tick(
             &test_config(),
             &prices,
             Some(60_100.0),
             &win.market,
             &win,
-            20,
+            22,
             40.0,
             SpotSignalSnapshot::default(),
             &MidCrossSnapshot::default(),
             &CexMicroSnapshot::default(),
             &hot_tape(),
         );
-        assert!(!with_tape.is_empty());
-        assert!(with_tape[0].reason.starts_with("j_late_taker"));
+        assert!(tape_only.is_empty());
     }
 
     #[test]
     fn impulse_blocked_before_half_window() {
-        let mut strat = JEndgameStrategy::new();
+        let mut strat = strat_with_cash();
         let mut cfg = test_config();
         cfg.j_endgame.impulse_enabled = true;
         cfg.j_endgame.impulse_tier_usd = 9.0;
@@ -867,7 +902,7 @@ mod tests {
 
     #[test]
     fn flip_hedge_buys_opposite_on_sharp_reversal() {
-        let mut strat = JEndgameStrategy::new();
+        let mut strat = strat_with_cash();
         let cfg = test_config();
         let prices = PricesState {
             up: ContractPrices {
@@ -917,7 +952,6 @@ mod tests {
         strat.windows.insert(
             1,
             JWindowState {
-                endgame_spent_usd: 9.0,
                 cheap_spent_usd: 9.0,
                 cheap_clips: 3,
                 clips_filled: 3,
@@ -940,7 +974,10 @@ mod tests {
         );
         assert!(!signals.is_empty());
         assert_eq!(signals[0].side, "DOWN");
-        assert!(signals[0].reason.starts_with("j_flip_hedge"));
+        assert!(
+            signals[0].reason.starts_with("j_rescue")
+                || signals[0].reason.starts_with("j_flip_hedge")
+        );
     }
 
     #[test]
@@ -952,5 +989,119 @@ mod tests {
             ..Default::default()
         };
         assert!(tape_hot(&tape, "UP", &cfg));
+    }
+
+    #[test]
+    fn blocks_directional_when_ptb_dist_tiny() {
+        let cfg = test_config();
+        assert!(!directional_entry_allowed(
+            &cfg.j_endgame,
+            0.0,
+            40.0,
+            60_020.0,
+            60_000.0,
+            &MidCrossSnapshot::default(),
+        ));
+        assert!(directional_entry_allowed(
+            &cfg.j_endgame,
+            0.0,
+            40.0,
+            60_100.0,
+            60_000.0,
+            &MidCrossSnapshot::default(),
+        ));
+    }
+
+    #[test]
+    fn blocks_directional_when_atr_too_low() {
+        let mut cfg = test_config();
+        cfg.min_btc_atr = 20.0;
+        assert!(!directional_entry_allowed(
+            &cfg.j_endgame,
+            cfg.min_btc_atr,
+            10.0,
+            60_100.0,
+            60_000.0,
+            &MidCrossSnapshot::default(),
+        ));
+    }
+
+    #[test]
+    fn flip_hedge_on_mid_lead_before_spot_cross() {
+        let mut strat = strat_with_cash();
+        let cfg = test_config();
+        let prices = PricesState {
+            up: ContractPrices {
+                bid: 0.52,
+                ask: 0.54,
+                book: SideBook {
+                    asks: vec![BookLevel {
+                        price: 0.54,
+                        size: 50.0,
+                    }],
+                    ..Default::default()
+                },
+            },
+            down: ContractPrices {
+                bid: 0.44,
+                ask: 0.46,
+                book: SideBook {
+                    asks: vec![BookLevel {
+                        price: 0.46,
+                        size: 50.0,
+                    }],
+                    ..Default::default()
+                },
+            },
+        };
+        let win = WindowState {
+            window_number: 1,
+            role: "CURRENT".to_string(),
+            status: "LIVE".to_string(),
+            market: sample_market(),
+            spent: 0.0,
+            cash_returned: 0.0,
+            up_shares: 0.0,
+            down_shares: 0.0,
+            initial_up_shares: 0.0,
+            initial_down_shares: 0.0,
+            trades: vec![],
+            prices: prices.clone(),
+        };
+        let mut mid = MidCrossSnapshot::default();
+        mid.armed = true;
+        mid.current_side = Some(LeadSide::Up);
+        mid.cross_count = 8;
+        mid.significant_cross_count = 3;
+        strat.windows.insert(
+            1,
+            JWindowState {
+                cheap_spent_usd: 9.0,
+                cheap_clips: 3,
+                clips_filled: 3,
+                primary_side: Some("DOWN".to_string()),
+                ..Default::default()
+            },
+        );
+        // Spot still below PTB (DOWN winner) but mid lead flipped UP.
+        let signals = strat.process_live_tick(
+            &cfg,
+            &prices,
+            Some(59_970.0),
+            &win.market,
+            &win,
+            12,
+            40.0,
+            SpotSignalSnapshot::default(),
+            &mid,
+            &CexMicroSnapshot::default(),
+            &TradeTapeSnapshot::default(),
+        );
+        assert!(!signals.is_empty());
+        assert_eq!(signals[0].side, "UP");
+        assert!(
+            signals[0].reason.starts_with("j_rescue")
+                || signals[0].reason.starts_with("j_flip_hedge")
+        );
     }
 }

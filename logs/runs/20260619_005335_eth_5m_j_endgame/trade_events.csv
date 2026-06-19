@@ -1,0 +1,9 @@
+timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
+1781830781262,1,eth-updown-5m-1781830500,BUY,DOWN,j_rescue_taker_down_fill_0.99_ask_0.99_gap_z_-1.58_phase_rescue_pnl_proj_+0.00_tape_$20/3_xc0,0.9900,77.73146182,76.9541,423.0459
+1781830781276,1,eth-updown-5m-1781830500,BUY,DOWN,j_rescue_taker_down_fill_0.99_ask_0.99_gap_z_-1.58_phase_rescue_pnl_proj_+0.78_tape_$37/4_xc0,0.9900,77.73146182,76.9541,346.0917
+1781830781276,1,eth-updown-5m-1781830500,BUY,DOWN,j_rescue_taker_down_fill_0.99_ask_0.99_gap_z_-1.58_phase_rescue_pnl_proj_+1.55_tape_$37/4_xc0,0.9900,77.73146182,76.9541,269.1376
+1781830781398,1,eth-updown-5m-1781830500,BUY,DOWN,j_rescue_taker_down_fill_0.99_ask_0.99_gap_z_-1.49_phase_rescue_pnl_proj_+2.33_tape_$37/4_xc0,0.9900,72.76410245,72.0365,197.1011
+1781830781631,1,eth-updown-5m-1781830500,BUY,DOWN,j_rescue_taker_down_fill_0.99_ask_0.99_gap_z_-1.57_phase_rescue_pnl_proj_+3.06_tape_$37/4_xc0,0.9900,77.19681620,76.4248,120.6762
+1781830781633,1,eth-updown-5m-1781830500,BUY,DOWN,j_rescue_taker_down_fill_0.99_ask_0.99_gap_z_-1.57_phase_rescue_pnl_proj_+3.83_tape_$37/4_xc0,0.9900,77.19681620,76.4248,44.2514
+1781830781663,1,eth-updown-5m-1781830500,BUY,DOWN,j_rescue_taker_down_fill_0.99_ask_0.99_gap_z_-1.57_phase_rescue_pnl_proj_+4.60_tape_$38/5_xc0,0.9900,44.69838472,44.2514,0.0000
+1781830799984,1,eth-updown-5m-1781830500,REDEEM,DOWN,option_expired_itm_win_1.00,1.0000,505.05050505,505.0505,505.0505

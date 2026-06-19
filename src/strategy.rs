@@ -108,6 +108,9 @@ pub trait TradeStrategy {
     ) -> Vec<OrderSignal>;
 
     fn get_strategy_state(&self, window_number: usize) -> Option<StrategyState>;
+
+    /// J endgame: cash left in portfolio (caps rescue/seal sizing).
+    fn set_runtime_cash(&mut self, _cash: f64) {}
 }
 
 // ─── ДИСПЕТЧЕР СТРАТЕГИЙ / STRATBOX (StrategyEngine) ───
@@ -188,6 +191,10 @@ impl StrategyEngine {
             cex_micro,
             tape,
         )
+    }
+
+    pub fn set_runtime_cash(&mut self, cash: f64) {
+        self.active_strategy.set_runtime_cash(cash);
     }
 
     pub fn get_strategy_state(&self, window_number: usize) -> Option<StrategyState> {

@@ -1,0 +1,16 @@
+timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
+1781825674453,4,eth-updown-5m-1781825400,BUY,UP,j_late_taker_up_fill_0.99_ask_0.99_gap_z_+1.34_tape_$181/12_xc4,0.9900,3.03030303,3.0000,97.0000
+1781825674453,4,eth-updown-5m-1781825400,BUY,UP,j_late_taker_up_fill_0.99_ask_0.99_gap_z_+1.34_tape_$181/12_xc4,0.9900,3.03030303,3.0000,94.0000
+1781825674454,4,eth-updown-5m-1781825400,BUY,UP,j_late_taker_up_fill_0.99_ask_0.99_gap_z_+1.34_tape_$181/12_xc4,0.9900,3.03030303,3.0000,91.0000
+1781825674454,4,eth-updown-5m-1781825400,BUY,UP,j_late_taker_up_fill_0.99_ask_0.99_gap_z_+1.34_tape_$181/12_xc4,0.9900,3.03030303,3.0000,88.0000
+1781825699038,4,eth-updown-5m-1781825400,REDEEM,UP,option_expired_itm_win_1.00,1.0000,12.12121212,12.1212,100.1212
+1781825980063,5,eth-updown-5m-1781825700,BUY,UP,j_late_taker_up_fill_0.90_ask_0.90_gap_z_+0.88_tape_$154/13_xc11,0.9000,3.33333333,3.0000,97.1212
+1781825980063,5,eth-updown-5m-1781825700,BUY,UP,j_late_taker_up_fill_0.90_ask_0.90_gap_z_+0.88_tape_$154/13_xc11,0.9000,3.33333333,3.0000,94.1212
+1781825980064,5,eth-updown-5m-1781825700,BUY,UP,j_late_taker_up_fill_0.90_ask_0.90_gap_z_+0.88_tape_$154/13_xc11,0.9000,3.33333333,3.0000,91.1212
+1781825980064,5,eth-updown-5m-1781825700,BUY,UP,j_late_taker_up_fill_0.90_ask_0.90_gap_z_+0.88_tape_$154/13_xc11,0.9000,3.33333333,3.0000,88.1212
+1781825999042,5,eth-updown-5m-1781825700,REDEEM,UP,option_expired_itm_win_1.00,1.0000,13.33333333,13.3333,101.4545
+1781826574537,7,eth-updown-5m-1781826300,BUY,DOWN,j_late_taker_down_fill_0.96_ask_0.96_gap_z_-0.96_tape_$36/5_xc9,0.9600,3.12500000,3.0000,98.4545
+1781826574538,7,eth-updown-5m-1781826300,BUY,DOWN,j_late_taker_down_fill_0.96_ask_0.96_gap_z_-0.96_tape_$36/5_xc9,0.9600,3.12500000,3.0000,95.4545
+1781826574538,7,eth-updown-5m-1781826300,BUY,DOWN,j_late_taker_down_fill_0.91_ask_0.91_gap_z_-0.96_tape_$36/5_xc9,0.9100,3.29670330,3.0000,92.4545
+1781826574539,7,eth-updown-5m-1781826300,BUY,DOWN,j_late_taker_down_fill_0.91_ask_0.91_gap_z_-0.96_tape_$36/5_xc9,0.9100,3.29670330,3.0000,89.4545
+1781826599044,7,eth-updown-5m-1781826300,EXPIRED,DOWN,option_expired_otm_loss_0.00,0.0000,12.84340659,0.0000,89.4545
