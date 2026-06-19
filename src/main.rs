@@ -77,6 +77,124 @@ struct AppState {
     trade_tape: TradeTapeTracker,
     window_stats: WindowStatsAggregator,
     ptb_locked_windows: HashSet<usize>,
+    maintenance: MaintenanceStatus,
+    maintenance_checked_window: Option<usize>,
+}
+
+/// Polymarket platform health, polled once per window start from the public
+/// status API. When the platform is degraded/under maintenance we pause trading
+/// for that window and surface it boldly on the dashboard.
+#[derive(Clone, Debug)]
+struct MaintenanceStatus {
+    /// True when platform is fully operational (safe to trade).
+    ok: bool,
+    /// Whether we have a confirmed result from the status API yet.
+    checked: bool,
+    /// Short human label, e.g. "OK", "UNDER MAINTENANCE!", "INCIDENT!".
+    label: String,
+}
+
+impl Default for MaintenanceStatus {
+    fn default() -> Self {
+        Self {
+            ok: true,
+            checked: false,
+            label: "OK".to_string(),
+        }
+    }
+}
+
+impl MaintenanceStatus {
+    /// Status check could not be completed (network error / bad payload). We do
+    /// NOT block trading on our own connectivity hiccup, but flag it visibly.
+    fn unknown() -> Self {
+        Self {
+            ok: true,
+            checked: false,
+            label: "CHECK FAILED".to_string(),
+        }
+    }
+
+    /// Only block trading on a confirmed bad platform status.
+    fn blocks_trading(&self) -> bool {
+        self.checked && !self.ok
+    }
+}
+
+/// One-shot poll of Polymarket's public status summary.
+/// https://status.polymarket.com/public-api -> /v3/summary.json
+async fn fetch_polymarket_maintenance() -> MaintenanceStatus {
+    const URL: &str = "https://status.polymarket.com/v3/summary.json";
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return MaintenanceStatus::unknown(),
+    };
+    let text = match client.get(URL).send().await {
+        Ok(resp) => match resp.text().await {
+            Ok(t) => t,
+            Err(_) => return MaintenanceStatus::unknown(),
+        },
+        Err(_) => return MaintenanceStatus::unknown(),
+    };
+    let v: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return MaintenanceStatus::unknown(),
+    };
+
+    let page_status = v
+        .get("page")
+        .and_then(|p| p.get("status"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+    let incidents = v
+        .get("activeIncidents")
+        .and_then(|a| a.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let maint_in_progress = v
+        .get("activeMaintenances")
+        .and_then(|a| a.as_array())
+        .map(|a| {
+            a.iter().any(|m| {
+                m.get("status")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.eq_ignore_ascii_case("INPROGRESS"))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+
+    let status_up = page_status.eq_ignore_ascii_case("UP");
+    let ok = status_up && incidents == 0 && !maint_in_progress;
+    let label = if ok {
+        "OK".to_string()
+    } else if maint_in_progress {
+        "UNDER MAINTENANCE!".to_string()
+    } else if incidents > 0 {
+        "INCIDENT!".to_string()
+    } else {
+        format!("DEGRADED ({page_status})!")
+    };
+    MaintenanceStatus {
+        ok,
+        checked: true,
+        label,
+    }
+}
+
+/// Bold, colored maintenance badge for the dashboard status line.
+fn paint_maintenance(m: &MaintenanceStatus) -> String {
+    let code = if !m.checked {
+        "\x1b[1;38;5;179m" // bold yellow (unknown / not yet checked)
+    } else if m.ok {
+        "\x1b[1;38;5;114m" // bold green
+    } else {
+        "\x1b[1;38;5;174m" // bold red
+    };
+    format!("{code}Maintenance: {}\x1b[0m", m.label)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -367,6 +485,8 @@ async fn main() -> anyhow::Result<()> {
         trade_tape: TradeTapeTracker::new(),
         window_stats: WindowStatsAggregator::new(),
         ptb_locked_windows: HashSet::new(),
+        maintenance: MaintenanceStatus::default(),
+        maintenance_checked_window: None,
     };
 
     app_state
@@ -710,6 +830,11 @@ fn run_j_endgame_live_tick(
     timestamp: i64,
 ) {
     if app.config.strategy != "j_endgame" || window_number == 0 {
+        return;
+    }
+    // Platform health gate: do not trade while Polymarket is confirmed
+    // degraded / under maintenance for this window.
+    if app.maintenance.blocks_trading() {
         return;
     }
     let Ok(end) = chrono::DateTime::parse_from_rfc3339(&market.end_time) else {
@@ -1485,6 +1610,29 @@ async fn process_event(
                 }
             }
 
+            // Once per window start: poll Polymarket platform status. If the
+            // platform is degraded/under maintenance, trading is paused for the
+            // window (enforced in run_j_endgame_live_tick) and shown on the dash.
+            if let Some(curr) = app.current_window.as_ref() {
+                let wn = curr.window_number;
+                if wn != 0 && app.maintenance_checked_window != Some(wn) {
+                    app.maintenance_checked_window = Some(wn);
+                    let status = fetch_polymarket_maintenance().await;
+                    if status.blocks_trading() {
+                        app.system_logs.push(format!(
+                            "[STATUS] Polymarket {} — trading paused for window #{}",
+                            status.label, wn
+                        ));
+                    } else if !status.checked {
+                        app.system_logs.push(format!(
+                            "[STATUS] Polymarket status check failed for window #{} — trading allowed",
+                            wn
+                        ));
+                    }
+                    app.maintenance = status;
+                }
+            }
+
             if let Some(curr) = app.current_window.clone() {
                 run_j_endgame_live_tick(
                     app,
@@ -1908,6 +2056,7 @@ fn render_dashboard(app: &AppState) {
         &app.config,
         current_tape.as_ref(),
         p.available_cash,
+        &app.maintenance,
     );
     println!(
         "  {}",
@@ -1926,6 +2075,7 @@ fn render_dashboard(app: &AppState) {
         &app.config,
         None,
         p.available_cash,
+        &app.maintenance,
     );
 
     // Render blocks vertically
@@ -1977,6 +2127,7 @@ fn render_window_block(
     config: &config::Config,
     tape: Option<&TradeTapeSnapshot>,
     available_cash: f64,
+    maintenance: &MaintenanceStatus,
 ) -> Vec<String> {
     let strategy_name = config.strategy.as_str();
     let j_endgame = &config.j_endgame;
@@ -2028,16 +2179,18 @@ fn render_window_block(
     if now < start_dt {
         let secs = (start_dt - now) / 1000;
         lines.push(format!(
-            "Status: {} | Starts In: {}",
+            "Status: {} | Starts In: {} | {}",
             paint("WAITING", "yellow"),
-            paint(&format_countdown(secs), "bold")
+            paint(&format_countdown(secs), "bold"),
+            paint_maintenance(maintenance)
         ));
     } else if now < end_dt {
         let secs = (end_dt - now) / 1000;
         lines.push(format!(
-            "Status: {} | Time Left: {}",
+            "Status: {} | Time Left: {} | {}",
             paint("LIVE", "green"),
-            paint(&format_countdown(secs), "bold")
+            paint(&format_countdown(secs), "bold"),
+            paint_maintenance(maintenance)
         ));
     } else {
         lines.push(format!("Status: {}", paint("EXPIRED", "red")));
