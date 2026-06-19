@@ -180,6 +180,12 @@ pub(crate) fn directional_entry_allowed(
     {
         return false;
     }
+    // Raw-cross chop guard: heavy oscillation around PTB => near-coin-flip
+    // resolution. Skipping these windows removes the chop tail-loss without
+    // touching clean windows (which carry few raw crosses at entry).
+    if cfg.max_crosses_directional > 0 && mid_cross.cross_count >= cfg.max_crosses_directional {
+        return false;
+    }
     true
 }
 
@@ -215,8 +221,15 @@ pub(crate) fn flip_hedge_triggered(
         || mid_cross.cross_count >= cfg.flip_min_crosses
         || mid_cross.last_cross_is_significant;
 
+    // Sign-aware gap: gap_z>0 means UP leads, <0 means DOWN leads. The hedge
+    // buys the side OPPOSITE `primary_side`, so it is only justified when the
+    // time/vol-normalized gap actually leans against our side. The old code
+    // used gz.abs(), which fired even when the gap strongly favored us (e.g. a
+    // one-tick spot blip) and burned the hedge clip on windows we were winning.
+    let gz_against_primary = if primary_side == "UP" { -gz } else { gz };
+
     if spot_against_primary {
-        return sharp || gz.abs() >= cfg.flip_min_gap_z;
+        return gz_against_primary >= cfg.flip_min_gap_z;
     }
     // Mid lead flipped before spot crossed PTB — require chaos evidence.
     sharp

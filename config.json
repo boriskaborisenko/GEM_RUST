@@ -90,6 +90,7 @@
     "insuranceTierUsd": 1.0,
     "minPtbDistPct": 0.05,
     "maxSigCrossesDirectional": 3,
+    "maxCrossesDirectional": 9,
     "takerMaxAsk": 0.99,
     "clipUsd": 10.0,
     "maxUsdPerWindow": 80.0,

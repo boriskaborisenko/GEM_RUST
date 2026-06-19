@@ -197,6 +197,9 @@ pub struct JEndgameConfig {
     /// Block new directional clips when significant mid crosses reach this count (flip hedge still allowed).
     #[serde(default = "j_default_max_sig_crosses_directional")]
     pub max_sig_crosses_directional: u32,
+    /// Block new directional entries when raw mid-cross count reaches this (chop guard). 0 = off.
+    #[serde(default = "j_default_max_crosses_directional")]
+    pub max_crosses_directional: u32,
     /// Window close goal (redeem PnL).
     #[serde(default = "j_default_target_profit_usd")]
     pub target_profit_usd: f64,
@@ -400,6 +403,9 @@ fn j_default_min_ptb_dist_pct() -> f64 {
 fn j_default_max_sig_crosses_directional() -> u32 {
     3
 }
+fn j_default_max_crosses_directional() -> u32 {
+    9
+}
 fn j_default_target_profit_usd() -> f64 {
     1.0
 }
@@ -547,6 +553,7 @@ impl Default for JEndgameConfig {
             flip_require_tape: j_default_false(),
             min_ptb_dist_pct: j_default_min_ptb_dist_pct(),
             max_sig_crosses_directional: j_default_max_sig_crosses_directional(),
+            max_crosses_directional: j_default_max_crosses_directional(),
             target_profit_usd: j_default_target_profit_usd(),
             probe_clip_usd: j_default_probe_clip_usd(),
             rescue_zone_secs: j_default_rescue_zone_secs(),
