@@ -193,7 +193,7 @@ pub(crate) fn flip_hedge_triggered(
     gz: f64,
     mid_cross: &MidCrossSnapshot,
 ) -> bool {
-    if !cfg.flip_hedge_enabled || state.primary_clips() == 0 {
+    if !cfg.flip_hedge_enabled || !state.has_primary_exposure() {
         return false;
     }
     let spot_against_primary =
@@ -223,8 +223,16 @@ pub(crate) fn flip_hedge_triggered(
 }
 
 impl JWindowState {
-    fn primary_clips(&self) -> u16 {
-        self.cheap_clips + self.late_clips
+    /// Directional thesis is live once any primary-tier USD is deployed.
+    /// Composite (FinalSeal/Rescue) writes `rescue_spent_usd`, not `cheap_clips`.
+    pub(crate) fn has_primary_exposure(&self) -> bool {
+        self.primary_side.is_some()
+            && (self.rescue_spent_usd > 1e-9
+                || self.cheap_spent_usd > 1e-9
+                || self.late_spent_usd > 1e-9
+                || self.impulse_spent_usd > 1e-9
+                || self.cheap_clips > 0
+                || self.late_clips > 0)
     }
 }
 
@@ -241,7 +249,7 @@ pub(crate) fn flip_hedge_armed_display(
         return false;
     };
     let state = JWindowState {
-        cheap_clips: 1,
+        rescue_spent_usd: 1.0,
         primary_side: Some(primary.to_string()),
         ..Default::default()
     };
@@ -555,7 +563,12 @@ impl TradeStrategy for JEndgameStrategy {
                         state.primary_side = Some(side.to_string());
                     }
                 }
-                EndgameTier::Impulse => state.impulse_spent_usd += usd,
+                EndgameTier::Impulse => {
+                    state.impulse_spent_usd += usd;
+                    if state.primary_side.is_none() {
+                        state.primary_side = Some(side.to_string());
+                    }
+                }
                 EndgameTier::Cheap => {
                     state.cheap_spent_usd += usd;
                     state.cheap_clips += 1;
@@ -1116,6 +1129,102 @@ mod tests {
         assert!(
             signals[0].reason.starts_with("j_rescue")
                 || signals[0].reason.starts_with("j_flip_hedge")
+        );
+    }
+
+    #[test]
+    fn flip_hedge_triggers_after_composite_final_seal() {
+        let cfg = test_config();
+        let state = JWindowState {
+            rescue_spent_usd: 72.0,
+            primary_side: Some("DOWN".to_string()),
+            clips_filled: 4,
+            ..Default::default()
+        };
+        assert!(
+            state.has_primary_exposure(),
+            "composite path must count as primary exposure"
+        );
+        let cheap_only = JWindowState {
+            cheap_clips: 0,
+            late_clips: 0,
+            rescue_spent_usd: 0.0,
+            primary_side: Some("DOWN".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            !cheap_only.has_primary_exposure(),
+            "primary_side alone is not enough without deployed USD"
+        );
+
+        let mid = MidCrossSnapshot {
+            armed: true,
+            cross_count: 8,
+            significant_cross_count: 3,
+            last_cross_is_significant: true,
+            ..Default::default()
+        };
+        // w14-like: committed DOWN, spot crossed above PTB, sharp chop.
+        assert!(flip_hedge_triggered(
+            &cfg.j_endgame,
+            &state,
+            "DOWN",
+            "UP",
+            62_585.0,
+            62_572.0,
+            0.65,
+            &mid,
+        ));
+
+        let mut strat = strat_with_cash();
+        strat.windows.insert(1, state);
+        let prices = PricesState {
+            up: ContractPrices {
+                bid: 0.52,
+                ask: 0.54,
+                book: SideBook {
+                    asks: vec![BookLevel {
+                        price: 0.54,
+                        size: 50.0,
+                    }],
+                    ..Default::default()
+                },
+            },
+            down: ContractPrices::top(0.44, 0.46),
+        };
+        let win = WindowState {
+            window_number: 1,
+            role: "CURRENT".to_string(),
+            status: "LIVE".to_string(),
+            market: sample_market(),
+            spent: 72.0,
+            cash_returned: 0.0,
+            up_shares: 0.0,
+            down_shares: 80.0,
+            initial_up_shares: 0.0,
+            initial_down_shares: 0.0,
+            trades: vec![],
+            prices: prices.clone(),
+        };
+        let signals = strat.process_live_tick(
+            &cfg,
+            &prices,
+            Some(62_585.0),
+            &win.market,
+            &win,
+            35,
+            26.8,
+            SpotSignalSnapshot::default(),
+            &mid,
+            &CexMicroSnapshot::default(),
+            &TradeTapeSnapshot::default(),
+        );
+        assert!(!signals.is_empty(), "flip hedge must fire for composite thesis");
+        assert_eq!(signals[0].side, "UP");
+        assert!(
+            signals[0].reason.starts_with("j_flip_hedge"),
+            "reason={}",
+            signals[0].reason
         );
     }
 }
