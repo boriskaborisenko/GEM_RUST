@@ -96,3 +96,6 @@ timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
 1781885053055,49,eth-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.98_ask_0.99_gap_z_-1.76_phase_accumulate_pnl_proj_+1.62_tape_$21/2_xc8,0.9800,8.16326531,8.0000,454.8401
 1781885058151,49,eth-updown-5m-1781884800,BUY,DOWN,j_final_seal_taker_down_fill_0.99_ask_0.99_gap_z_-1.95_phase_accumulate_pnl_proj_+1.79_tape_$127/4_xc8,0.9900,8.08080808,8.0000,446.8401
 1781885099389,49,eth-updown-5m-1781884800,REDEEM,DOWN,option_expired_itm_win_1.00,1.0000,64.63866034,64.6387,511.4788
+1781885360467,50,eth-updown-5m-1781885100,BUY,DOWN,j_final_seal_taker_down_fill_0.99_ask_0.99_gap_z_-1.39_phase_accumulate_pnl_proj_+0.00_tape_$98/9_xc1,0.9900,8.08080808,8.0000,503.4788
+1781885363518,50,eth-updown-5m-1781885100,BUY,DOWN,j_final_seal_taker_down_fill_0.96_ask_0.97_gap_z_-1.67_phase_accumulate_pnl_proj_+0.08_tape_$102/13_xc1,0.9600,8.33333333,8.0000,495.4788
+1781885369615,50,eth-updown-5m-1781885100,BUY,DOWN,j_final_seal_taker_down_fill_0.96_ask_0.97_gap_z_-1.37_phase_accumulate_pnl_proj_+0.41_tape_$39/11_xc1,0.9600,8.33333333,8.0000,487.4788

@@ -8,16 +8,11 @@ Per-window goal: **+$1 redeem PnL** with controlled risk. Not “pick a side at 
 
 ### Track record (paper, real windows)
 
-After sizing + flip-hedge fixes (probe first clip, expensive-ask gate, working composite flip hedge):
-
 | Metric | Range |
 |--------|--------|
 | **Windows** | **400+** (BTC/ETH 5m, live paper against real PM windows) |
 | **Winrate** | **97–100%** |
 | **Typical win** | +$1–6 / window |
-| **Typical loss** | small vs bank — **one loss no longer wipes a session** |
-
-Losses still happen (late PTB cross, chop). They are **rare and bounded** by probe sizing, entry gates, and flip hedge — not the old pattern of −$70 on a single wrong-side window.
 
 ---
 
@@ -33,7 +28,7 @@ A 5m window is a race to PTB (price to beat). In the last ~2 minutes:
 J does **not** use a fixed number of BUYs. It computes **composite confidence** `C ∈ [0,1]` and derives a **target exposure** (USD we want on the winner). Each SpotTick buys only the **delta** to that target. Hence emergent N buys: sometimes 3, sometimes 12 — driven by the signal, not a schedule.
 
 **Profit:** buy the winner cheap (88–99¢), hold to $1 redeem.  
-**Risk:** wrong side near PTB can still lose, but **loss size is capped** by first-clip probe, ramp rules, and flip hedge — not a full-window dump on tick one.
+**Risk:** wrong side near PTB loses; sizing gates and flip hedge limit exposure growth on weak setups.
 
 ---
 
@@ -135,7 +130,7 @@ Arms when:
 
 Taker buy on the opposite side up to **`flipTierUsd`** ($12), max ask **`flipMaxAsk`** (0.99).
 
-Flip hedge is partial cover on reversal — it cuts tail loss; it does not need to fully offset primary exposure to keep session PnL healthy at 97%+ winrate.
+Flip hedge is partial cover on reversal when the thesis breaks after primary exposure is live.
 
 ---
 
@@ -254,12 +249,10 @@ Winrate on **400+ windows** is **97–100%** — useful as a sanity check, not t
 | avg PnL / window | ~$1–4 | ≪ $0 over 50+ windows |
 | spent / window | stable, gated | unbounded ramp on weak gap |
 | first clip | ~$8 (`firstClipUsd`) | $35 on first tick |
-| single loss vs bank | small, survivable | loss ≈ full `maxUsdPerWindow` |
 | `j_flip_hedge_*` on losses | hedge fired when thesis broke | 0 hedge on clear reversal |
 | sig mid-crosses at entry | 0–2 | heavy chop ignored at entry |
 
-Typical **win**: modest deploy, PnL +$1–6.  
-Typical **loss** (rare): bounded — not the pre-fix −$70 blow-up on one window.
+Typical **win**: modest deploy, PnL +$1–6.
 
 ---
 
@@ -286,7 +279,7 @@ src/
 - **Paper ≠ live** — real CLOB depth, fees, and latency can differ; 97–100% is on paper over 400+ real-time windows.
 - **Cheap-ask trap** — winner @86¢ still loses if spot crosses PTB late; gates reduce frequency, they do not eliminate it.
 - **Chop filter is entry-time only** — `maxSigCrossesDirectional` uses crosses **at entry**; end-of-window panic chop can still hurt an open position (flip hedge is the backstop).
-- **Flip hedge cap $12** — partial, not delta-neutral; enough to keep losses small at current winrate, not to zero them every time.
+- **Flip hedge cap $12** — partial, not delta-neutral.
 - BUY amount is **USD**, not shares. Min notional ~$1.
 - `cargo test` — 70 unit tests on planner/sizing/flip.
 
