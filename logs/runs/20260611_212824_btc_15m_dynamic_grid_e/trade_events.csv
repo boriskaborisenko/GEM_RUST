@@ -1,8 +1,0 @@
-timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
-1781213773192,1,btc-updown-15m-1781213400,BUY,UP,e_tranche1_value_up_ask_0.49_conv_0.007_gap_z_-0.07_lead_0.04,0.4900,22.04081633,10.8000,89.2000
-1781213880365,1,btc-updown-15m-1781213400,SELL,UP,e_ptb_cross_trim_bid_0.43,0.4300,6.61224490,2.8433,92.0433
-1781213885613,1,btc-updown-15m-1781213400,SELL,UP,e_grid_step1_bid_0.57_target_0.57,0.5700,4.62857143,2.6383,94.6816
-1781213895710,1,btc-updown-15m-1781213400,BUY,UP,e_tranche2_cross_up_ask_0.58_conv_0.121_gap_z_+0.10_lead_0.15,0.5800,16.29310345,9.4500,85.2316
-1781213947734,1,btc-updown-15m-1781213400,SELL,UP,e_grid_step2_bid_0.70_target_0.67,0.7000,8.12793103,5.6896,90.9211
-1781213979316,1,btc-updown-15m-1781213400,SELL,UP,e_grid_step3_bid_0.77_target_0.75,0.7700,4.74129310,3.6508,94.5719
-1781214299193,1,btc-updown-15m-1781213400,REDEEM,UP,option_expired_itm_win_1.00,1.0000,14.22387931,14.2239,108.7958

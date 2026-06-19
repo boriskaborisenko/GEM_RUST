@@ -11,6 +11,7 @@ use crate::mid_cross_tracker::LeadSide;
 use crate::trade_tape::{TradeTapeSnapshot, TradeTapeTracker};
 use crate::trader::WindowState;
 use std::collections::HashMap;
+use std::time::Instant;
 
 const J_MIN_TRADEABLE_WINDOW: usize = 1;
 
@@ -32,6 +33,7 @@ pub(crate) struct JWindowState {
     pub(crate) primary_side: Option<String>,
     pub(crate) insurance_side: Option<String>,
     pub(crate) winner_side: Option<String>,
+    pub(crate) last_endgame_buy_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -369,6 +371,7 @@ impl TradeStrategy for JEndgameStrategy {
             primary_side: None,
             insurance_side: None,
             winner_side: None,
+            last_endgame_buy_at: None,
         });
 
         let window_cap = jcfg
@@ -433,6 +436,16 @@ impl TradeStrategy for JEndgameStrategy {
         let Some(plan) = plan else {
             return signals;
         };
+
+        if matches!(plan.tier, EndgameTier::Rescue | EndgameTier::FinalSeal) {
+            if let Some(last) = state.last_endgame_buy_at {
+                if last.elapsed()
+                    < std::time::Duration::from_millis(jcfg.min_buy_interval_ms)
+                {
+                    return signals;
+                }
+            }
+        }
 
         let side = plan
             .side
@@ -537,6 +550,7 @@ impl TradeStrategy for JEndgameStrategy {
                 }
                 EndgameTier::Rescue | EndgameTier::FinalSeal => {
                     state.rescue_spent_usd += usd;
+                    state.last_endgame_buy_at = Some(Instant::now());
                     if state.primary_side.is_none() {
                         state.primary_side = Some(side.to_string());
                     }
@@ -769,10 +783,11 @@ mod tests {
             trades: vec![],
             prices: prices.clone(),
         };
+        // Expensive ask + weak gap_z near PTB => no fresh composite entry.
         let signals = strat.process_live_tick(
             &test_config(),
             &prices,
-            Some(60_100.0),
+            Some(60_020.0),
             &win.market,
             &win,
             40,
@@ -816,12 +831,11 @@ mod tests {
             trades: vec![],
             prices: prices.clone(),
         };
-        // gap_z alone is huge, but with no book/momentum/flow agreement the
-        // composite confidence stays below conf_enter => 0 buys (no coin-flip bet).
+        // gap_z alone near PTB on an expensive ask is blocked (no coin-flip @96¢).
         let gap_only = strat.process_live_tick(
             &test_config(),
             &prices,
-            Some(60_100.0),
+            Some(60_030.0),
             &win.market,
             &win,
             22,
@@ -832,11 +846,11 @@ mod tests {
             &TradeTapeSnapshot::default(),
         );
         assert!(gap_only.is_empty());
-        // Even hot tape by itself isn't enough consensus to fire.
+        // Hot tape alone does not bypass the expensive-ask gap floor either.
         let tape_only = strat.process_live_tick(
             &test_config(),
             &prices,
-            Some(60_100.0),
+            Some(60_030.0),
             &win.market,
             &win,
             22,

@@ -1,8 +1,7 @@
 //! J endgame window timeline controller — one objective: close at +target via phased buys.
 //!
 //! Timeline (5m window example):
-//!   0–30%  INSURANCE  — $1 @ ≤28¢ underdog when spot ≈ PTB (cheap optionality)
-//!  50–120s ACCUMULATE — value clips @ ~88¢ on winner when gap_z clear
+//!   50–120s ACCUMULATE — ramped clips on winner when gap_z + confidence clear
 //!   ≤25s   LATE       — tape-driven winner sweep
 //!   ≤20s   RESCUE     — solve USD to hit target_profit; flip hedge if thesis broke
 //!
@@ -304,6 +303,37 @@ fn usd_to_close_profit_gap(
     (target_profit - current) / edge
 }
 
+fn has_deployed_exposure(win_state: &WindowState) -> bool {
+    win_state.spent > 1e-9
+        || win_state.up_shares > 1e-9
+        || win_state.down_shares > 1e-9
+}
+
+/// Per-tick clip cap: probe on first buy, then ramp with gap_z, time, and ask cheapness.
+fn effective_max_clip_usd(
+    cfg: &JEndgameConfig,
+    rescue_spent_usd: f64,
+    gz: f64,
+    ask: f64,
+    elapsed_pct: f64,
+) -> f64 {
+    let floor = cfg.probe_clip_usd.max(1e-9);
+    if rescue_spent_usd < 1e-9 {
+        return cfg.first_clip_usd.max(floor);
+    }
+    let full = cfg.full_size_gap_z;
+    let gz_ramp = ramp(gz.abs(), full * 0.75, full);
+    let time_ramp = ramp(elapsed_pct, 60.0, 78.0);
+    let cheap_ramp = if ask <= cfg.cheap_max_ask {
+        1.0
+    } else {
+        ramp(cfg.expensive_ask_threshold - ask, 0.0, 0.04)
+    };
+    let scale = (gz_ramp * time_ramp.max(0.35 * cheap_ramp) * cheap_ramp).clamp(0.0, 1.0);
+    let max_clip = cfg.max_clip_usd.max(floor);
+    (floor + scale * (max_clip - floor)).max(cfg.first_clip_usd.max(floor))
+}
+
 /// Target-exposure endgame: given composite confidence, compute how much USD we
 /// WANT on the winner and buy only the positive delta vs what's already deployed.
 /// Target is the max of (a) confidence-scaled budget and (b) USD needed to reach
@@ -317,10 +347,17 @@ pub fn plan_endgame_composite(
     ask: f64,
     gz: f64,
     confidence: f64,
+    elapsed_pct: f64,
     available_cash: f64,
 ) -> Option<TierPlan> {
     let cfg = &config.j_endgame;
     if ask <= 0.0 || ask > cfg.final_seal_max_ask {
+        return None;
+    }
+    if state.rescue_spent_usd < 1e-9
+        && ask > cfg.expensive_ask_threshold
+        && gz.abs() + 1e-9 < cfg.expensive_min_gap_z
+    {
         return None;
     }
     let enter = effective_conf_enter(cfg, ask, gz);
@@ -336,20 +373,28 @@ pub fn plan_endgame_composite(
         eff = eff.max(0.55 + 0.45 * gz_boost);
     }
     let conf_target = eff * cfg.max_rescue_usd;
-    let profit_target = usd_to_close_profit_gap(
-        win_state,
-        winner,
-        ask,
-        cfg.target_profit_usd,
-        fee_bps,
-    );
+    let profit_target = if has_deployed_exposure(win_state) {
+        usd_to_close_profit_gap(
+            win_state,
+            winner,
+            ask,
+            cfg.target_profit_usd,
+            fee_bps,
+        )
+    } else {
+        0.0
+    };
     let target = conf_target.max(profit_target).min(cfg.max_rescue_usd);
     let remaining = rescue_budget(config, state, win_state.spent, available_cash);
     let increment = (target - state.rescue_spent_usd).clamp(0.0, remaining);
     if increment + 1e-9 < cfg.probe_clip_usd {
         return None;
     }
-    let clip = increment.min(cfg.max_clip_usd.max(cfg.probe_clip_usd));
+    if state.rescue_spent_usd > 1e-9 && increment + 1e-9 < cfg.min_increment_usd {
+        return None;
+    }
+    let max_clip = effective_max_clip_usd(cfg, state.rescue_spent_usd, gz, ask, elapsed_pct);
+    let clip = increment.min(max_clip);
     Some(TierPlan {
         tier: EndgameTier::FinalSeal,
         max_pay: ask.min(cfg.taker_max_ask),
@@ -392,7 +437,6 @@ pub fn plan_flip_hedge_rescue(
 }
 
 /// Unified timeline planner. Three independent engines, no time-of-window rails:
-///   - INSURANCE: early cheap optionality near PTB (own small budget)
 ///   - FLIP-HEDGE: buy the opposite side if our committed thesis reverses
 ///   - COMPOSITE: signal-driven target-exposure on the winner (emergent N buys)
 /// `confidence` is the composite signal score from [`endgame_confidence`].
@@ -448,6 +492,7 @@ pub fn plan_j_window(
                 ask,
                 gz,
                 confidence,
+                elapsed_pct,
                 available_cash,
             )
         },
@@ -615,6 +660,8 @@ mod tests {
             c.max_rescue_usd = 60.0;
             c.max_usd_per_window = 60.0;
             c.probe_clip_usd = 1.0;
+            c.first_clip_usd = 8.0;
+            c.min_increment_usd = 5.0;
             c.max_clip_usd = 25.0;
             c.final_seal_max_ask = 0.99;
             c.taker_max_ask = 0.99;
@@ -626,34 +673,79 @@ mod tests {
         // Below conf_enter => no buy at all (0 buys for coin-flip windows).
         let mut state = JWindowState::default();
         assert!(
-            plan_endgame_composite(&cfg, &state, &win, "UP", 0.92, 0.5, 0.49, 500.0).is_none()
+            plan_endgame_composite(&cfg, &state, &win, "UP", 0.92, 0.5, 0.49, 65.0, 500.0)
+                .is_none()
         );
 
-        // conf 0.75 => eff 0.5 => target 30; first clip capped at max_clip_usd=25.
-        let p1 = plan_endgame_composite(&cfg, &state, &win, "UP", 0.92, 1.0, 0.75, 500.0)
+        // conf 0.75 => eff 0.5 => target 30; first clip capped at first_clip_usd=8.
+        let p1 = plan_endgame_composite(&cfg, &state, &win, "UP", 0.92, 1.0, 0.75, 65.0, 500.0)
             .expect("first add");
-        assert!((p1.clip_usd - 25.0).abs() < 1e-9, "clip={}", p1.clip_usd);
+        assert!((p1.clip_usd - 8.0).abs() < 1e-9, "clip={}", p1.clip_usd);
         state.rescue_spent_usd += p1.clip_usd;
 
-        // Same confidence again: only the remaining 5 to reach target 30.
-        let p2 = plan_endgame_composite(&cfg, &state, &win, "UP", 0.92, 1.0, 0.75, 500.0)
+        // Same confidence again: increment 22, but min_increment=5 and ramped max_clip.
+        let p2 = plan_endgame_composite(&cfg, &state, &win, "UP", 0.92, 1.0, 0.75, 70.0, 500.0)
             .expect("second add");
-        assert!((p2.clip_usd - 5.0).abs() < 1e-9, "clip={}", p2.clip_usd);
-        state.rescue_spent_usd += p2.clip_usd;
+        assert!(p2.clip_usd >= 5.0, "clip={}", p2.clip_usd);
+        state.rescue_spent_usd = 30.0;
 
         // At target, flat confidence => nothing more (no per-tick spam).
         assert!(
-            plan_endgame_composite(&cfg, &state, &win, "UP", 0.92, 1.0, 0.75, 500.0).is_none()
+            plan_endgame_composite(&cfg, &state, &win, "UP", 0.92, 1.0, 0.75, 70.0, 500.0).is_none()
         );
 
         // Confidence rises to full => target 60, buys the next increment.
-        let p3 = plan_endgame_composite(&cfg, &state, &win, "UP", 0.92, 1.0, 1.0, 500.0)
+        let p3 = plan_endgame_composite(&cfg, &state, &win, "UP", 0.92, 1.0, 1.0, 75.0, 500.0)
             .expect("third add on stronger signal");
         assert!(p3.clip_usd > 0.0);
 
         // Ask too expensive => skip even with full confidence.
         assert!(
-            plan_endgame_composite(&cfg, &state, &win, "UP", 0.999, 1.0, 1.0, 500.0).is_none()
+            plan_endgame_composite(&cfg, &state, &win, "UP", 0.999, 1.0, 1.0, 75.0, 500.0)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn expensive_ask_blocks_weak_gap_fresh_entry() {
+        let j = {
+            let mut c = JEndgameConfig::default();
+            c.expensive_ask_threshold = 0.94;
+            c.expensive_min_gap_z = 1.35;
+            c.conf_enter = 0.5;
+            c.final_seal_max_ask = 0.99;
+            c
+        };
+        let cfg = full_cfg(j);
+        let win = win_state_zero();
+        let state = JWindowState::default();
+        assert!(
+            plan_endgame_composite(&cfg, &state, &win, "DOWN", 0.98, -1.14, 0.8, 63.0, 500.0)
+                .is_none(),
+            "w90-like weak gap @ expensive ask should not enter fresh"
+        );
+    }
+
+    #[test]
+    fn profit_target_skipped_without_open_exposure() {
+        let j = {
+            let mut c = JEndgameConfig::default();
+            c.conf_enter = 0.5;
+            c.target_profit_usd = 1.0;
+            c.max_rescue_usd = 75.0;
+            c.first_clip_usd = 8.0;
+            c.final_seal_max_ask = 0.99;
+            c
+        };
+        let cfg = full_cfg(j);
+        let win = win_state_zero();
+        let state = JWindowState::default();
+        let plan = plan_endgame_composite(&cfg, &state, &win, "UP", 0.99, 2.0, 0.8, 65.0, 500.0)
+            .expect("confidence-sized entry");
+        assert!(
+            plan.clip_usd <= 8.0 + 1e-9,
+            "fresh @0.99 must not size for profit gap, clip={}",
+            plan.clip_usd
         );
     }
 
@@ -697,10 +789,11 @@ mod tests {
             0.88,
             1.94,
             conf,
+            65.0,
             500.0,
         )
         .expect("value entry on safe gap");
-        assert!(plan.clip_usd >= 10.0, "clip={}", plan.clip_usd);
+        assert!(plan.clip_usd <= 8.0 + 1e-9, "first clip={}", plan.clip_usd);
     }
 
     #[test]
@@ -728,12 +821,12 @@ mod tests {
             insurance_clips: 1,
             ..Default::default()
         };
-        let plan = plan_endgame_composite(&cfg, &state, &win, "UP", 0.99, 2.0, 0.8, 500.0)
+        let plan = plan_endgame_composite(&cfg, &state, &win, "UP", 0.99, 2.0, 0.8, 65.0, 500.0)
             .expect("profit-aware clip");
-        // Need ~$303 to go from -2 to +1 at 0.99; capped by max_clip_usd=25 per tick.
+        // Need ~$303 to go from -2 to +1 at 0.99; capped by ramped max_clip per tick.
         assert!(
-            (plan.clip_usd - 25.0).abs() < 1e-9,
-            "clip={} (should hit max_clip per tick)",
+            plan.clip_usd <= 25.0 + 1e-9,
+            "clip={} (should not dump full max on one tick)",
             plan.clip_usd
         );
     }

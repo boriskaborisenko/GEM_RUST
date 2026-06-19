@@ -1,2 +1,0 @@
-timestamp,window_id,slug,pnl,entry_side,real_winner_side,h_market_win,h_salvaged,h_salvage_win,entry_price,exit_price,cum_market_wins,cum_market_losses,cum_salvage_escapes,cum_salvage_wins
-1781818199185,1,eth-updown-15m-1781817300,-18.2432,DOWN,UP,false,true,false,0.37,0.12,0,1,1,0

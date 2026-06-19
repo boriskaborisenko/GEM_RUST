@@ -1,3 +1,0 @@
-timestamp,window_id,slug,event,status_before,current_atr,spot_price,ptb,ptb_delta_usd,ptb_delta_pct,up_bid,up_ask,down_bid,down_ask
-1781817299264,1,btc-updown-15m-1781817300,promote_skipped,WAITING_ENTRY,28.2714,62851.6823,,,,0.5200,0.5300,0.4800,0.4900
-1781818199268,2,btc-updown-15m-1781818200,promote_skipped,WAITING_ENTRY,41.4000,62887.2325,,,,0.5100,0.5300,0.4800,0.4900

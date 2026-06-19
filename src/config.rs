@@ -268,6 +268,20 @@ pub struct JEndgameConfig {
     pub book_contradict_gap: f64,
     #[serde(default = "j_default_final_seal_sweep_clips")]
     pub final_seal_sweep_clips: u8,
+    /// Cap the very first endgame clip (USD); later clips ramp toward max_clip_usd.
+    #[serde(default = "j_default_first_clip_usd")]
+    pub first_clip_usd: f64,
+    /// Skip follow-up buys until target − deployed ≥ this (reduces per-tick spam).
+    #[serde(default = "j_default_min_increment_usd")]
+    pub min_increment_usd: f64,
+    /// Minimum wall-clock gap between composite endgame buys (ms).
+    #[serde(default = "j_default_min_buy_interval_ms")]
+    pub min_buy_interval_ms: u64,
+    /// Above this winner ask, fresh entry needs at least expensive_min_gap_z.
+    #[serde(default = "j_default_expensive_ask_threshold")]
+    pub expensive_ask_threshold: f64,
+    #[serde(default = "j_default_expensive_min_gap_z")]
+    pub expensive_min_gap_z: f64,
     #[serde(default)]
     pub fee_rate_bps: Option<f64>,
 }
@@ -467,6 +481,24 @@ fn j_default_book_contradict_gap() -> f64 {
 fn j_default_final_seal_sweep_clips() -> u8 {
     20
 }
+fn j_default_first_clip_usd() -> f64 {
+    8.0
+}
+fn j_default_min_increment_usd() -> f64 {
+    5.0
+}
+fn j_default_min_buy_interval_ms() -> u64 {
+    3000
+}
+fn j_default_expensive_ask_threshold() -> f64 {
+    0.94
+}
+fn j_default_expensive_min_gap_z() -> f64 {
+    1.35
+}
+fn j_default_insurance_enabled() -> bool {
+    false
+}
 
 impl Default for JEndgameConfig {
     fn default() -> Self {
@@ -520,7 +552,7 @@ impl Default for JEndgameConfig {
             rescue_zone_secs: j_default_rescue_zone_secs(),
             max_rescue_usd: j_default_max_rescue_usd(),
             abort_rescue_if_ask_above: j_default_abort_rescue_if_ask_above(),
-            insurance_enabled: j_default_true(),
+            insurance_enabled: j_default_insurance_enabled(),
             insurance_max_elapsed_pct: j_default_insurance_max_elapsed_pct(),
             insurance_max_ask: j_default_insurance_max_ask(),
             insurance_max_ptb_dist_pct: j_default_insurance_max_ptb_dist_pct(),
@@ -543,6 +575,11 @@ impl Default for JEndgameConfig {
             book_max_sig_cross: j_default_book_max_sig_cross(),
             book_contradict_gap: j_default_book_contradict_gap(),
             final_seal_sweep_clips: j_default_final_seal_sweep_clips(),
+            first_clip_usd: j_default_first_clip_usd(),
+            min_increment_usd: j_default_min_increment_usd(),
+            min_buy_interval_ms: j_default_min_buy_interval_ms(),
+            expensive_ask_threshold: j_default_expensive_ask_threshold(),
+            expensive_min_gap_z: j_default_expensive_min_gap_z(),
             fee_rate_bps: None,
         }
     }

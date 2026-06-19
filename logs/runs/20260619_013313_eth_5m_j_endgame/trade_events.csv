@@ -1,4 +1,0 @@
-timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
-1781832963154,1,eth-updown-5m-1781832900,BUY,DOWN,j_insurance_taker_down_fill_0.26_ask_0.26_gap_z_+0.29_phase_insurance_pnl_proj_+0.00_tape_$0/0_xc0,0.2600,3.84615385,1.0000,499.0000
-1781832963170,1,eth-updown-5m-1781832900,BUY,DOWN,j_insurance_taker_down_fill_0.26_ask_0.26_gap_z_+0.29_phase_insurance_pnl_proj_+2.85_tape_$0/0_xc0,0.2600,3.84615385,1.0000,498.0000
-1781833199953,1,eth-updown-5m-1781832900,EXPIRED,DOWN,option_expired_otm_loss_0.00,0.0000,7.69230769,0.0000,498.0000

@@ -1,2 +1,0 @@
-timestamp,window_id,slug,event,from_side,to_side,up_mid,down_mid,lead_gap,peak_prev_gap,is_significant,cross_count,significant_cross_count,time_pct,secs_to_end,current_atr,spot_price,ptb,ptb_delta_usd,spot_velocity,spot_smoothed_velocity,spot_acceleration
-1781765550627,0,eth-updown-15m-1781765100,armed_init,,DOWN,0.3150,0.6850,0.3700,0.0000,false,0,0,50.11,449,22.6214,1733.2031,1733.2031,0.0000,,,

@@ -1,7 +1,0 @@
-timestamp,window_id,slug,event,from_side,to_side,up_mid,down_mid,lead_gap,peak_prev_gap,is_significant,cross_count,significant_cross_count,time_pct,secs_to_end,current_atr,spot_price,ptb,ptb_delta_usd,spot_velocity,spot_smoothed_velocity,spot_acceleration
-1781823120200,0,xrp-updown-5m-1781823000,armed_init,,DOWN,0.4650,0.5350,0.0700,0.0000,false,0,0,40.33,179,0.0008,,,,,,
-1781823253046,0,xrp-updown-5m-1781823000,mid_cross,DOWN,UP,0.5800,0.4200,0.1600,0.6900,true,1,1,84.67,46,0.0009,1.1469,1.1466,0.0003,0.000018,0.000019,-0.000001
-1781823326715,1,xrp-updown-5m-1781823300,armed_init,,UP,0.6300,0.4850,0.1450,0.0000,false,0,0,9.00,273,0.0009,1.1462,1.1461,0.0001,0.000007,0.000011,-0.000000
-1781823652155,2,xrp-updown-5m-1781823600,armed_init,,DOWN,0.2700,0.5850,0.3150,0.0000,false,0,0,17.67,247,0.0008,1.1454,1.1462,-0.0008,-0.000038,-0.000047,-0.000017
-1781823763469,2,xrp-updown-5m-1781823600,mid_cross,DOWN,UP,0.5050,0.4950,0.0100,0.7200,true,1,1,54.67,136,0.0008,1.1462,1.1462,-0.0000,0.000028,0.000025,-0.000002
-1781823768419,2,xrp-updown-5m-1781823600,mid_cross,UP,DOWN,0.3850,0.4500,0.0650,0.1050,false,2,1,56.33,131,0.0008,1.1464,1.1462,0.0001,0.000034,0.000025,-0.000001

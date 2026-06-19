@@ -1,4 +1,0 @@
-timestamp,window_id,slug,cross_count,significant_cross_count,final_side,last_cross_atr
-1781247599139,0,btc-updown-5m-1781247300,0,0,UP,32.3500000000001
-1781247899144,1,btc-updown-5m-1781247600,0,0,UP,32.3500000000001
-1781248199150,2,btc-updown-5m-1781247900,8,3,DOWN,32.3500000000001

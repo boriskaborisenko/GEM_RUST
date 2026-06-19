@@ -1,4 +1,0 @@
-timestamp,window_id,slug,event,from_side,to_side,up_mid,down_mid,lead_gap,peak_prev_gap,is_significant,cross_count,significant_cross_count,time_pct,secs_to_end,current_atr,spot_price,ptb,ptb_delta_usd,spot_velocity,spot_smoothed_velocity,spot_acceleration
-1781765551364,0,eth-updown-5m-1781765400,armed_init,,DOWN,0.2850,0.7250,0.4400,0.0000,false,0,0,50.67,148,23.5714,1733.1648,1733.1648,0.0000,,,
-1781765593869,0,eth-updown-5m-1781765400,mid_cross,DOWN,UP,0.5350,0.4650,0.0700,0.6850,true,1,1,64.67,106,23.5714,1732.7419,1733.1648,-0.4229,0.022962,-0.007792,0.000731
-1781765599366,0,eth-updown-5m-1781765400,mid_cross,UP,DOWN,0.4450,0.4650,0.0200,0.1000,false,2,1,66.67,100,23.5714,1733.4087,1733.1648,0.2439,0.029017,0.036135,-0.003189

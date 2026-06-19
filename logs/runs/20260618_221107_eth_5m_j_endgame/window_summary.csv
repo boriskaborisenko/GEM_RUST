@@ -1,2 +1,0 @@
-timestamp,window_id,slug,status,spent,returned,pnl,close_spot,ptb,winner,strategy,utc_hour,time_pct_at_close,final_gap_z,final_atr,mid_cross_count,significant_mid_cross_count,entry_side,entry_reason,would_redeem_hold,h_market_win,h_salvaged,h_salvage_win
-1781821199122,1,eth-updown-5m-1781820900,CLOSED_TIME,8.0000,9.0909,1.0909,1701.7694,1705.0724,DOWN,j_endgame,22,100.00,-25.5847,0.9943,1,1,DOWN,j_impulse_taker_down_fill_0.88_ask_0.88_gap_z_-0.79_tape_$61/10_xc1,false,,,

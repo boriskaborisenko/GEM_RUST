@@ -1,6 +1,0 @@
-timestamp,window_id,slug,type,side,reason,price,shares,usd_value,cash_after
-1781247602236,1,btc-updown-5m-1781247600,BUY,DOWN,h_entry_down_ask_0.40_gap_z_+0.00,0.4000,67.50000000,27.0000,73.0000
-1781247899142,1,btc-updown-5m-1781247600,EXPIRED,DOWN,option_expired_otm_loss_0.00,0.0000,67.50000000,0.0000,73.0000
-1781247940787,2,btc-updown-5m-1781247900,BUY,DOWN,h_entry_down_ask_0.39_gap_z_+0.08,0.3900,69.23076923,27.0000,46.0000
-1781248144705,2,btc-updown-5m-1781247900,SELL,DOWN,h_salvage_otm_bid_0.46_gap_z_+0.01,0.4600,69.23076923,31.8462,77.8462
-1781248266640,3,btc-updown-5m-1781248200,BUY,DOWN,h_entry_down_ask_0.39_gap_z_-0.06,0.3900,69.23076923,27.0000,50.8462

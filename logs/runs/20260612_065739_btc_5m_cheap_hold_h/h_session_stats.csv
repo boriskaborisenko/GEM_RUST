@@ -1,3 +1,0 @@
-timestamp,window_id,slug,pnl,h_market_win,h_salvaged,h_salvage_win,entry_price,exit_price,cum_market_wins,cum_market_losses,cum_salvage_escapes,cum_salvage_wins
-1781247899143,1,btc-updown-5m-1781247600,-27.0000,false,false,false,0.40,,0,1,0,0
-1781248199150,2,btc-updown-5m-1781247900,4.8462,true,true,true,0.39,0.46,1,1,1,1

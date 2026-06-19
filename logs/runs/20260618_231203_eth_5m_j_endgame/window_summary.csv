@@ -1,4 +1,0 @@
-timestamp,window_id,slug,status,spent,returned,pnl,close_spot,ptb,winner,strategy,utc_hour,time_pct_at_close,final_gap_z,final_atr,mid_cross_count,significant_mid_cross_count,entry_side,entry_reason,would_redeem_hold,h_market_win,h_salvaged,h_salvage_win
-1781825699038,4,eth-updown-5m-1781825400,CLOSED_TIME,12.0000,12.1212,0.1212,1708.1915,1707.3073,UP,j_endgame,23,100.00,5.6006,1.2229,4,1,UP,j_late_taker_up_fill_0.99_ask_0.99_gap_z_+1.34_tape_$181/12_xc4,false,,,
-1781825999043,5,eth-updown-5m-1781825700,CLOSED_TIME,12.0000,13.3333,1.3333,1708.7925,1708.2093,UP,j_endgame,23,100.00,3.7872,1.1929,11,6,UP,j_late_taker_up_fill_0.90_ask_0.90_gap_z_+0.88_tape_$154/13_xc11,false,,,
-1781826599044,7,eth-updown-5m-1781826300,CLOSED_TIME,12.0000,0.0000,-12.0000,1708.2746,1707.5927,UP,j_endgame,23,100.00,5.2820,0.9686,10,5,DOWN,j_late_taker_down_fill_0.96_ask_0.96_gap_z_-0.96_tape_$36/5_xc9,false,,,
