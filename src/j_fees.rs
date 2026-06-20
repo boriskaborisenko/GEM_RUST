@@ -11,12 +11,7 @@ pub fn leg_fee_usd(price: f64, shares: f64, fee_rate_bps: f64) -> f64 {
 }
 
 /// Net PnL per $1 notional clip: buy at `entry_price`, redeem at $1/share if win.
-pub fn endgame_buy_hold_net(
-    entry_price: f64,
-    clip_usd: f64,
-    won: bool,
-    fee_rate_bps: f64,
-) -> f64 {
+pub fn endgame_buy_hold_net(entry_price: f64, clip_usd: f64, won: bool, fee_rate_bps: f64) -> f64 {
     if entry_price <= 0.0 || clip_usd <= 0.0 {
         return 0.0;
     }
@@ -31,12 +26,7 @@ pub fn endgame_buy_hold_net(
 }
 
 /// Round-trip scalp: buy at buy_price, sell at sell_price (same shares).
-pub fn endgame_scalp_net(
-    buy_price: f64,
-    sell_price: f64,
-    clip_usd: f64,
-    fee_rate_bps: f64,
-) -> f64 {
+pub fn endgame_scalp_net(buy_price: f64, sell_price: f64, clip_usd: f64, fee_rate_bps: f64) -> f64 {
     if buy_price <= 0.0 || sell_price <= buy_price || clip_usd <= 0.0 {
         return 0.0;
     }

@@ -109,10 +109,7 @@ impl CexMicroManager {
                                             });
                                         }
                                         let cutoff = get_now_ms() - TRADE_BUFFER_MS;
-                                        while buf
-                                            .front()
-                                            .is_some_and(|t| t.timestamp_ms < cutoff)
-                                        {
+                                        while buf.front().is_some_and(|t| t.timestamp_ms < cutoff) {
                                             buf.pop_front();
                                         }
                                     }
@@ -179,11 +176,7 @@ pub fn cex_vetoes_cheap_entry(side: &str, snapshot: &CexMicroSnapshot) -> bool {
     cex_velocity_against_side(side, snapshot)
 }
 
-fn trade_velocity_usd_per_sec(
-    trades: &[TradeTick],
-    now_ms: i64,
-    window_ms: i64,
-) -> Option<f64> {
+fn trade_velocity_usd_per_sec(trades: &[TradeTick], now_ms: i64, window_ms: i64) -> Option<f64> {
     let cutoff = now_ms - window_ms;
     let mut notional = 0.0;
     let mut earliest = now_ms;

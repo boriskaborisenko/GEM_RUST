@@ -178,6 +178,7 @@ impl TradeStrategy for AsymmetricLadderStrategy {
                 signals.push(OrderSignal {
                     side: "UP".to_string(),
                     is_buy: false,
+                    order_type: crate::strategy::OrderType::Market,
                     amount: win_state.up_shares,
                     price: up_bid,
                     reason: "emergency_15pct_time_stop_bid_ge_0.20".to_string(),
@@ -188,6 +189,7 @@ impl TradeStrategy for AsymmetricLadderStrategy {
                 signals.push(OrderSignal {
                     side: "DOWN".to_string(),
                     is_buy: false,
+                    order_type: crate::strategy::OrderType::Market,
                     amount: win_state.down_shares,
                     price: dn_bid,
                     reason: "emergency_15pct_time_stop_bid_ge_0.20".to_string(),
@@ -228,6 +230,7 @@ impl TradeStrategy for AsymmetricLadderStrategy {
                     signals.push(OrderSignal {
                         side: "UP".to_string(),
                         is_buy: false,
+                        order_type: crate::strategy::OrderType::Market,
                         amount: sell_amount,
                         price: up_bid,
                         reason: format!("ladder_exit_step_{}_{:.2}", *current_step, target),
@@ -265,6 +268,7 @@ impl TradeStrategy for AsymmetricLadderStrategy {
                     signals.push(OrderSignal {
                         side: "DOWN".to_string(),
                         is_buy: false,
+                        order_type: crate::strategy::OrderType::Market,
                         amount: sell_amount,
                         price: dn_bid,
                         reason: format!("ladder_exit_step_{}_{:.2}", *current_step, target),

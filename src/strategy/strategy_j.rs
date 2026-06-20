@@ -1,13 +1,13 @@
 use crate::client::{MarketWindow, PricesState};
 use crate::config::Config;
 use crate::j_fees::DEFAULT_CRYPTO_FEE_RATE_BPS;
+use crate::mid_cross_tracker::LeadSide;
 use crate::orderbook::{apply_fill_to_asks, ask_depth_usd, simulate_taker_buy_fill, SideBook};
 use crate::redeem_hold::expected_move_usd;
 use crate::strategy::{
-    CexMicroSnapshot, MidCrossSnapshot, OrderSignal, SpotSignalSnapshot, StrategyState,
+    CexMicroSnapshot, MidCrossSnapshot, OrderSignal, OrderType, SpotSignalSnapshot, StrategyState,
     TradeStrategy,
 };
-use crate::mid_cross_tracker::LeadSide;
 use crate::trade_tape::{TradeTapeSnapshot, TradeTapeTracker};
 use crate::trader::WindowState;
 use std::collections::HashMap;
@@ -34,6 +34,11 @@ pub(crate) struct JWindowState {
     pub(crate) insurance_side: Option<String>,
     pub(crate) winner_side: Option<String>,
     pub(crate) last_endgame_buy_at: Option<Instant>,
+    pub(crate) sell_rescue_done: bool,
+    /// Cross counts frozen at first endgame tick — chop gate uses this snapshot,
+    /// not the live cumulative counter (which grows every tick and blocked ETH).
+    pub(crate) entry_cross_snapshot: Option<(u32, u32)>,
+    pub(crate) directional_blocked_chop: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +77,12 @@ impl JEndgameStrategy {
             available_cash: 0.0,
         }
     }
+
+    pub(crate) fn mark_sell_rescue_executed(&mut self, window_number: usize) {
+        if let Some(state) = self.windows.get_mut(&window_number) {
+            state.sell_rescue_done = true;
+        }
+    }
 }
 
 fn side_book_mut<'a>(side: &str, prices: &'a mut PricesState) -> &'a mut SideBook {
@@ -95,6 +106,38 @@ pub(crate) fn side_ask(side: &str, prices: &PricesState) -> f64 {
         prices.up.ask
     } else {
         prices.down.ask
+    }
+}
+
+pub(crate) fn side_bid(side: &str, prices: &PricesState) -> f64 {
+    if side == "UP" {
+        prices.up.bid
+    } else {
+        prices.down.bid
+    }
+}
+
+fn shares_for_side(side: &str, win_state: &WindowState) -> f64 {
+    if side == "UP" {
+        win_state.up_shares
+    } else {
+        win_state.down_shares
+    }
+}
+
+fn j_buy_order_type(cfg: &crate::config::JEndgameConfig) -> OrderType {
+    if cfg.taker_mode {
+        OrderType::Market
+    } else {
+        OrderType::Limit
+    }
+}
+
+fn sell_rescue_order_type(cfg: &crate::config::JEndgameConfig, secs_to_end: i64) -> OrderType {
+    if cfg.sell_rescue_use_market || secs_to_end <= cfg.sell_rescue_market_secs {
+        OrderType::Market
+    } else {
+        OrderType::Limit
     }
 }
 
@@ -160,14 +203,35 @@ pub(crate) fn effective_max_clips(cfg: &crate::config::JEndgameConfig) -> u16 {
     }
 }
 
+pub(crate) fn capture_endgame_chop_snapshot(
+    state: &mut JWindowState,
+    cfg: &crate::config::JEndgameConfig,
+    mid_cross: &MidCrossSnapshot,
+    in_endgame: bool,
+) {
+    if !in_endgame || state.entry_cross_snapshot.is_some() {
+        return;
+    }
+    state.entry_cross_snapshot = Some((mid_cross.cross_count, mid_cross.significant_cross_count));
+    if (cfg.max_crosses_directional > 0 && mid_cross.cross_count >= cfg.max_crosses_directional)
+        || (cfg.max_sig_crosses_directional > 0
+            && mid_cross.significant_cross_count >= cfg.max_sig_crosses_directional)
+    {
+        state.directional_blocked_chop = true;
+    }
+}
+
 pub(crate) fn directional_entry_allowed(
     cfg: &crate::config::JEndgameConfig,
+    state: &JWindowState,
     min_atr: f64,
     current_atr: f64,
     spot: f64,
     ptb: f64,
-    mid_cross: &MidCrossSnapshot,
 ) -> bool {
+    if state.directional_blocked_chop {
+        return false;
+    }
     if min_atr > 0.0 && current_atr < min_atr {
         return false;
     }
@@ -175,18 +239,23 @@ pub(crate) fn directional_entry_allowed(
     if cfg.min_ptb_dist_pct > 0.0 && dist.is_finite() && dist < cfg.min_ptb_dist_pct {
         return false;
     }
-    if cfg.max_sig_crosses_directional > 0
-        && mid_cross.significant_cross_count >= cfg.max_sig_crosses_directional
-    {
-        return false;
-    }
-    // Raw-cross chop guard: heavy oscillation around PTB => near-coin-flip
-    // resolution. Skipping these windows removes the chop tail-loss without
-    // touching clean windows (which carry few raw crosses at entry).
-    if cfg.max_crosses_directional > 0 && mid_cross.cross_count >= cfg.max_crosses_directional {
-        return false;
-    }
     true
+}
+
+/// Dashboard / external callers: pass chop-block flag from live JWindowState.
+pub fn directional_entry_allowed_external(
+    cfg: &crate::config::JEndgameConfig,
+    chop_blocked: bool,
+    min_atr: f64,
+    current_atr: f64,
+    spot: f64,
+    ptb: f64,
+) -> bool {
+    let state = JWindowState {
+        directional_blocked_chop: chop_blocked,
+        ..Default::default()
+    };
+    directional_entry_allowed(cfg, &state, min_atr, current_atr, spot, ptb)
 }
 
 pub(crate) fn flip_hedge_triggered(
@@ -235,6 +304,64 @@ pub(crate) fn flip_hedge_triggered(
     sharp
 }
 
+fn plan_sell_rescue_signal(
+    cfg: &crate::config::JEndgameConfig,
+    state: &JWindowState,
+    win_state: &WindowState,
+    prices: &PricesState,
+    current_winner: &str,
+    gz: f64,
+    secs_to_end: i64,
+    projected_hold_pnl: f64,
+) -> Option<OrderSignal> {
+    if !cfg.sell_rescue_enabled || state.sell_rescue_done || !state.has_primary_exposure() {
+        return None;
+    }
+    let primary = state.primary_side.as_deref()?;
+    if primary == current_winner {
+        return None;
+    }
+    let gz_against_primary = if primary == "UP" { -gz } else { gz };
+    if gz_against_primary < cfg.sell_rescue_min_gap_z {
+        return None;
+    }
+    let bid = side_bid(primary, prices);
+    if bid < cfg.sell_rescue_min_bid {
+        return None;
+    }
+    let shares = shares_for_side(primary, win_state);
+    if shares <= 1e-9 {
+        return None;
+    }
+    let sell_shares = shares * cfg.sell_rescue_fraction.clamp(0.0, 1.0);
+    let sell_value = sell_shares * bid;
+    if sell_value < cfg.sell_rescue_min_value_usd {
+        return None;
+    }
+    let projected_after_sell = projected_hold_pnl + sell_value;
+    let improvement = projected_after_sell - projected_hold_pnl;
+    if improvement + 1e-9 < cfg.sell_rescue_min_improvement_usd {
+        return None;
+    }
+    Some(OrderSignal {
+        side: primary.to_string(),
+        is_buy: false,
+        order_type: sell_rescue_order_type(cfg, secs_to_end),
+        amount: sell_shares,
+        price: bid,
+        reason: format!(
+            "j_sell_rescue_{}_bid_{:.2}_shares_{:.4}_value_{:.2}_gap_z_against_{:+.2}_hold_pnl_{:+.2}_after_sell_{:+.2}",
+            primary.to_lowercase(),
+            bid,
+            sell_shares,
+            sell_value,
+            gz_against_primary,
+            projected_hold_pnl,
+            projected_after_sell,
+        ),
+    })
+}
+
 impl JWindowState {
     /// Directional thesis is live once any primary-tier USD is deployed.
     /// Composite (FinalSeal/Rescue) writes `rescue_spent_usd`, not `cheap_clips`.
@@ -246,6 +373,10 @@ impl JWindowState {
                 || self.impulse_spent_usd > 1e-9
                 || self.cheap_clips > 0
                 || self.late_clips > 0)
+    }
+
+    pub(crate) fn primary_exposure_usd(&self) -> f64 {
+        self.rescue_spent_usd + self.cheap_spent_usd + self.late_spent_usd + self.impulse_spent_usd
     }
 }
 
@@ -291,8 +422,7 @@ pub(crate) fn taker_max_pay(winner_ask: f64, cfg: &crate::config::JEndgameConfig
     if cfg.taker_mode {
         winner_ask.min(cfg.taker_max_ask)
     } else {
-        (winner_ask - cfg.limit_ask_offset)
-            .clamp(cfg.min_winner_ask, cfg.max_winner_ask)
+        (winner_ask - cfg.limit_ask_offset).clamp(cfg.min_winner_ask, cfg.max_winner_ask)
     }
 }
 
@@ -373,9 +503,7 @@ impl TradeStrategy for JEndgameStrategy {
         }
 
         let jcfg = &config.j_endgame;
-        let fee_bps = jcfg
-            .fee_rate_bps
-            .unwrap_or(DEFAULT_CRYPTO_FEE_RATE_BPS);
+        let fee_bps = jcfg.fee_rate_bps.unwrap_or(DEFAULT_CRYPTO_FEE_RATE_BPS);
         let default_clip = jcfg.clip_usd.max(jcfg.probe_clip_usd);
         let state = self.windows.entry(window_number).or_insert(JWindowState {
             impulse_spent_usd: 0.0,
@@ -393,27 +521,25 @@ impl TradeStrategy for JEndgameStrategy {
             insurance_side: None,
             winner_side: None,
             last_endgame_buy_at: None,
+            sell_rescue_done: false,
+            entry_cross_snapshot: None,
+            directional_blocked_chop: false,
         });
-
-        let window_cap = jcfg
-            .max_usd_per_window
-            .min(config.session.max_window_budget);
-        if win_state.spent >= window_cap - 1e-9
-            || state.clips_filled >= effective_max_clips(jcfg)
-        {
-            // allow final seal / rescue even at window budget cap
-            if secs_to_end > jcfg.final_seal_secs {
-                return signals;
-            }
-        }
 
         let (Some(spot), Some(ptb)) = (spot_price, market.price_to_beat) else {
             return signals;
         };
 
         let min_atr = config.min_atr_for(&market.asset);
-        let allow_directional =
-            directional_entry_allowed(jcfg, min_atr, current_atr, spot, ptb, mid_cross);
+        let elapsed_pct = window_elapsed_pct(market, secs_to_end);
+        let phase = crate::j_controller::detect_phase(elapsed_pct, secs_to_end, jcfg, mid_cross);
+        let in_endgame = !matches!(
+            phase,
+            crate::j_controller::JWindowPhase::Warmup
+                | crate::j_controller::JWindowPhase::MidWindow
+                | crate::j_controller::JWindowPhase::Insurance
+        );
+        capture_endgame_chop_snapshot(state, jcfg, mid_cross, in_endgame);
 
         let Some(current_winner) = winner_side(spot, ptb) else {
             return signals;
@@ -424,9 +550,35 @@ impl TradeStrategy for JEndgameStrategy {
             return signals;
         }
 
-        let elapsed_pct = window_elapsed_pct(market, secs_to_end);
-        let phase = crate::j_controller::detect_phase(elapsed_pct, secs_to_end, jcfg, mid_cross);
+        // SELL rescue must run even when the window BUY budget is exhausted.
+        let projected_hold_pnl =
+            crate::j_controller::projected_redeem_pnl(win_state, current_winner, fee_bps);
+        if let Some(sell) = plan_sell_rescue_signal(
+            jcfg,
+            state,
+            win_state,
+            prices,
+            current_winner,
+            gz,
+            secs_to_end,
+            projected_hold_pnl,
+        ) {
+            signals.push(sell);
+            return signals;
+        }
 
+        let window_cap = jcfg
+            .max_usd_per_window
+            .min(config.session.max_window_budget);
+        if win_state.spent >= window_cap - 1e-9 || state.clips_filled >= effective_max_clips(jcfg) {
+            // allow final seal / rescue even at window budget cap
+            if secs_to_end > jcfg.final_seal_secs {
+                return signals;
+            }
+        }
+
+        let allow_directional =
+            directional_entry_allowed(jcfg, state, min_atr, current_atr, spot, ptb);
         let confidence = crate::j_controller::endgame_confidence(
             jcfg,
             current_winner,
@@ -460,18 +612,13 @@ impl TradeStrategy for JEndgameStrategy {
 
         if matches!(plan.tier, EndgameTier::Rescue | EndgameTier::FinalSeal) {
             if let Some(last) = state.last_endgame_buy_at {
-                if last.elapsed()
-                    < std::time::Duration::from_millis(jcfg.min_buy_interval_ms)
-                {
+                if last.elapsed() < std::time::Duration::from_millis(jcfg.min_buy_interval_ms) {
                     return signals;
                 }
             }
         }
 
-        let side = plan
-            .side
-            .as_deref()
-            .unwrap_or(current_winner);
+        let side = plan.side.as_deref().unwrap_or(current_winner);
         let winner_ask = side_ask(side, prices);
         let clip_usd = if plan.clip_usd > 0.0 {
             plan.clip_usd
@@ -486,8 +633,7 @@ impl TradeStrategy for JEndgameStrategy {
         let max_pay = if jcfg.taker_mode {
             plan.max_pay
         } else {
-            (winner_ask - jcfg.limit_ask_offset)
-                .clamp(jcfg.min_winner_ask, plan.max_pay)
+            (winner_ask - jcfg.limit_ask_offset).clamp(jcfg.min_winner_ask, plan.max_pay)
         };
 
         let cheap_tier = matches!(
@@ -512,7 +658,8 @@ impl TradeStrategy for JEndgameStrategy {
         let remaining = if matches!(plan.tier, EndgameTier::Rescue | EndgameTier::FinalSeal) {
             plan.budget_left
         } else {
-            plan.budget_left.min((window_cap - win_state.spent).max(0.0))
+            plan.budget_left
+                .min((window_cap - win_state.spent).max(0.0))
         };
         let mut prices_mut = prices.clone();
         let fills = sweep_endgame_clips(
@@ -544,6 +691,7 @@ impl TradeStrategy for JEndgameStrategy {
             signals.push(OrderSignal {
                 side: side.to_string(),
                 is_buy: true,
+                order_type: j_buy_order_type(jcfg),
                 amount: usd,
                 price: fill_price,
                 reason: format!(
@@ -627,13 +775,28 @@ impl TradeStrategy for JEndgameStrategy {
     fn set_runtime_cash(&mut self, cash: f64) {
         self.available_cash = cash.max(0.0);
     }
+
+    fn j_directional_blocked(&self, window_number: usize) -> bool {
+        self.windows
+            .get(&window_number)
+            .map(|s| s.directional_blocked_chop)
+            .unwrap_or(false)
+    }
+
+    fn notify_order_executed(&mut self, window_number: usize, signal: &OrderSignal) {
+        if !signal.is_buy && signal.reason.starts_with("j_sell_rescue") {
+            self.mark_sell_rescue_executed(window_number);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::client::ContractPrices;
-    use crate::config::{Config, JEndgameConfig, PreStartConfig, SellStrategyConfig, SessionConfig};
+    use crate::config::{
+        Config, JEndgameConfig, PreStartConfig, SellStrategyConfig, SessionConfig,
+    };
     use crate::orderbook::BookLevel;
 
     fn test_config() -> Config {
@@ -986,9 +1149,9 @@ mod tests {
         let mut mid = MidCrossSnapshot::default();
         mid.armed = true;
         mid.cross_count = 8;
-        mid.significant_cross_count = 3;
+        mid.significant_cross_count = 2;
         mid.last_cross_is_significant = true;
-        // Spot below PTB => DOWN winner; pretend we had bought UP earlier.
+        // Spot well below PTB => DOWN winner; genuine reversal vs UP primary.
         strat.windows.insert(
             1,
             JWindowState {
@@ -999,10 +1162,24 @@ mod tests {
                 ..Default::default()
             },
         );
+        let gz = gap_z(58_500.0, 60_000.0, 40.0, 12);
+        assert!(
+            flip_hedge_triggered(
+                &cfg.j_endgame,
+                strat.windows.get(&1).unwrap(),
+                "UP",
+                "DOWN",
+                58_500.0,
+                60_000.0,
+                gz,
+                &mid,
+            ),
+            "flip hedge must trigger on spot reversal with gap against primary"
+        );
         let signals = strat.process_live_tick(
             &cfg,
             &prices,
-            Some(59_900.0),
+            Some(58_500.0),
             &win.market,
             &win,
             12,
@@ -1034,21 +1211,22 @@ mod tests {
     #[test]
     fn blocks_directional_when_ptb_dist_tiny() {
         let cfg = test_config();
+        let open = JWindowState::default();
         assert!(!directional_entry_allowed(
             &cfg.j_endgame,
+            &open,
             0.0,
             40.0,
             60_020.0,
             60_000.0,
-            &MidCrossSnapshot::default(),
         ));
         assert!(directional_entry_allowed(
             &cfg.j_endgame,
+            &open,
             0.0,
             40.0,
             60_100.0,
             60_000.0,
-            &MidCrossSnapshot::default(),
         ));
     }
 
@@ -1058,11 +1236,59 @@ mod tests {
         cfg.min_btc_atr = 20.0;
         assert!(!directional_entry_allowed(
             &cfg.j_endgame,
+            &JWindowState::default(),
             cfg.min_btc_atr,
             10.0,
             60_100.0,
             60_000.0,
-            &MidCrossSnapshot::default(),
+        ));
+    }
+
+    #[test]
+    fn chop_gate_uses_endgame_snapshot_not_later_crosses() {
+        let mut cfg = test_config();
+        cfg.j_endgame.max_crosses_directional = 9;
+        let mut state = JWindowState::default();
+        let calm = MidCrossSnapshot {
+            cross_count: 2,
+            significant_cross_count: 0,
+            ..Default::default()
+        };
+        capture_endgame_chop_snapshot(&mut state, &cfg.j_endgame, &calm, true);
+        assert!(!state.directional_blocked_chop);
+        assert!(directional_entry_allowed(
+            &cfg.j_endgame,
+            &state,
+            0.0,
+            40.0,
+            60_100.0,
+            60_000.0
+        ));
+        // Later chop growth must not block — snapshot was calm at endgame open.
+        state.directional_blocked_chop = false;
+        assert!(directional_entry_allowed(
+            &cfg.j_endgame,
+            &state,
+            0.0,
+            40.0,
+            60_100.0,
+            60_000.0
+        ));
+        let mut chop = JWindowState::default();
+        let noisy = MidCrossSnapshot {
+            cross_count: 10,
+            significant_cross_count: 2,
+            ..Default::default()
+        };
+        capture_endgame_chop_snapshot(&mut chop, &cfg.j_endgame, &noisy, true);
+        assert!(chop.directional_blocked_chop);
+        assert!(!directional_entry_allowed(
+            &cfg.j_endgame,
+            &chop,
+            0.0,
+            40.0,
+            60_100.0,
+            60_000.0
         ));
     }
 
@@ -1147,7 +1373,8 @@ mod tests {
 
     #[test]
     fn flip_hedge_triggers_after_composite_final_seal() {
-        let cfg = test_config();
+        let mut cfg = test_config();
+        cfg.j_endgame.sell_rescue_enabled = false;
         let state = JWindowState {
             rescue_spent_usd: 72.0,
             primary_side: Some("DOWN".to_string()),
@@ -1232,12 +1459,188 @@ mod tests {
             &CexMicroSnapshot::default(),
             &TradeTapeSnapshot::default(),
         );
-        assert!(!signals.is_empty(), "flip hedge must fire for composite thesis");
+        assert!(
+            !signals.is_empty(),
+            "flip hedge must fire for composite thesis"
+        );
         assert_eq!(signals[0].side, "UP");
         assert!(
             signals[0].reason.starts_with("j_flip_hedge"),
             "reason={}",
             signals[0].reason
         );
+    }
+
+    #[test]
+    fn sell_rescue_cuts_primary_when_thesis_breaks() {
+        let cfg = test_config();
+        let mut strat = strat_with_cash();
+        strat.windows.insert(
+            1,
+            JWindowState {
+                rescue_spent_usd: 72.0,
+                primary_side: Some("DOWN".to_string()),
+                clips_filled: 4,
+                ..Default::default()
+            },
+        );
+        let prices = PricesState {
+            up: ContractPrices::top(0.52, 0.54),
+            down: ContractPrices::top(0.44, 0.46),
+        };
+        let win = WindowState {
+            window_number: 1,
+            role: "CURRENT".to_string(),
+            status: "LIVE".to_string(),
+            market: sample_market(),
+            spent: 72.0,
+            cash_returned: 0.0,
+            up_shares: 0.0,
+            down_shares: 80.0,
+            initial_up_shares: 0.0,
+            initial_down_shares: 0.0,
+            trades: vec![],
+            prices: prices.clone(),
+        };
+        let mid = MidCrossSnapshot {
+            armed: true,
+            cross_count: 8,
+            significant_cross_count: 3,
+            last_cross_is_significant: true,
+            ..Default::default()
+        };
+        let signals = strat.process_live_tick(
+            &cfg,
+            &prices,
+            Some(62_585.0),
+            &win.market,
+            &win,
+            35,
+            26.8,
+            SpotSignalSnapshot::default(),
+            &mid,
+            &CexMicroSnapshot::default(),
+            &TradeTapeSnapshot::default(),
+        );
+        assert!(!signals.is_empty());
+        assert!(!signals[0].is_buy);
+        assert_eq!(signals[0].side, "DOWN");
+        assert_eq!(signals[0].order_type.as_str(), "limit");
+        assert!(signals[0].reason.starts_with("j_sell_rescue"));
+    }
+
+    #[test]
+    fn sell_rescue_fires_when_window_budget_exhausted() {
+        let cfg = test_config();
+        let mut strat = strat_with_cash();
+        strat.windows.insert(
+            1,
+            JWindowState {
+                rescue_spent_usd: 72.0,
+                primary_side: Some("DOWN".to_string()),
+                clips_filled: 8,
+                ..Default::default()
+            },
+        );
+        let prices = PricesState {
+            up: ContractPrices::top(0.52, 0.54),
+            down: ContractPrices::top(0.44, 0.46),
+        };
+        let win = WindowState {
+            window_number: 1,
+            role: "CURRENT".to_string(),
+            status: "LIVE".to_string(),
+            market: sample_market(),
+            spent: 80.0,
+            cash_returned: 0.0,
+            up_shares: 0.0,
+            down_shares: 80.0,
+            initial_up_shares: 0.0,
+            initial_down_shares: 0.0,
+            trades: vec![],
+            prices: prices.clone(),
+        };
+        let mid = MidCrossSnapshot {
+            armed: true,
+            cross_count: 8,
+            significant_cross_count: 3,
+            last_cross_is_significant: true,
+            ..Default::default()
+        };
+        let signals = strat.process_live_tick(
+            &cfg,
+            &prices,
+            Some(62_585.0),
+            &win.market,
+            &win,
+            60,
+            26.8,
+            SpotSignalSnapshot::default(),
+            &mid,
+            &CexMicroSnapshot::default(),
+            &TradeTapeSnapshot::default(),
+        );
+        assert_eq!(signals.len(), 1);
+        assert!(!signals[0].is_buy);
+        assert!(
+            !strat.windows.get(&1).unwrap().sell_rescue_done,
+            "sell_rescue_done must wait for fill"
+        );
+    }
+
+    #[test]
+    fn sell_rescue_done_set_only_after_execution() {
+        let cfg = test_config();
+        let mut strat = strat_with_cash();
+        strat.windows.insert(
+            1,
+            JWindowState {
+                rescue_spent_usd: 72.0,
+                primary_side: Some("DOWN".to_string()),
+                ..Default::default()
+            },
+        );
+        let prices = PricesState {
+            up: ContractPrices::top(0.52, 0.54),
+            down: ContractPrices::top(0.44, 0.46),
+        };
+        let win = WindowState {
+            window_number: 1,
+            role: "CURRENT".to_string(),
+            status: "LIVE".to_string(),
+            market: sample_market(),
+            spent: 72.0,
+            cash_returned: 0.0,
+            up_shares: 0.0,
+            down_shares: 80.0,
+            initial_up_shares: 0.0,
+            initial_down_shares: 0.0,
+            trades: vec![],
+            prices: prices.clone(),
+        };
+        let mid = MidCrossSnapshot {
+            armed: true,
+            cross_count: 8,
+            significant_cross_count: 3,
+            last_cross_is_significant: true,
+            ..Default::default()
+        };
+        let signals = strat.process_live_tick(
+            &cfg,
+            &prices,
+            Some(62_585.0),
+            &win.market,
+            &win,
+            35,
+            26.8,
+            SpotSignalSnapshot::default(),
+            &mid,
+            &CexMicroSnapshot::default(),
+            &TradeTapeSnapshot::default(),
+        );
+        assert!(!signals.is_empty());
+        assert!(!strat.windows.get(&1).unwrap().sell_rescue_done);
+        strat.notify_order_executed(1, &signals[0]);
+        assert!(strat.windows.get(&1).unwrap().sell_rescue_done);
     }
 }

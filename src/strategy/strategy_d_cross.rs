@@ -174,10 +174,9 @@ fn fair_probability_up(
     let secs_left_f = (secs_left as f64).max(1.0);
     let expected_move = expected_move_usd(current_atr, secs_left);
     let max_velocity_drift = expected_move * 0.35;
-    let velocity_drift = (spot_velocity(spot_signal).unwrap_or(0.0)
-        * secs_left_f
-        * DCROSS_VELOCITY_DRIFT_FRACTION)
-        .clamp(-max_velocity_drift, max_velocity_drift);
+    let velocity_drift =
+        (spot_velocity(spot_signal).unwrap_or(0.0) * secs_left_f * DCROSS_VELOCITY_DRIFT_FRACTION)
+            .clamp(-max_velocity_drift, max_velocity_drift);
     normal_cdf(((spot - ptb) + velocity_drift) / expected_move)
 }
 
@@ -393,13 +392,8 @@ impl TradeStrategy for DynamicGridDCrossStrategy {
 
         if time_pct >= DCROSS_FINAL_TIME_PCT || secs_to_end <= DCROSS_FINAL_SECS_TO_END {
             if !state.emergency_sold {
-                let fair_up = fair_probability_up(
-                    market,
-                    spot_price,
-                    current_atr,
-                    secs_to_end,
-                    spot_signal,
-                );
+                let fair_up =
+                    fair_probability_up(market, spot_price, current_atr, secs_to_end, spot_signal);
                 for side in ["UP", "DOWN"] {
                     let shares = shares_for_side(side, win_state);
                     let bid = side_bid(side, prices);
@@ -425,17 +419,14 @@ impl TradeStrategy for DynamicGridDCrossStrategy {
                         signals.push(OrderSignal {
                             side: side.to_string(),
                             is_buy: false,
+                            order_type: crate::strategy::OrderType::Market,
                             amount: shares,
                             price: bid,
                             reason: "dcross_emergency_time_stop_otm".to_string(),
                         });
                         continue;
                     };
-                    let is_itm = if side == "UP" {
-                        spot > ptb
-                    } else {
-                        spot < ptb
-                    };
+                    let is_itm = if side == "UP" { spot > ptb } else { spot < ptb };
                     if is_itm && fair_prob >= 0.35 {
                         continue;
                     }
@@ -455,6 +446,7 @@ impl TradeStrategy for DynamicGridDCrossStrategy {
                     signals.push(OrderSignal {
                         side: side.to_string(),
                         is_buy: false,
+                        order_type: crate::strategy::OrderType::Market,
                         amount: shares,
                         price: bid,
                         reason,
@@ -510,13 +502,8 @@ impl TradeStrategy for DynamicGridDCrossStrategy {
                     return signals;
                 }
 
-                let fair_up = fair_probability_up(
-                    market,
-                    spot_price,
-                    current_atr,
-                    secs_to_end,
-                    spot_signal,
-                );
+                let fair_up =
+                    fair_probability_up(market, spot_price, current_atr, secs_to_end, spot_signal);
                 let fair_side = side_fair_probability(cheap, fair_up);
                 let entry_edge = fair_side - cheap_ask;
                 if entry_edge < DCROSS_MIN_ENTRY_EDGE {
@@ -534,6 +521,7 @@ impl TradeStrategy for DynamicGridDCrossStrategy {
                 signals.push(OrderSignal {
                     side: cheap.to_string(),
                     is_buy: true,
+                    order_type: crate::strategy::OrderType::Market,
                     amount: budget,
                     price: cheap_ask,
                     reason: format!(
@@ -561,13 +549,8 @@ impl TradeStrategy for DynamicGridDCrossStrategy {
             state.initial_entry_shares = shares;
         }
 
-        let fair_up = fair_probability_up(
-            market,
-            spot_price,
-            current_atr,
-            secs_to_end,
-            spot_signal,
-        );
+        let fair_up =
+            fair_probability_up(market, spot_price, current_atr, secs_to_end, spot_signal);
         let fair_side = side_fair_probability(&entry_side, fair_up);
         let bid = side_bid(&entry_side, prices);
         if redeem_hold_blocks_sell(
@@ -630,6 +613,7 @@ impl TradeStrategy for DynamicGridDCrossStrategy {
                     signals.push(OrderSignal {
                         side: entry_side.clone(),
                         is_buy: false,
+                        order_type: crate::strategy::OrderType::Market,
                         amount: sell_shares,
                         price: bid,
                         reason: format!(
@@ -685,14 +669,24 @@ mod tests {
     #[test]
     fn thesis_lock_requires_spot_itm_and_mid_gap() {
         let mid = sample_mid_cross(LeadSide::Up, 0.16);
-        assert!(thesis_lock_conditions("UP", Some(61_200.0), Some(61_198.0), &mid));
+        assert!(thesis_lock_conditions(
+            "UP",
+            Some(61_200.0),
+            Some(61_198.0),
+            &mid
+        ));
         assert!(!thesis_lock_conditions(
             "UP",
             Some(61_190.0),
             Some(61_198.0),
             &mid
         ));
-        assert!(!thesis_lock_conditions("DOWN", Some(61_200.0), Some(61_198.0), &mid));
+        assert!(!thesis_lock_conditions(
+            "DOWN",
+            Some(61_200.0),
+            Some(61_198.0),
+            &mid
+        ));
     }
 
     #[test]

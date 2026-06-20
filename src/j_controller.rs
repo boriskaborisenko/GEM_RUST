@@ -11,11 +11,11 @@ use crate::client::PricesState;
 use crate::config::{Config, JEndgameConfig};
 use crate::j_fees::{leg_fee_usd, DEFAULT_CRYPTO_FEE_RATE_BPS};
 use crate::mid_cross_tracker::{LeadSide, MidCrossSnapshot, MID_CROSS_ARM_TIME_PCT};
-use crate::strategy::{CexMicroSnapshot, SpotSignalSnapshot};
 use crate::strategy::strategy_j::{
-    EndgameTier, JWindowState, TierPlan, flip_hedge_triggered, gap_z, ptb_dist_pct, side_ask,
-    winner_side,
+    flip_hedge_triggered, gap_z, ptb_dist_pct, side_ask, winner_side, EndgameTier, JWindowState,
+    TierPlan,
 };
+use crate::strategy::{CexMicroSnapshot, SpotSignalSnapshot};
 use crate::trade_tape::TradeTapeSnapshot;
 use crate::trader::WindowState;
 
@@ -212,8 +212,7 @@ pub fn endgame_confidence(
     // Book agreement (chop-penalized).
     let book_aligned = book_winner == Some(winner);
     let chop = 1.0
-        - (mid_cross.significant_cross_count as f64
-            / (cfg.book_max_sig_cross.max(1) as f64))
+        - (mid_cross.significant_cross_count as f64 / (cfg.book_max_sig_cross.max(1) as f64))
             .clamp(0.0, 1.0);
     let c_book = if book_aligned {
         ramp(mid_cross.lead_gap, 0.0, cfg.book_full_lead_gap) * chop
@@ -304,9 +303,7 @@ fn usd_to_close_profit_gap(
 }
 
 fn has_deployed_exposure(win_state: &WindowState) -> bool {
-    win_state.spent > 1e-9
-        || win_state.up_shares > 1e-9
-        || win_state.down_shares > 1e-9
+    win_state.spent > 1e-9 || win_state.up_shares > 1e-9 || win_state.down_shares > 1e-9
 }
 
 /// Per-tick clip cap: probe on first buy, then ramp with gap_z, time, and ask cheapness.
@@ -374,13 +371,7 @@ pub fn plan_endgame_composite(
     }
     let conf_target = eff * cfg.max_rescue_usd;
     let profit_target = if has_deployed_exposure(win_state) {
-        usd_to_close_profit_gap(
-            win_state,
-            winner,
-            ask,
-            cfg.target_profit_usd,
-            fee_bps,
-        )
+        usd_to_close_profit_gap(win_state, winner, ask, cfg.target_profit_usd, fee_bps)
     } else {
         0.0
     };
@@ -406,6 +397,13 @@ pub fn plan_endgame_composite(
     })
 }
 
+pub fn flip_hedge_budget_cap(cfg: &JEndgameConfig, state: &JWindowState) -> f64 {
+    let primary = state.primary_exposure_usd();
+    cfg.flip_tier_usd
+        .max(primary * cfg.flip_hedge_exposure_ratio)
+        .min(cfg.flip_tier_max_usd)
+}
+
 pub fn plan_flip_hedge_rescue(
     cfg: &JEndgameConfig,
     state: &JWindowState,
@@ -417,22 +415,43 @@ pub fn plan_flip_hedge_rescue(
     mid_cross: &MidCrossSnapshot,
 ) -> Option<TierPlan> {
     let primary = state.primary_side.as_deref()?;
-    if !flip_hedge_triggered(cfg, state, primary, current_winner, spot, ptb, gz, mid_cross) {
+    if !flip_hedge_triggered(
+        cfg,
+        state,
+        primary,
+        current_winner,
+        spot,
+        ptb,
+        gz,
+        mid_cross,
+    ) {
         return None;
     }
     let hedge_side = if primary == "UP" { "DOWN" } else { "UP" };
     let hedge_ask = side_ask(hedge_side, prices);
-    if state.hedge_spent_usd + 1e-9 >= cfg.flip_tier_usd || hedge_ask > cfg.flip_max_ask {
+    let budget_cap = flip_hedge_budget_cap(cfg, state);
+    if state.hedge_spent_usd + 1e-9 >= budget_cap || hedge_ask > cfg.flip_max_ask {
         return None;
     }
+    let gz_against_primary = if primary == "UP" { -gz } else { gz };
+    let hedge_clip_base = if gz_against_primary >= cfg.flip_min_gap_z * 2.0 {
+        cfg.flip_hedge_clip_usd
+            .max(cfg.clip_usd.max(cfg.probe_clip_usd))
+    } else {
+        cfg.clip_usd.max(cfg.probe_clip_usd)
+    };
+    let budget_left = budget_cap - state.hedge_spent_usd;
+    let hedge_clip = hedge_clip_base
+        .min(budget_left)
+        .max(cfg.probe_clip_usd.min(budget_left));
     Some(TierPlan {
         tier: EndgameTier::FlipHedge,
         max_pay: hedge_ask.min(cfg.flip_max_ask),
         need_tape: cfg.flip_require_tape,
-        budget_left: cfg.flip_tier_usd - state.hedge_spent_usd,
+        budget_left,
         sweep_clips: cfg.flip_sweep_clips_per_tick,
         side: Some(hedge_side.to_string()),
-        clip_usd: cfg.clip_usd.max(cfg.probe_clip_usd),
+        clip_usd: hedge_clip,
     })
 }
 
@@ -472,7 +491,15 @@ pub fn plan_j_window(
     }
     if let JWindowPhase::Insurance = phase {
         return plan_insurance(
-            cfg, state, elapsed_pct, spot, ptb, prices, mid_cross, min_atr, current_atr,
+            cfg,
+            state,
+            elapsed_pct,
+            spot,
+            ptb,
+            prices,
+            mid_cross,
+            min_atr,
+            current_atr,
         );
     }
 
@@ -499,11 +526,7 @@ pub fn plan_j_window(
     )
 }
 
-pub fn projected_redeem_pnl(
-    win_state: &WindowState,
-    winner: &str,
-    fee_bps: f64,
-) -> f64 {
+pub fn projected_redeem_pnl(win_state: &WindowState, winner: &str, fee_bps: f64) -> f64 {
     redeem_pnl_if_wins(
         win_state.up_shares,
         win_state.down_shares,
@@ -691,7 +714,8 @@ mod tests {
 
         // At target, flat confidence => nothing more (no per-tick spam).
         assert!(
-            plan_endgame_composite(&cfg, &state, &win, "UP", 0.92, 1.0, 0.75, 70.0, 500.0).is_none()
+            plan_endgame_composite(&cfg, &state, &win, "UP", 0.92, 1.0, 0.75, 70.0, 500.0)
+                .is_none()
         );
 
         // Confidence rises to full => target 60, buys the next increment.
@@ -829,5 +853,25 @@ mod tests {
             "clip={} (should not dump full max on one tick)",
             plan.clip_usd
         );
+    }
+
+    #[test]
+    fn flip_hedge_budget_scales_with_primary_exposure() {
+        let mut j = j_cfg();
+        j.flip_tier_usd = 12.0;
+        j.flip_hedge_exposure_ratio = 0.45;
+        j.flip_tier_max_usd = 45.0;
+        let state_small = JWindowState {
+            rescue_spent_usd: 20.0,
+            primary_side: Some("DOWN".to_string()),
+            ..Default::default()
+        };
+        assert!((flip_hedge_budget_cap(&j, &state_small) - 12.0).abs() < 1e-9);
+        let state_large = JWindowState {
+            rescue_spent_usd: 70.0,
+            primary_side: Some("DOWN".to_string()),
+            ..Default::default()
+        };
+        assert!((flip_hedge_budget_cap(&j, &state_large) - 31.5).abs() < 1e-9);
     }
 }

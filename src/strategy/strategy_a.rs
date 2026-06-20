@@ -132,6 +132,7 @@ impl TradeStrategy for SimpleBothStrategy {
                 signals.push(OrderSignal {
                     side: "UP".to_string(),
                     is_buy: false,
+                    order_type: crate::strategy::OrderType::Market,
                     amount: win_state.up_shares,
                     price: up_bid,
                     reason: "emergency_15pct_time_stop_bid_ge_0.20".to_string(),
@@ -142,6 +143,7 @@ impl TradeStrategy for SimpleBothStrategy {
                 signals.push(OrderSignal {
                     side: "DOWN".to_string(),
                     is_buy: false,
+                    order_type: crate::strategy::OrderType::Market,
                     amount: win_state.down_shares,
                     price: dn_bid,
                     reason: "emergency_15pct_time_stop_bid_ge_0.20".to_string(),
@@ -158,6 +160,7 @@ impl TradeStrategy for SimpleBothStrategy {
             signals.push(OrderSignal {
                 side: "UP".to_string(),
                 is_buy: false,
+                order_type: crate::strategy::OrderType::Market,
                 amount: win_state.up_shares,
                 price: up_bid,
                 reason: format!("strategy_exit_{}", target_bid),
@@ -171,6 +174,7 @@ impl TradeStrategy for SimpleBothStrategy {
             signals.push(OrderSignal {
                 side: "DOWN".to_string(),
                 is_buy: false,
+                order_type: crate::strategy::OrderType::Market,
                 amount: win_state.down_shares,
                 price: dn_bid,
                 reason: format!("strategy_exit_{}", target_bid),

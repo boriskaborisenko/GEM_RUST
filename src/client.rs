@@ -310,12 +310,8 @@ pub async fn get_book_snapshot(token_id: &str) -> ContractPrices {
     let url = format!("{}/book?token_id={}", CLOB_REST, token_id);
     if let Ok(res) = client.get(&url).send().await {
         if let Ok(book) = res.json::<Value>().await {
-            let bids = sort_bids(parse_levels(
-                book.get("bids").and_then(|v| v.as_array()),
-            ));
-            let asks = sort_asks(parse_levels(
-                book.get("asks").and_then(|v| v.as_array()),
-            ));
+            let bids = sort_bids(parse_levels(book.get("bids").and_then(|v| v.as_array())));
+            let asks = sort_asks(parse_levels(book.get("asks").and_then(|v| v.as_array())));
             let side_book = SideBook {
                 bids: bids.clone(),
                 asks: asks.clone(),
@@ -447,11 +443,10 @@ pub fn subscribe_prices(
                                                     (prices.down.bid, prices.down.ask)
                                                 };
                                                 let ws_side = parse_ws_side(&m);
-                                                let is_buy = ws_side
-                                                    .as_deref()
-                                                    .is_some_and(|s| s == "BUY")
-                                                    || ws_side.is_none()
-                                                        && is_aggressive_buy(price, bid, ask);
+                                                let is_buy =
+                                                    ws_side.as_deref().is_some_and(|s| s == "BUY")
+                                                        || ws_side.is_none()
+                                                            && is_aggressive_buy(price, bid, ask);
                                                 if token_side == "UP" {
                                                     prices.up.bid = price;
                                                     if prices.up.ask <= price {
@@ -801,15 +796,13 @@ fn parse_strike_from_text(text: &str, asset: &str) -> Option<f64> {
 
     // Only trust explicit $-prefixed strikes. Non-dollar numbers in titles are usually dates/times
     // (e.g. "June 18, 6:35PM" → 35 for SOL) and must not become PTB.
-    candidates
-        .into_iter()
-        .find_map(|(val, dollar)| {
-            if dollar && val >= min_allowed && val <= max_allowed {
-                Some(val)
-            } else {
-                None
-            }
-        })
+    candidates.into_iter().find_map(|(val, dollar)| {
+        if dollar && val >= min_allowed && val <= max_allowed {
+            Some(val)
+        } else {
+            None
+        }
+    })
 }
 
 #[cfg(test)]

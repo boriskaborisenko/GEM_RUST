@@ -68,9 +68,7 @@ impl WindowStatsAggregator {
             record.pnl,
         );
         update_bucket(
-            self.by_mid_cross_bucket
-                .entry(cross_bucket)
-                .or_default(),
+            self.by_mid_cross_bucket.entry(cross_bucket).or_default(),
             won,
             record.pnl,
         );

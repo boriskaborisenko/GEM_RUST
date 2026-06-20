@@ -82,8 +82,8 @@ pub fn evaluate_redeem_hold(input: &RedeemHoldInput<'_>) -> RedeemHoldDecision {
         };
     }
 
-    let late_time = input.secs_to_end <= REDEEM_HOLD_LATE_SECS
-        || input.time_pct >= REDEEM_HOLD_LATE_TIME_PCT;
+    let late_time =
+        input.secs_to_end <= REDEEM_HOLD_LATE_SECS || input.time_pct >= REDEEM_HOLD_LATE_TIME_PCT;
     if !late_time {
         return RedeemHoldDecision {
             should_hold: false,

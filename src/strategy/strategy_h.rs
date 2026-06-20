@@ -139,9 +139,7 @@ fn held_side(win: &WindowState) -> Option<&'static str> {
 }
 
 pub(crate) fn ask_in_band(ask: f64) -> bool {
-    ask > 0.0
-        && ask >= H_TARGET_ASK - H_ASK_BAND
-        && ask <= H_MAX_ENTRY_ASK
+    ask > 0.0 && ask >= H_TARGET_ASK - H_ASK_BAND && ask <= H_MAX_ENTRY_ASK
 }
 
 fn utc_hour_now() -> u32 {
@@ -358,6 +356,7 @@ impl TradeStrategy for CheapHoldStrategy {
                         signals.push(OrderSignal {
                             side: side.to_string(),
                             is_buy: true,
+                            order_type: crate::strategy::OrderType::Market,
                             amount: remaining,
                             price: ask,
                             reason: format!(
@@ -381,11 +380,7 @@ impl TradeStrategy for CheapHoldStrategy {
             return signals;
         }
 
-        let Some(side) = state
-            .entry_side
-            .as_deref()
-            .or_else(|| held_side(win_state))
-        else {
+        let Some(side) = state.entry_side.as_deref().or_else(|| held_side(win_state)) else {
             return signals;
         };
 
@@ -406,12 +401,10 @@ impl TradeStrategy for CheapHoldStrategy {
         signals.push(OrderSignal {
             side: side.to_string(),
             is_buy: false,
+            order_type: crate::strategy::OrderType::Market,
             amount: shares,
             price: bid,
-            reason: format!(
-                "h_salvage_otm_bid_{:.2}_gap_z_{:+.2}",
-                bid, gap_z
-            ),
+            reason: format!("h_salvage_otm_bid_{:.2}_gap_z_{:+.2}", bid, gap_z),
         });
         state.salvage_done = true;
         signals
@@ -604,7 +597,10 @@ mod tests {
     #[test]
     fn vol_atr_does_not_blanket_sleep_5m() {
         assert_eq!(entry_sleep_blocks(12, 55.0, "5m", "BTC"), None);
-        assert_eq!(entry_sleep_blocks(19, 50.0, "5m", "BTC"), Some("sleep_utc19_vol"));
+        assert_eq!(
+            entry_sleep_blocks(19, 50.0, "5m", "BTC"),
+            Some("sleep_utc19_vol")
+        );
     }
 
     #[test]
@@ -830,10 +826,22 @@ mod tests {
     #[test]
     fn entry_sleep_rules_from_logs() {
         assert_eq!(entry_sleep_blocks(12, 55.0, "5m", "BTC"), None);
-        assert_eq!(entry_sleep_blocks(9, 30.0, "15m", "BTC"), Some("sleep_utc09"));
-        assert_eq!(entry_sleep_blocks(1, 30.0, "5m", "BTC"), Some("sleep_utc01_norm"));
-        assert_eq!(entry_sleep_blocks(19, 50.0, "15m", "BTC"), Some("sleep_utc19_vol"));
-        assert_eq!(entry_sleep_blocks(19, 50.0, "5m", "BTC"), Some("sleep_utc19_vol"));
+        assert_eq!(
+            entry_sleep_blocks(9, 30.0, "15m", "BTC"),
+            Some("sleep_utc09")
+        );
+        assert_eq!(
+            entry_sleep_blocks(1, 30.0, "5m", "BTC"),
+            Some("sleep_utc01_norm")
+        );
+        assert_eq!(
+            entry_sleep_blocks(19, 50.0, "15m", "BTC"),
+            Some("sleep_utc19_vol")
+        );
+        assert_eq!(
+            entry_sleep_blocks(19, 50.0, "5m", "BTC"),
+            Some("sleep_utc19_vol")
+        );
         assert_eq!(entry_sleep_blocks(20, 50.0, "15m", "BTC"), None);
         assert_eq!(entry_sleep_blocks(17, 50.0, "15m", "BTC"), None);
         assert_eq!(entry_sleep_blocks(12, 55.0, "5m", "ETH"), None);

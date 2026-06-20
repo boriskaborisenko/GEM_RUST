@@ -905,6 +905,7 @@ impl TradeStrategy for DynamicGridStrategy {
                 signals.push(OrderSignal {
                     side: "UP".to_string(),
                     is_buy: false,
+                    order_type: crate::strategy::OrderType::Market,
                     amount: up_emergency_sell,
                     price: up_bid,
                     reason: format!(
@@ -940,6 +941,7 @@ impl TradeStrategy for DynamicGridStrategy {
                 signals.push(OrderSignal {
                     side: "DOWN".to_string(),
                     is_buy: false,
+                    order_type: crate::strategy::OrderType::Market,
                     amount: down_emergency_sell,
                     price: dn_bid,
                     reason: format!(
@@ -1064,6 +1066,7 @@ impl TradeStrategy for DynamicGridStrategy {
                                 signals.push(OrderSignal {
                                     side: "UP".to_string(),
                                     is_buy: false,
+                                    order_type: crate::strategy::OrderType::Market,
                                     amount: sell_amount,
                                     price: up_bid,
                                     reason: format!(
@@ -1163,6 +1166,7 @@ impl TradeStrategy for DynamicGridStrategy {
                                 signals.push(OrderSignal {
                                     side: "DOWN".to_string(),
                                     is_buy: false,
+                                    order_type: crate::strategy::OrderType::Market,
                                     amount: sell_amount,
                                     price: dn_bid,
                                     reason: format!(
@@ -1242,6 +1246,7 @@ impl TradeStrategy for DynamicGridStrategy {
                 signals.push(OrderSignal {
                     side: weak_side.to_string(),
                     is_buy: false,
+                    order_type: crate::strategy::OrderType::Market,
                     amount: scalp_sell_amount,
                     price: weak_bid,
                     reason: format!(
@@ -1278,6 +1283,7 @@ impl TradeStrategy for DynamicGridStrategy {
                     signals.push(OrderSignal {
                         side: weak_side.to_string(),
                         is_buy: true,
+                        order_type: crate::strategy::OrderType::Market,
                         amount: buy_usd,
                         price: weak_ask,
                         reason: format!(
@@ -1525,6 +1531,7 @@ impl TradeStrategy for DynamicGridStrategy {
                     signals.push(OrderSignal {
                         side: second_side.to_string(),
                         is_buy: false,
+                        order_type: crate::strategy::OrderType::Market,
                         amount: sell_amount,
                         price: second_bid,
                         reason: format!(

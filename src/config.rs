@@ -185,12 +185,36 @@ pub struct JEndgameConfig {
     pub flip_min_gap_z: f64,
     #[serde(default = "j_default_flip_tier_usd")]
     pub flip_tier_usd: f64,
+    /// Hedge budget floor scales with primary exposure: max(flip_tier_usd, primary * ratio).
+    #[serde(default = "j_default_flip_hedge_exposure_ratio")]
+    pub flip_hedge_exposure_ratio: f64,
+    #[serde(default = "j_default_flip_tier_max_usd")]
+    pub flip_tier_max_usd: f64,
+    #[serde(default = "j_default_flip_hedge_clip_usd")]
+    pub flip_hedge_clip_usd: f64,
     #[serde(default = "j_default_flip_sweep_clips")]
     pub flip_sweep_clips_per_tick: u8,
     #[serde(default = "j_default_flip_max_ask")]
     pub flip_max_ask: f64,
     #[serde(default)]
     pub flip_require_tape: bool,
+    /// Enable selling the primary leg when the thesis breaks and bid salvage beats holding loser to $0.
+    #[serde(default = "j_default_true")]
+    pub sell_rescue_enabled: bool,
+    #[serde(default = "j_default_sell_rescue_min_bid")]
+    pub sell_rescue_min_bid: f64,
+    #[serde(default = "j_default_sell_rescue_min_gap_z")]
+    pub sell_rescue_min_gap_z: f64,
+    #[serde(default = "j_default_sell_rescue_min_value_usd")]
+    pub sell_rescue_min_value_usd: f64,
+    #[serde(default = "j_default_sell_rescue_min_improvement_usd")]
+    pub sell_rescue_min_improvement_usd: f64,
+    #[serde(default = "j_default_sell_rescue_fraction")]
+    pub sell_rescue_fraction: f64,
+    #[serde(default)]
+    pub sell_rescue_use_market: bool,
+    #[serde(default = "j_default_sell_rescue_market_secs")]
+    pub sell_rescue_market_secs: i64,
     /// Skip value/late/impulse when |spot-ptb|/ptb * 100 is below this (e.g. 0.05 = 0.05%).
     #[serde(default = "j_default_min_ptb_dist_pct")]
     pub min_ptb_dist_pct: f64,
@@ -388,11 +412,38 @@ fn j_default_flip_min_gap_z() -> f64 {
 fn j_default_flip_tier_usd() -> f64 {
     12.0
 }
+fn j_default_flip_hedge_exposure_ratio() -> f64 {
+    0.45
+}
+fn j_default_flip_tier_max_usd() -> f64 {
+    45.0
+}
+fn j_default_flip_hedge_clip_usd() -> f64 {
+    15.0
+}
 fn j_default_flip_sweep_clips() -> u8 {
     4
 }
 fn j_default_flip_max_ask() -> f64 {
     0.97
+}
+fn j_default_sell_rescue_min_bid() -> f64 {
+    0.20
+}
+fn j_default_sell_rescue_min_gap_z() -> f64 {
+    0.65
+}
+fn j_default_sell_rescue_min_value_usd() -> f64 {
+    1.0
+}
+fn j_default_sell_rescue_min_improvement_usd() -> f64 {
+    1.0
+}
+fn j_default_sell_rescue_fraction() -> f64 {
+    1.0
+}
+fn j_default_sell_rescue_market_secs() -> i64 {
+    5
 }
 fn j_default_false() -> bool {
     false
@@ -548,9 +599,20 @@ impl Default for JEndgameConfig {
             flip_min_crosses: j_default_flip_min_crosses(),
             flip_min_gap_z: j_default_flip_min_gap_z(),
             flip_tier_usd: j_default_flip_tier_usd(),
+            flip_hedge_exposure_ratio: j_default_flip_hedge_exposure_ratio(),
+            flip_tier_max_usd: j_default_flip_tier_max_usd(),
+            flip_hedge_clip_usd: j_default_flip_hedge_clip_usd(),
             flip_sweep_clips_per_tick: j_default_flip_sweep_clips(),
             flip_max_ask: j_default_flip_max_ask(),
             flip_require_tape: j_default_false(),
+            sell_rescue_enabled: j_default_true(),
+            sell_rescue_min_bid: j_default_sell_rescue_min_bid(),
+            sell_rescue_min_gap_z: j_default_sell_rescue_min_gap_z(),
+            sell_rescue_min_value_usd: j_default_sell_rescue_min_value_usd(),
+            sell_rescue_min_improvement_usd: j_default_sell_rescue_min_improvement_usd(),
+            sell_rescue_fraction: j_default_sell_rescue_fraction(),
+            sell_rescue_use_market: false,
+            sell_rescue_market_secs: j_default_sell_rescue_market_secs(),
             min_ptb_dist_pct: j_default_min_ptb_dist_pct(),
             max_sig_crosses_directional: j_default_max_sig_crosses_directional(),
             max_crosses_directional: j_default_max_crosses_directional(),

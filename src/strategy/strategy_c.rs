@@ -132,6 +132,7 @@ impl TradeStrategy for DynamicBreakEvenStrategy {
                 signals.push(OrderSignal {
                     side: "UP".to_string(),
                     is_buy: false,
+                    order_type: crate::strategy::OrderType::Market,
                     amount: win_state.up_shares,
                     price: up_bid,
                     reason: "emergency_15pct_time_stop_bid_ge_0.20".to_string(),
@@ -142,6 +143,7 @@ impl TradeStrategy for DynamicBreakEvenStrategy {
                 signals.push(OrderSignal {
                     side: "DOWN".to_string(),
                     is_buy: false,
+                    order_type: crate::strategy::OrderType::Market,
                     amount: win_state.down_shares,
                     price: dn_bid,
                     reason: "emergency_15pct_time_stop_bid_ge_0.20".to_string(),
@@ -157,6 +159,7 @@ impl TradeStrategy for DynamicBreakEvenStrategy {
                 signals.push(OrderSignal {
                     side: "UP".to_string(),
                     is_buy: false,
+                    order_type: crate::strategy::OrderType::Market,
                     amount: win_state.up_shares,
                     price: up_bid,
                     reason: format!("strategy_first_side_exit_{}", target_bid),
@@ -167,6 +170,7 @@ impl TradeStrategy for DynamicBreakEvenStrategy {
                 signals.push(OrderSignal {
                     side: "DOWN".to_string(),
                     is_buy: false,
+                    order_type: crate::strategy::OrderType::Market,
                     amount: win_state.down_shares,
                     price: dn_bid,
                     reason: format!("strategy_first_side_exit_{}", target_bid),
@@ -248,6 +252,7 @@ impl TradeStrategy for DynamicBreakEvenStrategy {
                         signals.push(OrderSignal {
                             side: second_side.to_string(),
                             is_buy: false,
+                            order_type: crate::strategy::OrderType::Market,
                             amount: second_shares,
                             price: second_bid,
                             reason: format!("dynamic_breakeven_exit_bid_ge_{:.2}", min_safe_price),

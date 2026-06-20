@@ -61,11 +61,7 @@ impl TradeTapeTracker {
 
     fn prune(tape: &mut SideTape, now_ms: i64, window_ms: i64) {
         let cutoff = now_ms - window_ms;
-        while tape
-            .prints
-            .front()
-            .is_some_and(|p| p.ts_ms < cutoff)
-        {
+        while tape.prints.front().is_some_and(|p| p.ts_ms < cutoff) {
             tape.prints.pop_front();
         }
     }

@@ -20,9 +20,27 @@ use crate::trader::WindowState;
 pub const LEGACY_CHEAPER_SIDE_RATIO: f64 = 0.60;
 
 #[derive(Debug, Clone)]
+pub enum OrderType {
+    Market,
+    Limit,
+}
+
+impl OrderType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Market => "market",
+            Self::Limit => "limit",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct OrderSignal {
     pub side: String,
     pub is_buy: bool,
+    /// Execution intent for live mode. Paper still fills immediately, but logs
+    /// must preserve maker/taker intent because fees differ on Polymarket.
+    pub order_type: OrderType,
     pub amount: f64,
     pub price: f64,
     pub reason: String,
@@ -111,6 +129,14 @@ pub trait TradeStrategy {
 
     /// J endgame: cash left in portfolio (caps rescue/seal sizing).
     fn set_runtime_cash(&mut self, _cash: f64) {}
+
+    /// J endgame: window skipped due to chop snapshot at endgame open.
+    fn j_directional_blocked(&self, _window_number: usize) -> bool {
+        false
+    }
+
+    /// Called after a signal is executed (or attempted) in the portfolio.
+    fn notify_order_executed(&mut self, _window_number: usize, _signal: &OrderSignal) {}
 }
 
 // ─── ДИСПЕТЧЕР СТРАТЕГИЙ / STRATBOX (StrategyEngine) ───
@@ -199,5 +225,14 @@ impl StrategyEngine {
 
     pub fn get_strategy_state(&self, window_number: usize) -> Option<StrategyState> {
         self.active_strategy.get_strategy_state(window_number)
+    }
+
+    pub fn j_directional_blocked(&self, window_number: usize) -> bool {
+        self.active_strategy.j_directional_blocked(window_number)
+    }
+
+    pub fn notify_order_executed(&mut self, window_number: usize, signal: &OrderSignal) {
+        self.active_strategy
+            .notify_order_executed(window_number, signal);
     }
 }

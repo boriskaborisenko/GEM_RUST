@@ -536,6 +536,7 @@ impl TradeStrategy for ConvictionRouterStrategy {
                     signals.push(OrderSignal {
                         side: side.to_string(),
                         is_buy: false,
+                        order_type: crate::strategy::OrderType::Market,
                         amount: shares,
                         price: bid,
                         reason: if itm {
@@ -644,6 +645,7 @@ impl TradeStrategy for ConvictionRouterStrategy {
                             signals.push(OrderSignal {
                                 side: side.to_string(),
                                 is_buy: true,
+                                order_type: crate::strategy::OrderType::Market,
                                 amount: tranche_usd,
                                 price: ask,
                                 reason: format!(
@@ -690,6 +692,7 @@ impl TradeStrategy for ConvictionRouterStrategy {
                 signals.push(OrderSignal {
                     side: conviction.clone(),
                     is_buy: false,
+                    order_type: crate::strategy::OrderType::Market,
                     amount: sell,
                     price: bid,
                     reason: format!("e_ptb_cross_trim_bid_{:.2}", bid),
@@ -733,6 +736,7 @@ impl TradeStrategy for ConvictionRouterStrategy {
                 signals.push(OrderSignal {
                     side: opposite.to_string(),
                     is_buy: true,
+                    order_type: crate::strategy::OrderType::Market,
                     amount: hedge_usd,
                     price: opp_ask,
                     reason: format!("e_hedge_pair_{:.2}_spot_otm", pair_cost),
@@ -741,8 +745,7 @@ impl TradeStrategy for ConvictionRouterStrategy {
             }
         }
 
-        let entry_ask =
-            side_entry_avg_price(&conviction, win_state, side_ask(&conviction, prices));
+        let entry_ask = side_entry_avg_price(&conviction, win_state, side_ask(&conviction, prices));
         let edge = bid - fair_conv;
         if edge >= 0.04 {
             let step = state.sell_steps_done;
@@ -754,6 +757,7 @@ impl TradeStrategy for ConvictionRouterStrategy {
                         signals.push(OrderSignal {
                             side: conviction.clone(),
                             is_buy: false,
+                            order_type: crate::strategy::OrderType::Market,
                             amount: sell,
                             price: bid,
                             reason: format!(
@@ -770,12 +774,12 @@ impl TradeStrategy for ConvictionRouterStrategy {
             } else if state.last_grid_target > 0.0 {
                 let target = (state.last_grid_target + E_GRID_EXTEND_DELTA).clamp(0.05, 0.98);
                 if bid >= target {
-                    let sell =
-                        capped_grid_sell(conv_shares, E_GRID_EXTEND_FRACTION, time_pct);
+                    let sell = capped_grid_sell(conv_shares, E_GRID_EXTEND_FRACTION, time_pct);
                     if sell >= E_SELL_MIN_SHARES && sell <= conv_shares {
                         signals.push(OrderSignal {
                             side: conviction.clone(),
                             is_buy: false,
+                            order_type: crate::strategy::OrderType::Market,
                             amount: sell,
                             price: bid,
                             reason: format!(

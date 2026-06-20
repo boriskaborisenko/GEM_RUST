@@ -9,11 +9,7 @@ pub struct HCloseStats {
     pub exit_price: Option<f64>,
 }
 
-pub fn derive_h_close_stats(
-    trades: &[TradeRecord],
-    entry_side: &str,
-    winner: &str,
-) -> HCloseStats {
+pub fn derive_h_close_stats(trades: &[TradeRecord], entry_side: &str, winner: &str) -> HCloseStats {
     if entry_side.is_empty() {
         return HCloseStats::default();
     }
@@ -31,9 +27,10 @@ pub fn derive_h_close_stats(
     let exit_price = if salvaged {
         salvage_sell.map(|t| t.price)
     } else {
-        trades.iter().find(|t| {
-            t.trade_type == "REDEEM" && t.side == entry_side && t.shares > 0.0
-        }).map(|t| t.price)
+        trades
+            .iter()
+            .find(|t| t.trade_type == "REDEEM" && t.side == entry_side && t.shares > 0.0)
+            .map(|t| t.price)
     };
 
     let salvage_win = match (entry_price, exit_price) {
@@ -91,9 +88,7 @@ pub fn log_h_window_close(
         pnl,
         entry_side,
         real_winner_side,
-        h.market_win
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
+        h.market_win.map(|v| v.to_string()).unwrap_or_default(),
         h.salvaged,
         h.salvage_win,
         h.entry_price
@@ -128,12 +123,7 @@ pub fn format_h_session_line(
     };
     format!(
         "H Extra: Market {}/{} ({:.0}%) | Salvaged {}/{} profitable exit ({:.0}%)",
-        market_wins,
-        market_total,
-        market_wr,
-        salvage_wins,
-        salvage_escapes,
-        salvage_wr
+        market_wins, market_total, market_wr, salvage_wins, salvage_escapes, salvage_wr
     )
 }
 
@@ -169,11 +159,7 @@ mod tests {
 
     #[test]
     fn salvage_profit_counts_as_salvage_win() {
-        let s = derive_h_close_stats(
-            &[buy("DOWN", 0.40), salvage("DOWN", 0.41)],
-            "DOWN",
-            "UP",
-        );
+        let s = derive_h_close_stats(&[buy("DOWN", 0.40), salvage("DOWN", 0.41)], "DOWN", "UP");
         assert_eq!(s.market_win, Some(false));
         assert!(s.salvaged);
         assert!(s.salvage_win);
@@ -181,11 +167,7 @@ mod tests {
 
     #[test]
     fn salvage_loss_not_salvage_win() {
-        let s = derive_h_close_stats(
-            &[buy("UP", 0.40), salvage("UP", 0.39)],
-            "UP",
-            "UP",
-        );
+        let s = derive_h_close_stats(&[buy("UP", 0.40), salvage("UP", 0.39)], "UP", "UP");
         assert_eq!(s.market_win, Some(true));
         assert!(s.salvaged);
         assert!(!s.salvage_win);
@@ -193,11 +175,7 @@ mod tests {
 
     #[test]
     fn redeem_hold_no_salvage() {
-        let s = derive_h_close_stats(
-            &[buy("DOWN", 0.40)],
-            "DOWN",
-            "DOWN",
-        );
+        let s = derive_h_close_stats(&[buy("DOWN", 0.40)], "DOWN", "DOWN");
         assert!(!s.salvaged);
         assert!(!s.salvage_win);
     }

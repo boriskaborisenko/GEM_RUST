@@ -653,6 +653,7 @@ fn live_conviction_entry_signal(
     Some(OrderSignal {
         side: entry_side.to_string(),
         is_buy: true,
+        order_type: crate::strategy::OrderType::Market,
         amount: budget,
         price: ask,
         reason: format!(
@@ -948,6 +949,7 @@ impl TradeStrategy for DynamicGridD1Strategy {
                         signals.push(OrderSignal {
                             side: opposite_side.to_string(),
                             is_buy: true,
+                            order_type: crate::strategy::OrderType::Market,
                             amount: buy_usd,
                             price: opposite_ask,
                             reason: format!(
@@ -990,6 +992,7 @@ impl TradeStrategy for DynamicGridD1Strategy {
                         signals.push(OrderSignal {
                             side: opposite_side.to_string(),
                             is_buy: true,
+                            order_type: crate::strategy::OrderType::Market,
                             amount: buy_usd,
                             price: opposite_ask,
                             reason: format!(
@@ -1045,6 +1048,7 @@ impl TradeStrategy for DynamicGridD1Strategy {
                 signals.push(OrderSignal {
                     side: side.to_string(),
                     is_buy: false,
+                    order_type: crate::strategy::OrderType::Market,
                     amount: surplus_shares,
                     price: bid,
                     reason: format!(
@@ -1095,6 +1099,7 @@ impl TradeStrategy for DynamicGridD1Strategy {
                     signals.push(OrderSignal {
                         side: side.to_string(),
                         is_buy: false,
+                        order_type: crate::strategy::OrderType::Market,
                         amount: sell_amount,
                         price: bid,
                         reason: format!(

@@ -100,13 +100,13 @@ impl VolatilityManager {
         *self.current_atr.lock().unwrap() = calculated_atr;
         *self.bar_history.lock().unwrap() = history;
         self.mark_atr_fresh();
-        println!(
-            "[ATR {}] {} {} ATR(14): {:.4} USD",
-            self.asset, label, source, calculated_atr
-        );
+        // Do not println! here — stdout is owned by the full-screen dashboard.
     }
 
-    async fn fetch_rest_bars(client: &reqwest::Client, symbol: &str) -> Result<(&'static str, Vec<Bar>), DynError> {
+    async fn fetch_rest_bars(
+        client: &reqwest::Client,
+        symbol: &str,
+    ) -> Result<(&'static str, Vec<Bar>), DynError> {
         match Self::fetch_bybit_bars(client, symbol).await {
             Ok(bars) => Ok(("Bybit REST", bars)),
             Err(bybit_err) => {
@@ -146,7 +146,10 @@ impl VolatilityManager {
         Ok(())
     }
 
-    async fn fetch_bybit_bars(client: &reqwest::Client, symbol: &str) -> Result<Vec<Bar>, DynError> {
+    async fn fetch_bybit_bars(
+        client: &reqwest::Client,
+        symbol: &str,
+    ) -> Result<Vec<Bar>, DynError> {
         let url = format!(
             "https://api.bybit.com/v5/market/kline?category=linear&symbol={}&interval=1&limit=50",
             symbol
@@ -186,7 +189,10 @@ impl VolatilityManager {
         Ok(bars)
     }
 
-    async fn fetch_binance_bars(client: &reqwest::Client, symbol: &str) -> Result<Vec<Bar>, DynError> {
+    async fn fetch_binance_bars(
+        client: &reqwest::Client,
+        symbol: &str,
+    ) -> Result<Vec<Bar>, DynError> {
         let url = format!(
             "https://api.binance.com/api/v3/klines?symbol={}&interval=1m&limit=50",
             symbol
@@ -288,10 +294,7 @@ impl VolatilityManager {
 
                 let (mut write, mut read) = ws_stream.split();
 
-                let subscribe_msg = format!(
-                    r#"{{"op": "subscribe", "args": ["{}"]}}"#,
-                    ws_topic
-                );
+                let subscribe_msg = format!(r#"{{"op": "subscribe", "args": ["{}"]}}"#, ws_topic);
                 if let Err(e) = write.send(Message::Text(subscribe_msg.into())).await {
                     eprintln!("[ATR {}] Ошибка отправки подписки: {}", symbol, e);
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -318,8 +321,7 @@ impl VolatilityManager {
                                             let new_bar = Bar { high, low, close };
 
                                             let new_atr = {
-                                                let mut history =
-                                                    bar_history_clone.lock().unwrap();
+                                                let mut history = bar_history_clone.lock().unwrap();
                                                 Self::calculate_next_atr(&mut history, new_bar)
                                             };
 
@@ -327,10 +329,6 @@ impl VolatilityManager {
                                                 *current_atr_clone.lock().unwrap() = new_atr;
                                                 *last_atr_tick_clone.lock().unwrap() =
                                                     Some(Instant::now());
-                                                println!(
-                                                    "[ATR {}] WS ATR(14): {:.4} USD",
-                                                    asset, new_atr
-                                                );
                                             }
                                         }
                                     }

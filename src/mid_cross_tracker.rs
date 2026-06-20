@@ -343,17 +343,18 @@ mod tests {
     fn arms_at_eight_percent_with_init_event() {
         let mut tracker = MidCrossTracker::new();
         let market = test_market();
-        let event = tracker.observe_tick(
-            1,
-            &market,
-            &prices(0.62, 0.64, 0.36, 0.38),
-            828,
-            42.5,
-            Some(100_000.0),
-            SpotSignalSnapshot::default(),
-            0,
-        )
-        .expect("armed_init");
+        let event = tracker
+            .observe_tick(
+                1,
+                &market,
+                &prices(0.62, 0.64, 0.36, 0.38),
+                828,
+                42.5,
+                Some(100_000.0),
+                SpotSignalSnapshot::default(),
+                0,
+            )
+            .expect("armed_init");
         assert_eq!(event.event, "armed_init");
         assert_eq!(event.to_side, LeadSide::Up);
         assert_eq!(event.cross_count, 0);

@@ -69,7 +69,11 @@ pub fn sort_asks(mut levels: Vec<BookLevel>) -> Vec<BookLevel> {
 }
 
 /// Paper fill: limit buy up to `max_usd` when asks are at or below `limit_price`.
-pub fn simulate_limit_buy_fill(asks: &[BookLevel], limit_price: f64, max_usd: f64) -> Option<(f64, f64)> {
+pub fn simulate_limit_buy_fill(
+    asks: &[BookLevel],
+    limit_price: f64,
+    max_usd: f64,
+) -> Option<(f64, f64)> {
     if limit_price <= 0.0 || max_usd <= 0.0 {
         return None;
     }
@@ -125,7 +129,11 @@ pub fn ask_depth_usd(asks: &[BookLevel], max_pay: f64) -> f64 {
 }
 
 /// Paper: remove filled size from ask levels after a simulated buy.
-pub fn apply_fill_to_asks(asks: &mut Vec<BookLevel>, max_pay: f64, clip_usd: f64) -> Option<(f64, f64)> {
+pub fn apply_fill_to_asks(
+    asks: &mut Vec<BookLevel>,
+    max_pay: f64,
+    clip_usd: f64,
+) -> Option<(f64, f64)> {
     let fill = simulate_limit_buy_fill(asks, max_pay, clip_usd)?;
     let mut remaining_shares = fill.0;
     for level in asks.iter_mut() {

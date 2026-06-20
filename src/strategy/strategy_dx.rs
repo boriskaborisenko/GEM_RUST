@@ -543,16 +543,13 @@ fn primary_should_hold_for_redeem(
     }
 
     if recovered_cost
-        && (secs_to_end <= DX_PRIMARY_HOLD_REDEEM_SECONDS
-            || time_pct >= DX_MARKET_VERDICT_TIME_PCT)
+        && (secs_to_end <= DX_PRIMARY_HOLD_REDEEM_SECONDS || time_pct >= DX_MARKET_VERDICT_TIME_PCT)
         && primary_prob >= 0.70
         && primary_bid >= 0.70
     {
         return true;
     }
-    (time_pct >= 65.0 || secs_to_end <= 120)
-        && primary_bid >= 0.72
-        && primary_prob >= 0.58
+    (time_pct >= 65.0 || secs_to_end <= 120) && primary_bid >= 0.72 && primary_prob >= 0.58
 }
 
 fn primary_should_take_full_profit(
@@ -826,11 +823,7 @@ impl TradeStrategy for DynamicGridDxStrategy {
             {
                 return signals;
             }
-            if ask >= 0.62
-                && !market_verdict_entry
-                && spot_confirmations < 2
-                && !prob_confirms
-            {
+            if ask >= 0.62 && !market_verdict_entry && spot_confirmations < 2 && !prob_confirms {
                 return signals;
             }
 
@@ -855,6 +848,7 @@ impl TradeStrategy for DynamicGridDxStrategy {
             signals.push(OrderSignal {
                 side: entry_side.to_string(),
                 is_buy: true,
+                order_type: crate::strategy::OrderType::Market,
                 amount: budget,
                 price: ask,
                 reason: format!(
@@ -962,6 +956,7 @@ impl TradeStrategy for DynamicGridDxStrategy {
                 signals.push(OrderSignal {
                     side: hedge_side.to_string(),
                     is_buy: true,
+                    order_type: crate::strategy::OrderType::Market,
                     amount: buy_usd,
                     price: hedge_ask,
                     reason: format!(
@@ -997,6 +992,7 @@ impl TradeStrategy for DynamicGridDxStrategy {
                     signals.push(OrderSignal {
                         side: hedge_side.to_string(),
                         is_buy: false,
+                        order_type: crate::strategy::OrderType::Market,
                         amount: hedge_shares,
                         price: hedge_bid,
                         reason: format!(
@@ -1038,6 +1034,7 @@ impl TradeStrategy for DynamicGridDxStrategy {
                 signals.push(OrderSignal {
                     side: primary_side.to_string(),
                     is_buy: false,
+                    order_type: crate::strategy::OrderType::Market,
                     amount: primary_shares,
                     price: primary_bid,
                     reason: format!(
@@ -1097,7 +1094,13 @@ impl TradeStrategy for DynamicGridDxStrategy {
                 let sell_fraction = match current_step {
                     0 => 0.35,
                     1 => 0.25,
-                    _ => if primary_is_favorable { 0.25 } else { 1.0 },
+                    _ => {
+                        if primary_is_favorable {
+                            0.25
+                        } else {
+                            1.0
+                        }
+                    }
                 };
                 let mut sell_amount = (primary_shares * sell_fraction).min(primary_shares);
                 if surplus > DX_SELL_MIN_SHARES {
@@ -1117,6 +1120,7 @@ impl TradeStrategy for DynamicGridDxStrategy {
                     signals.push(OrderSignal {
                         side: primary_side.to_string(),
                         is_buy: false,
+                        order_type: crate::strategy::OrderType::Market,
                         amount: sell_amount,
                         price: primary_bid,
                         reason: format!(
@@ -1162,6 +1166,7 @@ impl TradeStrategy for DynamicGridDxStrategy {
                     signals.push(OrderSignal {
                         side: side.to_string(),
                         is_buy: false,
+                        order_type: crate::strategy::OrderType::Market,
                         amount: surplus,
                         price: bid,
                         reason: format!(

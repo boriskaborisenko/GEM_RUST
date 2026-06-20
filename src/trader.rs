@@ -544,9 +544,7 @@ impl Portfolio {
                 let (h_market_col, h_salvaged_col, h_salvage_win_col) =
                     if meta.strategy_name == "cheap_hold_h" {
                         (
-                            h.market_win
-                                .map(|v| v.to_string())
-                                .unwrap_or_default(),
+                            h.market_win.map(|v| v.to_string()).unwrap_or_default(),
                             h.salvaged.to_string(),
                             h.salvage_win.to_string(),
                         )

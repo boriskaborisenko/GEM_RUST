@@ -8,27 +8,27 @@
 
 mod analytics;
 mod asset_price;
+mod cex_micro;
 mod client;
 mod config;
 mod h_stats;
 mod j_controller;
 mod j_fees;
-mod orderbook;
 mod llm;
-mod cex_micro;
 mod mid_cross_tracker;
+mod orderbook;
 mod redeem_hold;
 mod strategy;
 mod trade_tape;
-mod window_stats;
 mod trader;
 mod volatility;
+mod window_stats;
 
 use asset_price::{format_asset_price, format_atr, ptb_implausible};
+use cex_micro::CexMicroManager;
 use client::{get_now_ms, MarketEvent, MarketWindow, PricesState};
 use config::Config;
 use llm::{LlmForecastRequest, LlmForecaster, LlmRecentWindowContext, LlmRecentWindowRow};
-use cex_micro::CexMicroManager;
 use mid_cross_tracker::{LeadSide, MidCrossEvent, MidCrossSnapshot, MidCrossTracker};
 use redeem_hold::{
     evaluate_redeem_hold, itm_gap_z, side_is_itm, RedeemHoldInput, REDEEM_HOLD_MIN_VALID_ATR,
@@ -79,6 +79,8 @@ struct AppState {
     ptb_locked_windows: HashSet<usize>,
     maintenance: MaintenanceStatus,
     maintenance_checked_window: Option<usize>,
+    /// Throttle background NEXT-market discovery when the feed is missing.
+    last_next_find_attempt_ms: i64,
 }
 
 /// Polymarket platform health, polled once per window start from the public
@@ -487,6 +489,7 @@ async fn main() -> anyhow::Result<()> {
         ptb_locked_windows: HashSet::new(),
         maintenance: MaintenanceStatus::default(),
         maintenance_checked_window: None,
+        last_next_find_attempt_ms: 0,
     };
 
     app_state
@@ -539,9 +542,7 @@ async fn main() -> anyhow::Result<()> {
             }
             if can_exit {
                 render_dashboard(&app_state);
-                app_state
-                    .window_stats
-                    .flush_to_csv(&app_state.run_log_dir);
+                app_state.window_stats.flush_to_csv(&app_state.run_log_dir);
                 if app_state.config.strategy == "cheap_hold_h" {
                     let p = app_state.portfolio.lock().unwrap();
                     h_stats::log_h_window_close(
@@ -695,7 +696,7 @@ async fn find_and_subscribe_next(
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(10)).await;
             tx.send(MarketEvent::Log(
-                "Triggering NEXT window retry...".to_string(),
+                "Scheduled NEXT window retry (monitor will re-search)".to_string(),
             ))
             .unwrap_or_default();
         });
@@ -879,13 +880,7 @@ fn run_j_endgame_live_tick(
     for sig in signals {
         if sig.is_buy {
             if port
-                .execute_buy(
-                    window_number,
-                    &sig.side,
-                    sig.amount,
-                    sig.price,
-                    &sig.reason,
-                )
+                .execute_buy(window_number, &sig.side, sig.amount, sig.price, &sig.reason)
                 .is_some()
             {
                 append_signal_event(
@@ -1398,6 +1393,15 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
             }
         }
     }
+
+    // Keep hunting for NEXT when the feed dropped or discovery failed earlier.
+    if app.next_window.is_none() {
+        let now = get_now_ms();
+        if now.saturating_sub(app.last_next_find_attempt_ms) >= 10_000 {
+            app.last_next_find_attempt_ms = now;
+            find_and_subscribe_next(app, event_tx).await;
+        }
+    }
 }
 
 /**
@@ -1484,7 +1488,8 @@ async fn promote_next_to_current(
         }
     }
 
-    let is_entered = next_win.status == "ENTERED_PRE_START";
+    // j_endgame trades in-window (endgame), not via pre-start entry — promote as LIVE.
+    let is_entered = next_win.status == "ENTERED_PRE_START" || app.config.strategy == "j_endgame";
     if is_entered {
         port.entered_windows += 1;
         app.system_logs.push(format!(
@@ -1530,8 +1535,7 @@ async fn promote_next_to_current(
         if let Some(curr) = app.current_window.as_ref() {
             let wn = curr.window_number;
             let locked = app.ptb_locked_windows.contains(&wn);
-            if let Some((ptb, msg)) =
-                evaluate_ptb_capture(locked, &curr.market, spot, get_now_ms())
+            if let Some((ptb, msg)) = evaluate_ptb_capture(locked, &curr.market, spot, get_now_ms())
             {
                 app.system_logs.push(msg);
                 app.ptb_locked_windows.insert(wn);
@@ -1695,10 +1699,7 @@ async fn process_event(
                             app.system_logs.push(format!(
                                 "[MID CROSS] #{} {}→{} {} ATR={:.1} @{:.1}%",
                                 mid_event.cross_count,
-                                mid_event
-                                    .from_side
-                                    .map(|s| s.as_str())
-                                    .unwrap_or("?"),
+                                mid_event.from_side.map(|s| s.as_str()).unwrap_or("?"),
                                 mid_event.to_side.as_str(),
                                 sig_label,
                                 mid_event.current_atr,
@@ -1775,6 +1776,9 @@ async fn process_event(
                             secs_to_end,
                             spot_signal,
                         );
+                        if executed {
+                            strat.notify_order_executed(window_number, &sig);
+                        }
                     }
 
                     // Sync local app state
@@ -1867,6 +1871,29 @@ async fn process_event(
 }
 
 /**
+ * Merge the live AppState window with portfolio (prices, PTB, status).
+ * After close the portfolio role is PAST but AppState still holds the window.
+ */
+fn resolve_display_window(
+    port: &Portfolio,
+    live: Option<&WindowState>,
+    role: &str,
+) -> Option<WindowState> {
+    let mut chosen = live
+        .cloned()
+        .or_else(|| port.windows.values().find(|w| w.role == role).cloned())?;
+    if let Some(pw) = port.windows.get(&chosen.window_number) {
+        chosen.prices = pw.prices.clone();
+        chosen.market = pw.market.clone();
+        chosen.status = pw.status.clone();
+        chosen.spent = pw.spent;
+        chosen.up_shares = pw.up_shares;
+        chosen.down_shares = pw.down_shares;
+    }
+    Some(chosen)
+}
+
+/**
  * ANSI Refreshing Dashboard UI.
  * Clears terminal and draws beautifully formatted, isolated stats and window tables!
  */
@@ -1955,6 +1982,15 @@ fn render_dashboard(app: &AppState) {
         paint(&atr_str, "yellow")
     );
 
+    let spot_header = match app.spot_price {
+        Some(px) if px > 0.0 => paint(
+            &format!("Chainlink Spot: {}", format_asset_price(&app.asset, px)),
+            "cyan",
+        ),
+        _ => paint("Chainlink Spot: NO DATA (WS reconnecting...)", "red"),
+    };
+    println!("  {}", spot_header);
+
     let total_windows = p.entered_windows + p.skipped_windows;
     println!(
         "  Windows: Total {} | Entered {} | Closed {} | Open {} | Skipped {}",
@@ -2014,19 +2050,15 @@ fn render_dashboard(app: &AppState) {
         )
     );
 
-    // Direct reading from portfolio to ensure 100% synchronized, deadlock-free rendering
-    let mut current_window = None;
-    let mut next_window = None;
-    {
+    // Live window state lives in AppState; portfolio `role` becomes PAST after
+    // close — reading only port.windows by role leaves the dashboard blank.
+    let (current_window, next_window) = {
         let port = app.portfolio.lock().unwrap();
-        for win_state in port.windows.values() {
-            if win_state.role == "CURRENT" {
-                current_window = Some(win_state.clone());
-            } else if win_state.role == "NEXT" {
-                next_window = Some(win_state.clone());
-            }
-        }
-    }
+        (
+            resolve_display_window(&port, app.current_window.as_ref(), "CURRENT"),
+            resolve_display_window(&port, app.next_window.as_ref(), "NEXT"),
+        )
+    };
 
     let current_llm = current_window
         .as_ref()
@@ -2041,8 +2073,11 @@ fn render_dashboard(app: &AppState) {
     let cex_micro_snap = app.cex_micro_mgr.snapshot(app.spot_price);
     let now_ms = get_now_ms();
     let current_tape = current_window.as_ref().map(|win| {
-        app.trade_tape
-            .snapshot(win.window_number, now_ms, app.config.j_endgame.tape_window_ms)
+        app.trade_tape.snapshot(
+            win.window_number,
+            now_ms,
+            app.config.j_endgame.tape_window_ms,
+        )
     });
     let left_lines = render_window_block(
         &current_window,
@@ -2142,6 +2177,10 @@ fn render_window_block(
     let Some(win) = win_opt else {
         lines.push(format!("--- {} WINDOW ---", label_colored));
         lines.push(paint("Waiting for market stream...", "dim"));
+        lines.push(paint(
+            "  (searching Polymarket — check SYSTEM EVENT LOG below)",
+            "dim",
+        ));
         return lines;
     };
 
@@ -2170,11 +2209,11 @@ fn render_window_block(
 
     let now = get_now_ms();
     let start_dt = chrono::DateTime::parse_from_rfc3339(&m.start_time)
-        .unwrap()
-        .timestamp_millis();
+        .map(|dt| dt.timestamp_millis())
+        .unwrap_or(now);
     let end_dt = chrono::DateTime::parse_from_rfc3339(&m.end_time)
-        .unwrap()
-        .timestamp_millis();
+        .map(|dt| dt.timestamp_millis())
+        .unwrap_or(now);
 
     if now < start_dt {
         let secs = (start_dt - now) / 1000;
@@ -2213,11 +2252,7 @@ fn render_window_block(
             let (tone, formatted) = if delta >= 0.0 {
                 (
                     "green",
-                    format!(
-                        "+{} (+{:.4}%)",
-                        format_asset_price(&m.asset, delta),
-                        pct
-                    ),
+                    format!("+{} (+{:.4}%)", format_asset_price(&m.asset, delta), pct),
                 )
             } else {
                 (
@@ -2263,13 +2298,16 @@ fn render_window_block(
         "Combined Ask:    {}",
         paint(&format!("{:.2}", UP.ask + DN.ask), "bold")
     ));
+    if UP.ask <= 0.0 && DN.ask <= 0.0 && UP.bid <= 0.0 && DN.bid <= 0.0 {
+        lines.push(paint(
+            "⚠ CLOB prices: NO DATA — waiting for orderbook WS / REST snapshot",
+            "yellow",
+        ));
+    }
     if label == "CURRENT" {
         if let Some(mc) = mid_cross {
             if mc.armed {
-                let leader = mc
-                    .current_side
-                    .map(|s| s.as_str())
-                    .unwrap_or("TIE");
+                let leader = mc.current_side.map(|s| s.as_str()).unwrap_or("TIE");
                 let leader_tone = match leader {
                     "UP" => "green",
                     "DOWN" => "red",
@@ -2282,11 +2320,9 @@ fn render_window_block(
                     mc.cross_count,
                     mc.significant_cross_count
                 ));
-                if let (Some(from), Some(to), Some(tpct)) = (
-                    mc.last_cross_from,
-                    mc.last_cross_to,
-                    mc.last_cross_time_pct,
-                ) {
+                if let (Some(from), Some(to), Some(tpct)) =
+                    (mc.last_cross_from, mc.last_cross_to, mc.last_cross_time_pct)
+                {
                     let sig = if mc.last_cross_is_significant {
                         paint("sig", "green")
                     } else {
@@ -2364,10 +2400,7 @@ fn render_window_block(
                     cex_velocity_against: cex_against,
                 });
                 if decision.should_hold {
-                    hold_parts.push(format!(
-                        "{} ITM z={:.2} ({})",
-                        side, gap_z, decision.reason
-                    ));
+                    hold_parts.push(format!("{} ITM z={:.2} ({})", side, gap_z, decision.reason));
                 }
             }
             if hold_parts.is_empty() {
@@ -2453,10 +2486,7 @@ fn render_window_block(
                 "dim",
             ));
         } else if let Some(strat) = strat_engine.get_strategy_state(win.window_number) {
-            let conviction = strat
-                .e_conviction_side
-                .as_deref()
-                .unwrap_or("N/A");
+            let conviction = strat.e_conviction_side.as_deref().unwrap_or("N/A");
             let conviction_tone = match conviction {
                 "UP" => "green",
                 "DOWN" => "red",
@@ -2487,8 +2517,7 @@ fn render_window_block(
                             Ok(end) => {
                                 let secs = (end.timestamp_millis() - now) / 1000;
                                 let duration_sec = window_duration_sec(m);
-                                let elapsed =
-                                    (duration_sec - secs as f64).clamp(0.0, duration_sec);
+                                let elapsed = (duration_sec - secs as f64).clamp(0.0, duration_sec);
                                 if duration_sec > 0.0 {
                                     (elapsed / duration_sec) * 100.0
                                 } else {
@@ -2504,10 +2533,7 @@ fn render_window_block(
                             .map(|cp| time_pct >= cp && time_pct <= cp + 10.0)
                             .unwrap_or(false);
                         let entry_gate = if mc.cross_count >= 5 && time_pct < 40.0 {
-                            paint(
-                                &format!("BLOCKED chop ({} crosses)", mc.cross_count),
-                                "red",
-                            )
+                            paint(&format!("BLOCKED chop ({} crosses)", mc.cross_count), "red")
                         } else if cross_window
                             && mc.lead_gap >= 0.14
                             && ((mc.current_side == Some(LeadSide::Up) && up_ask <= 0.58)
@@ -2536,10 +2562,7 @@ fn render_window_block(
                 }
             }
         } else if label == "NEXT" {
-            lines.push(paint(
-                "E: monitoring NEXT (live-only, no pre-entry)",
-                "dim",
-            ));
+            lines.push(paint("E: monitoring NEXT (live-only, no pre-entry)", "dim"));
         } else {
             lines.push(paint("E: live-only — waiting for conviction entry", "dim"));
         }
@@ -2611,45 +2634,49 @@ fn render_window_block(
                         j_endgame.target_profit_usd,
                         proj_pnl,
                     ));
-                    let plan = mid_cross.map(|mc| {
-                        let allow = strategy::strategy_j::directional_entry_allowed(
-                            j_endgame,
-                            0.0,
-                            current_atr.max(1.0),
-                            spot,
-                            ptb,
-                            mc,
-                        );
-                        let confidence = if winner == "TIE" {
-                            0.0
-                        } else {
-                            j_controller::endgame_confidence(
+                    let plan = mid_cross
+                        .map(|mc| {
+                            let chop_blocked =
+                                strat_engine.j_directional_blocked(win.window_number);
+                            let allow = strategy::strategy_j::directional_entry_allowed_external(
                                 j_endgame,
-                                winner,
-                                gz,
-                                &SpotSignalSnapshot::default(),
+                                chop_blocked,
+                                0.0,
+                                current_atr.max(1.0),
+                                spot,
+                                ptb,
+                            );
+                            let confidence = if winner == "TIE" {
+                                0.0
+                            } else {
+                                j_controller::endgame_confidence(
+                                    j_endgame,
+                                    winner,
+                                    gz,
+                                    &SpotSignalSnapshot::default(),
+                                    mc,
+                                    cex_micro.unwrap_or(&CexMicroSnapshot::default()),
+                                    tape.unwrap_or(&TradeTapeSnapshot::default()),
+                                )
+                            };
+                            j_controller::plan_j_window(
+                                config,
+                                &strategy::strategy_j::JWindowState::default(),
+                                win,
+                                &win.prices,
+                                spot,
+                                ptb,
+                                secs_to_end,
+                                elapsed,
+                                current_atr.max(1.0),
+                                0.0,
                                 mc,
-                                cex_micro.unwrap_or(&CexMicroSnapshot::default()),
-                                tape.unwrap_or(&TradeTapeSnapshot::default()),
+                                allow,
+                                confidence,
+                                available_cash,
                             )
-                        };
-                        j_controller::plan_j_window(
-                            config,
-                            &strategy::strategy_j::JWindowState::default(),
-                            win,
-                            &win.prices,
-                            spot,
-                            ptb,
-                            secs_to_end,
-                            elapsed,
-                            current_atr.max(1.0),
-                            0.0,
-                            mc,
-                            allow,
-                            confidence,
-                            available_cash,
-                        )
-                    }).flatten();
+                        })
+                        .flatten();
                     let flip_armed = mid_cross
                         .map(|mc| {
                             strategy::strategy_j::flip_hedge_armed_display(
@@ -2676,7 +2703,14 @@ fn render_window_block(
                         },
                         match plan {
                             Some(p) if p.tier == strategy::strategy_j::EndgameTier::Insurance => {
-                                paint(&format!("INSURANCE ≤{:.0}¢ | ${:.0} clip", j_endgame.insurance_max_ask * 100.0, j_endgame.insurance_clip_usd), "cyan")
+                                paint(
+                                    &format!(
+                                        "INSURANCE ≤{:.0}¢ | ${:.0} clip",
+                                        j_endgame.insurance_max_ask * 100.0,
+                                        j_endgame.insurance_clip_usd
+                                    ),
+                                    "cyan",
+                                )
                             }
                             Some(p) if p.tier == strategy::strategy_j::EndgameTier::Rescue => {
                                 paint("RESCUE solve → +$target", "red")
@@ -2685,13 +2719,35 @@ fn render_window_block(
                                 paint("FLIP HEDGE", "red")
                             }
                             Some(p) if p.tier == strategy::strategy_j::EndgameTier::Impulse => {
-                                paint(&format!("IMPULSE ≤{:.0}¢ + tape", j_endgame.impulse_max_ask * 100.0), "green")
+                                paint(
+                                    &format!(
+                                        "IMPULSE ≤{:.0}¢ + tape",
+                                        j_endgame.impulse_max_ask * 100.0
+                                    ),
+                                    "green",
+                                )
                             }
                             Some(p) if p.tier == strategy::strategy_j::EndgameTier::Cheap => {
-                                paint(&format!("VALUE ≤{:.0}¢ gap≥{:.1} | 2nd half max {} clips", j_endgame.cheap_max_ask * 100.0, j_endgame.cheap_min_gap_z, j_endgame.cheap_max_clips), "green")
+                                paint(
+                                    &format!(
+                                        "VALUE ≤{:.0}¢ gap≥{:.1} | 2nd half max {} clips",
+                                        j_endgame.cheap_max_ask * 100.0,
+                                        j_endgame.cheap_min_gap_z,
+                                        j_endgame.cheap_max_clips
+                                    ),
+                                    "green",
+                                )
                             }
                             Some(p) if p.tier == strategy::strategy_j::EndgameTier::Late => {
-                                paint(&format!("LATE ≤{:.0}¢ last {}s (heavy ≤{}s)", j_endgame.taker_max_ask * 100.0, j_endgame.late_max_secs, j_endgame.late_heavy_secs), "yellow")
+                                paint(
+                                    &format!(
+                                        "LATE ≤{:.0}¢ last {}s (heavy ≤{}s)",
+                                        j_endgame.taker_max_ask * 100.0,
+                                        j_endgame.late_max_secs,
+                                        j_endgame.late_heavy_secs
+                                    ),
+                                    "yellow",
+                                )
                             }
                             _ => paint("waiting", "dim"),
                         }
@@ -2702,7 +2758,11 @@ fn render_window_block(
                         let tape_ok = strategy::strategy_j::tape_hot(tape, winner, j_endgame);
                         lines.push(format!(
                             "J tape {}: ${:.0}/{} buys (5s) | need ${:.0}/{}",
-                            if tape_ok { paint("HOT", "green") } else { paint("cold", "dim") },
+                            if tape_ok {
+                                paint("HOT", "green")
+                            } else {
+                                paint("cold", "dim")
+                            },
                             tape_usd,
                             tape_n,
                             j_endgame.min_tape_usd,
@@ -2716,7 +2776,11 @@ fn render_window_block(
                             },
                             j_endgame.taker_max_ask,
                         );
-                        lines.push(format!("J ask depth (≤{:.0}¢): ${:.2}", j_endgame.taker_max_ask * 100.0, depth));
+                        lines.push(format!(
+                            "J ask depth (≤{:.0}¢): ${:.2}",
+                            j_endgame.taker_max_ask * 100.0,
+                            depth
+                        ));
                     }
                 }
             }
@@ -2795,8 +2859,8 @@ fn render_window_block(
                         gap_z, up_ask, dn_ask
                     ));
                     let entry_gate = if !strat.h_entry_done && time_pct <= 33.0 {
-                        let cheap_ok = strategy::strategy_h::pick_cheap_entry_side(&win.prices)
-                            .is_some();
+                        let cheap_ok =
+                            strategy::strategy_h::pick_cheap_entry_side(&win.prices).is_some();
                         let gap_ok = strategy::strategy_h::gap_z_allows_entry(gap_z);
                         if cheap_ok && gap_ok {
                             paint("READY cheap ~0.38 near PTB", "green")
@@ -2843,10 +2907,7 @@ fn render_window_block(
                 ));
             }
         } else if label == "NEXT" {
-            lines.push(paint(
-                "H: monitoring NEXT (live-only, no pre-entry)",
-                "dim",
-            ));
+            lines.push(paint("H: monitoring NEXT (live-only, no pre-entry)", "dim"));
         } else {
             lines.push(paint("H: live-only — waiting for cheap entry", "dim"));
         }
@@ -3182,13 +3243,14 @@ fn append_signal_event(
     append_csv_row(
         log_dir,
         "strategy_signals.csv",
-        "timestamp,window_id,slug,action,side,amount,amount_kind,signal_shares,signal_usd_value,price,reason,executed,current_atr,secs_to_end,time_pct,spot_price,spot_velocity_usd_per_sec,spot_smoothed_velocity_usd_per_sec,spot_acceleration_usd_per_sec2,ptb,ptb_delta_usd,ptb_delta_pct,up_bid,up_ask,down_bid,down_ask,up_shares,down_shares,paired_shares,spent,returned,terminal_floor,terminal_floor_gap,mtm,unrealized_pnl",
+        "timestamp,window_id,slug,action,order_type,side,amount,amount_kind,signal_shares,signal_usd_value,price,reason,executed,current_atr,secs_to_end,time_pct,spot_price,spot_velocity_usd_per_sec,spot_smoothed_velocity_usd_per_sec,spot_acceleration_usd_per_sec2,ptb,ptb_delta_usd,ptb_delta_pct,up_bid,up_ask,down_bid,down_ask,up_shares,down_shares,paired_shares,spent,returned,terminal_floor,terminal_floor_gap,mtm,unrealized_pnl",
         &format!(
-            "{},{},{},{},{},{:.8},{},{:.8},{:.4},{:.4},{},{},{:.4},{},{:.2},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.8},{:.8},{:.8},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
+            "{},{},{},{},{},{},{:.8},{},{:.8},{:.4},{:.4},{},{},{:.4},{},{:.2},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.8},{:.8},{:.8},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
             get_now_ms(),
             window_number,
             slug,
             if sig.is_buy { "BUY" } else { "SELL" },
+            sig.order_type.as_str(),
             sig.side,
             sig.amount,
             signal_amount_kind,
@@ -3243,11 +3305,7 @@ fn window_duration_sec(market: &MarketWindow) -> f64 {
     }
 }
 
-fn build_window_close_meta(
-    app: &AppState,
-    win: &WindowState,
-    secs_to_end: i64,
-) -> WindowCloseMeta {
+fn build_window_close_meta(app: &AppState, win: &WindowState, secs_to_end: i64) -> WindowCloseMeta {
     let duration_sec = window_duration_sec(&win.market);
     let elapsed_sec = (duration_sec - secs_to_end as f64).clamp(0.0, duration_sec);
     let time_pct_at_close = (elapsed_sec / duration_sec) * 100.0;
@@ -3256,8 +3314,10 @@ fn build_window_close_meta(
 
     let final_gap_z = match (app.spot_price, win.market.price_to_beat) {
         (Some(spot), Some(ptb)) if ptb > 0.0 => {
-            let expected =
-                redeem_hold::expected_move_usd(final_atr.max(REDEEM_HOLD_MIN_VALID_ATR), secs_to_end);
+            let expected = redeem_hold::expected_move_usd(
+                final_atr.max(REDEEM_HOLD_MIN_VALID_ATR),
+                secs_to_end,
+            );
             if expected > 0.0 {
                 Some((spot - ptb) / expected)
             } else {
@@ -3351,7 +3411,12 @@ fn close_window_tracked(
     let pnl;
     {
         let mut port = app.portfolio.lock().unwrap();
-        port.close_window(win.window_number, status, app.spot_price, Some(meta.clone()));
+        port.close_window(
+            win.window_number,
+            status,
+            app.spot_price,
+            Some(meta.clone()),
+        );
         pnl = port
             .windows
             .get(&win.window_number)
