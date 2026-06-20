@@ -71,6 +71,10 @@ pub struct PortfolioSnapshot {
     pub available_cash: f64,
     pub overall_realized_pnl: f64,
     pub equity: f64,
+    pub total_windows: u32,
+    pub traded_windows: u32,
+    pub open_traded_windows: u32,
+    pub no_trade_windows: u32,
     pub entered_windows: u32,
     pub closed_windows: u32,
     pub wins: u32,
@@ -155,12 +159,44 @@ impl Portfolio {
         );
     }
 
+    fn is_closed_or_skipped(status: &str) -> bool {
+        matches!(status, "CLOSED_TARGET" | "CLOSED_TIME" | "SKIPPED")
+    }
+
+    fn has_traded(win: &WindowState) -> bool {
+        win.spent > 1e-9 || win.trades.iter().any(|t| t.trade_type == "BUY")
+    }
+
+    fn dashboard_window_counts(&self) -> (u32, u32, u32, u32) {
+        let total = self.windows.len() as u32;
+        let mut traded = 0;
+        let mut open_traded = 0;
+
+        for win in self.windows.values() {
+            if Self::has_traded(win) {
+                traded += 1;
+                if !Self::is_closed_or_skipped(&win.status) {
+                    open_traded += 1;
+                }
+            }
+        }
+
+        let no_trade = total.saturating_sub(traded);
+        (total, traded, open_traded, no_trade)
+    }
+
     pub fn get_portfolio_snapshot(&self) -> PortfolioSnapshot {
+        let (total_windows, traded_windows, open_traded_windows, no_trade_windows) =
+            self.dashboard_window_counts();
         PortfolioSnapshot {
             starting_bank: self.starting_bank,
             available_cash: self.available_cash,
             overall_realized_pnl: self.overall_realized_pnl,
             equity: self.equity,
+            total_windows,
+            traded_windows,
+            open_traded_windows,
+            no_trade_windows,
             entered_windows: self.entered_windows,
             closed_windows: self.closed_windows,
             wins: self.wins,
@@ -612,5 +648,102 @@ impl Portfolio {
         }
 
         self.equity = equity;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::{ContractPrices, MarketWindow, TokenInfo, TokensMap};
+
+    fn sample_market(window_number: usize) -> MarketWindow {
+        MarketWindow {
+            id: format!("m{window_number}"),
+            slug: format!("btc-updown-5m-{window_number}"),
+            question: "test".to_string(),
+            asset: "BTC".to_string(),
+            interval: "5m".to_string(),
+            start_time: String::new(),
+            end_time: String::new(),
+            price_to_beat: Some(60_000.0),
+            tokens: TokensMap {
+                up: TokenInfo {
+                    token_id: format!("u{window_number}"),
+                    outcome_name: "Up".to_string(),
+                },
+                down: TokenInfo {
+                    token_id: format!("d{window_number}"),
+                    outcome_name: "Down".to_string(),
+                },
+            },
+        }
+    }
+
+    fn sample_prices() -> PricesState {
+        PricesState {
+            up: ContractPrices::top(0.49, 0.51),
+            down: ContractPrices::top(0.49, 0.51),
+        }
+    }
+
+    #[test]
+    fn dashboard_counts_traded_windows_not_lifecycle_promotions() {
+        let mut portfolio =
+            Portfolio::new_with_log_dir(500.0, "/tmp/gem_rust_dashboard_test".into());
+        portfolio.entered_windows = 19;
+        portfolio.closed_windows = 6;
+        portfolio.wins = 6;
+        portfolio.skipped_windows = 1;
+
+        for window_number in 0..20 {
+            let traded = (1..=6).contains(&window_number);
+            let status = if window_number == 19 {
+                "LIVE"
+            } else {
+                "CLOSED_TIME"
+            };
+            let trades = if traded {
+                vec![TradeRecord {
+                    timestamp: 1,
+                    trade_type: "BUY".to_string(),
+                    side: "UP".to_string(),
+                    reason: "test".to_string(),
+                    price: 0.9,
+                    shares: 8.88888889,
+                    usd_value: 8.0,
+                    available_cash_after: 492.0,
+                }]
+            } else {
+                vec![]
+            };
+            portfolio.windows.insert(
+                window_number,
+                WindowState {
+                    window_number,
+                    role: "PAST".to_string(),
+                    status: status.to_string(),
+                    market: sample_market(window_number),
+                    spent: if traded { 8.0 } else { 0.0 },
+                    cash_returned: if traded { 9.0 } else { 0.0 },
+                    up_shares: 0.0,
+                    down_shares: 0.0,
+                    initial_up_shares: 0.0,
+                    initial_down_shares: 0.0,
+                    trades,
+                    prices: sample_prices(),
+                },
+            );
+        }
+
+        let snapshot = portfolio.get_portfolio_snapshot();
+        assert_eq!(
+            snapshot.entered_windows, 19,
+            "raw lifecycle counter stays visible"
+        );
+        assert_eq!(snapshot.total_windows, 20);
+        assert_eq!(snapshot.traded_windows, 6);
+        assert_eq!(snapshot.closed_windows, 6);
+        assert_eq!(snapshot.open_traded_windows, 0);
+        assert_eq!(snapshot.no_trade_windows, 14);
     }
 }

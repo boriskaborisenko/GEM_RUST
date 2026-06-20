@@ -90,10 +90,11 @@ Function: `plan_endgame_composite()`.
 ```
 enter         = effective_conf_enter(ask, gap_z)   // lower for cheap ask / safe gap
 eff           = ramp(confidence, enter, 1.0)
-conf_target      = eff × maxRescueUsd              // up to $75
+tail_cap      = tail_cut_exposure_cap_usd(ask)     // lower cap for expensive asks
+conf_target      = min(eff × maxRescueUsd, tail_cap)
 profit_increment = USD still needed for redeem PnL ≥ targetProfitUsd
                    (only when exposure already exists — not on a blank window)
-target           = min(max(conf_target, rescue_spent_usd + profit_increment), maxRescueUsd)
+target           = min(max(conf_target, rescue_spent_usd + profit_increment), tail_cap)
 increment        = target − rescue_spent_usd
 clip          = increment capped by effective_max_clip
 ```
@@ -117,6 +118,20 @@ Fresh entry is **blocked** when:
 - `|gap_z| < expensiveMinGapZ` (1.35)
 
 Protects against coin-flip entries @ 95–99¢.
+
+### Tail-cut exposure caps
+
+Primary winner buys are now hard-capped by winner ask:
+
+| Winner ask | Max primary exposure |
+|------------|----------------------|
+| `<= 0.70` | `tailCapAsk70Usd` ($75) |
+| `<= 0.88` | `tailCapAsk88Usd` ($55) |
+| `<= 0.94` | `tailCapAsk94Usd` ($32) |
+| `<= 0.97` | `tailCapAsk97Usd` ($14) |
+| `> 0.97` | no fresh primary buy |
+
+Fresh directional buys also pause for `freshCrossFreezeSecs` after a mid-price side cross. This freeze does not block sell-rescue or flip hedge.
 
 ---
 
@@ -170,6 +185,11 @@ Key fields (current defaults):
     "expensiveAskThreshold": 0.94,
     "expensiveMinGapZ": 1.35,
     "abortRescueIfAskAbove": 0.97,
+    "tailCapAsk70Usd": 75.0,
+    "tailCapAsk88Usd": 55.0,
+    "tailCapAsk94Usd": 32.0,
+    "tailCapAsk97Usd": 14.0,
+    "freshCrossFreezeSecs": 8,
     "confEnter": 0.58,
     "fullSizeGapZ": 1.8,
     "finalSealMinGapZ": 0.8,
@@ -179,6 +199,7 @@ Key fields (current defaults):
     "takerMode": true,
     "takerMaxAsk": 0.99,
     "maxSigCrossesDirectional": 3,
+    "maxCrossesDirectional": 6,
     "minPtbDistPct": 0.05
   }
 }

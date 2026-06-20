@@ -235,6 +235,20 @@ pub struct JEndgameConfig {
     pub max_rescue_usd: f64,
     #[serde(default = "j_default_abort_rescue_if_ask_above")]
     pub abort_rescue_if_ask_above: f64,
+    /// Price-tier exposure caps for primary winner buys. These trim loss tails:
+    /// the more expensive the winner ask, the less USD J may deploy.
+    #[serde(default = "j_default_tail_cap_ask70_usd")]
+    pub tail_cap_ask70_usd: f64,
+    #[serde(default = "j_default_tail_cap_ask88_usd")]
+    pub tail_cap_ask88_usd: f64,
+    #[serde(default = "j_default_tail_cap_ask94_usd")]
+    pub tail_cap_ask94_usd: f64,
+    #[serde(default = "j_default_tail_cap_ask97_usd")]
+    pub tail_cap_ask97_usd: f64,
+    /// Temporarily freeze fresh directional buys after a mid-price side cross.
+    /// Flip hedge and sell-rescue are still allowed.
+    #[serde(default = "j_default_fresh_cross_freeze_secs")]
+    pub fresh_cross_freeze_secs: i64,
     #[serde(default = "j_default_true")]
     pub insurance_enabled: bool,
     #[serde(default = "j_default_insurance_max_elapsed_pct")]
@@ -472,6 +486,21 @@ fn j_default_max_rescue_usd() -> f64 {
 fn j_default_abort_rescue_if_ask_above() -> f64 {
     0.995
 }
+fn j_default_tail_cap_ask70_usd() -> f64 {
+    75.0
+}
+fn j_default_tail_cap_ask88_usd() -> f64 {
+    55.0
+}
+fn j_default_tail_cap_ask94_usd() -> f64 {
+    32.0
+}
+fn j_default_tail_cap_ask97_usd() -> f64 {
+    14.0
+}
+fn j_default_fresh_cross_freeze_secs() -> i64 {
+    8
+}
 fn j_default_insurance_max_elapsed_pct() -> f64 {
     30.0
 }
@@ -621,6 +650,11 @@ impl Default for JEndgameConfig {
             rescue_zone_secs: j_default_rescue_zone_secs(),
             max_rescue_usd: j_default_max_rescue_usd(),
             abort_rescue_if_ask_above: j_default_abort_rescue_if_ask_above(),
+            tail_cap_ask70_usd: j_default_tail_cap_ask70_usd(),
+            tail_cap_ask88_usd: j_default_tail_cap_ask88_usd(),
+            tail_cap_ask94_usd: j_default_tail_cap_ask94_usd(),
+            tail_cap_ask97_usd: j_default_tail_cap_ask97_usd(),
+            fresh_cross_freeze_secs: j_default_fresh_cross_freeze_secs(),
             insurance_enabled: j_default_insurance_enabled(),
             insurance_max_elapsed_pct: j_default_insurance_max_elapsed_pct(),
             insurance_max_ask: j_default_insurance_max_ask(),

@@ -1972,7 +1972,6 @@ fn render_dashboard(app: &AppState) {
 
     let runtime = format_runtime(get_now_ms() - app.started_at);
     let settled_windows = p.wins + p.losses;
-    let open_windows = p.entered_windows.saturating_sub(p.closed_windows);
     let win_pct = if settled_windows > 0 {
         (p.wins as f64 / settled_windows as f64) * 100.0
     } else {
@@ -2008,14 +2007,13 @@ fn render_dashboard(app: &AppState) {
     };
     println!("  {}", spot_header);
 
-    let total_windows = p.entered_windows + p.skipped_windows;
     println!(
-        "  Windows: Total {} | Entered {} | Closed {} | Open {} | Skipped {}",
-        paint(&total_windows.to_string(), "bold"),
-        paint(&p.entered_windows.to_string(), "cyan"),
+        "  Windows: Total {} | Traded {} | Closed {} | Open Pos {} | No Trade {}",
+        paint(&p.total_windows.to_string(), "bold"),
+        paint(&p.traded_windows.to_string(), "cyan"),
         paint(&p.closed_windows.to_string(), "green"),
-        paint(&open_windows.to_string(), "yellow"),
-        paint(&p.skipped_windows.to_string(), "yellow")
+        paint(&p.open_traded_windows.to_string(), "yellow"),
+        paint(&p.no_trade_windows.to_string(), "yellow")
     );
     println!(
         "  Results (closed only): Wins {} ({:.1}%) | Losses {} ({:.1}%)",

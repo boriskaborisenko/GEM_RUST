@@ -24,6 +24,8 @@ Primary diagnosis from the code review:
 - [x] Keep `sell_rescue_done` false until a sell is actually executed.
 - [x] Add a live chop/chaos breaker: if mid-cross counts become too noisy after endgame open, block new directional composite buys while still allowing sell-rescue / flip-hedge.
 - [x] Enforce rescue impossibility / expensive-ask guard so the bot does not chase target profit at 97-99c when the math cannot reach target inside caps.
+- [x] Add price-tier tail caps for primary winner exposure and block fresh primary entries above 97c.
+- [x] Add a temporary fresh-cross freeze for directional composite buys after mid-price side crosses; sell-rescue and flip-hedge remain allowed.
 
 ## P1 Follow-Ups
 
@@ -34,8 +36,8 @@ Primary diagnosis from the code review:
 
 ## Validation
 
-- [x] `cargo test -q` — 77 passed, 1 ignored on 2026-06-20.
-- [x] Add targeted tests for: post-signal state does not mutate before execution, late chaos blocks new composite buys, expensive rescue guard.
+- [x] `cargo test -q` — 80 passed, 1 ignored on 2026-06-20.
+- [x] Add targeted tests for: post-signal state does not mutate before execution, late chaos blocks new composite buys, expensive rescue guard, tail caps, fresh-cross freeze.
 - [ ] Add an integration-style test for the trade-print SELL execution path.
 
 ## 2026-06-20 Implementation Notes
@@ -45,3 +47,6 @@ Primary diagnosis from the code review:
 - Added late live chop blocking on top of the endgame-open snapshot.
 - Changed the composite planner to abort impossible target-rescue attempts instead of spending capped capital into an unreachable target.
 - Lowered active `config.json` `abortRescueIfAskAbove` to `0.97`.
+- Added `tailCapAsk70Usd` / `tailCapAsk88Usd` / `tailCapAsk94Usd` / `tailCapAsk97Usd` so expensive winner asks cannot grow into large loss tails.
+- Added `freshCrossFreezeSecs` and lowered active `maxCrossesDirectional` to `6` to reduce adds immediately after fresh PTB/mid-lead churn.
+- Fixed dashboard window counters: the header now reports real traded/open-position/no-trade counts instead of lifecycle promotions as entries.

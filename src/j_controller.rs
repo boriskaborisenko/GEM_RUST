@@ -306,6 +306,27 @@ fn has_deployed_exposure(win_state: &WindowState) -> bool {
     win_state.spent > 1e-9 || win_state.up_shares > 1e-9 || win_state.down_shares > 1e-9
 }
 
+/// Hard cap for primary winner exposure by current ask. Old J worked best when
+/// it stayed simple and avoided huge late-cost entries; this keeps that shape
+/// while making the expensive tail explicit and testable.
+pub fn tail_cut_exposure_cap_usd(cfg: &JEndgameConfig, ask: f64) -> f64 {
+    if !ask.is_finite() || ask <= 0.0 {
+        return 0.0;
+    }
+    let cap = if ask <= 0.70 {
+        cfg.tail_cap_ask70_usd
+    } else if ask <= 0.88 {
+        cfg.tail_cap_ask88_usd
+    } else if ask <= 0.94 {
+        cfg.tail_cap_ask94_usd
+    } else if ask <= 0.97 {
+        cfg.tail_cap_ask97_usd
+    } else {
+        0.0
+    };
+    cap.max(0.0)
+}
+
 /// Per-tick clip cap: probe on first buy, then ramp with gap_z, time, and ask cheapness.
 fn effective_max_clip_usd(
     cfg: &JEndgameConfig,
@@ -362,6 +383,10 @@ pub fn plan_endgame_composite(
         return None;
     }
     let fee_bps = cfg.fee_rate_bps.unwrap_or(DEFAULT_CRYPTO_FEE_RATE_BPS);
+    let exposure_cap = tail_cut_exposure_cap_usd(cfg, ask).min(cfg.max_rescue_usd);
+    if exposure_cap <= 1e-9 || state.rescue_spent_usd + 1e-9 >= exposure_cap {
+        return None;
+    }
     let mut eff = ramp(confidence, enter, 1.0);
     // Safe gap at end → deploy aggressively; we are not on a coin-flip edge.
     let full = cfg.full_size_gap_z;
@@ -369,7 +394,7 @@ pub fn plan_endgame_composite(
         let gz_boost = ramp(gz.abs(), full * 0.75, full * 1.5);
         eff = eff.max(0.55 + 0.45 * gz_boost);
     }
-    let conf_target = eff * cfg.max_rescue_usd;
+    let conf_target = (eff * cfg.max_rescue_usd).min(exposure_cap);
     let remaining = rescue_budget(config, state, win_state.spent, available_cash);
     let profit_increment = if has_deployed_exposure(win_state) {
         usd_to_close_profit_gap(win_state, winner, ask, cfg.target_profit_usd, fee_bps)
@@ -383,9 +408,12 @@ pub fn plan_endgame_composite(
         if profit_increment > remaining + 1e-9 {
             return None;
         }
+        if state.rescue_spent_usd + profit_increment > exposure_cap + 1e-9 {
+            return None;
+        }
     }
-    let profit_target = state.rescue_spent_usd + profit_increment;
-    let target = conf_target.max(profit_target).min(cfg.max_rescue_usd);
+    let profit_target = (state.rescue_spent_usd + profit_increment).min(exposure_cap);
+    let target = conf_target.max(profit_target).min(exposure_cap);
     let increment = (target - state.rescue_spent_usd).clamp(0.0, remaining);
     if increment + 1e-9 < cfg.probe_clip_usd {
         return None;
@@ -695,6 +723,7 @@ mod tests {
             c.first_clip_usd = 8.0;
             c.min_increment_usd = 5.0;
             c.max_clip_usd = 25.0;
+            c.tail_cap_ask94_usd = 60.0;
             c.final_seal_max_ask = 0.99;
             c.taker_max_ask = 0.99;
             c
@@ -760,7 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn profit_target_skipped_without_open_exposure() {
+    fn tail_cut_blocks_fresh_entry_above_97c() {
         let j = {
             let mut c = JEndgameConfig::default();
             c.conf_enter = 0.5;
@@ -773,12 +802,41 @@ mod tests {
         let cfg = full_cfg(j);
         let win = win_state_zero();
         let state = JWindowState::default();
-        let plan = plan_endgame_composite(&cfg, &state, &win, "UP", 0.99, 2.0, 0.8, 65.0, 500.0)
-            .expect("confidence-sized entry");
         assert!(
-            plan.clip_usd <= 8.0 + 1e-9,
-            "fresh @0.99 must not size for profit gap, clip={}",
-            plan.clip_usd
+            plan_endgame_composite(&cfg, &state, &win, "UP", 0.99, 2.0, 0.8, 65.0, 500.0).is_none(),
+            "fresh @0.99 should not open a costly tail position"
+        );
+    }
+
+    #[test]
+    fn tail_cut_caps_expensive_primary_exposure() {
+        let j = {
+            let mut c = JEndgameConfig::default();
+            c.conf_enter = 0.5;
+            c.max_rescue_usd = 75.0;
+            c.max_usd_per_window = 80.0;
+            c.probe_clip_usd = 1.0;
+            c.first_clip_usd = 8.0;
+            c.tail_cap_ask97_usd = 14.0;
+            c.final_seal_max_ask = 0.99;
+            c.taker_max_ask = 0.99;
+            c
+        };
+        let cfg = full_cfg(j);
+        let win = win_state_zero();
+        let open = JWindowState::default();
+        let first = plan_endgame_composite(&cfg, &open, &win, "UP", 0.96, 2.0, 1.0, 80.0, 500.0)
+            .expect("first high-ask clip");
+        assert!(first.clip_usd <= 8.0 + 1e-9, "clip={}", first.clip_usd);
+
+        let capped = JWindowState {
+            rescue_spent_usd: 14.0,
+            ..Default::default()
+        };
+        assert!(
+            plan_endgame_composite(&cfg, &capped, &win, "UP", 0.96, 2.0, 1.0, 80.0, 500.0)
+                .is_none(),
+            "0.96 ask must stop at tailCapAsk97Usd"
         );
     }
 

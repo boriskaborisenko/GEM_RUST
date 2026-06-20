@@ -311,6 +311,25 @@ pub(crate) fn live_chop_blocks_directional(
                 || sig_growth >= cfg.max_sig_crosses_directional))
 }
 
+pub(crate) fn fresh_cross_freeze_blocks_directional(
+    cfg: &crate::config::JEndgameConfig,
+    mid_cross: &MidCrossSnapshot,
+    elapsed_pct: f64,
+    window_secs: i64,
+) -> bool {
+    if cfg.fresh_cross_freeze_secs <= 0 || !elapsed_pct.is_finite() {
+        return false;
+    }
+    let Some(cross_pct) = mid_cross.last_cross_time_pct else {
+        return false;
+    };
+    if !cross_pct.is_finite() || elapsed_pct < cross_pct {
+        return false;
+    }
+    let freeze_pct = cfg.fresh_cross_freeze_secs as f64 / window_secs.max(1) as f64 * 100.0;
+    elapsed_pct <= cross_pct + freeze_pct + 1e-9
+}
+
 pub(crate) fn directional_entry_allowed(
     cfg: &crate::config::JEndgameConfig,
     state: &JWindowState,
@@ -670,8 +689,15 @@ impl TradeStrategy for JEndgameStrategy {
         if live_chop_blocks_directional(jcfg, state, mid_cross) {
             state.directional_blocked_chop = true;
         }
+        let fresh_cross_freeze = fresh_cross_freeze_blocks_directional(
+            jcfg,
+            mid_cross,
+            elapsed_pct,
+            window_duration_secs(market),
+        );
         let allow_directional =
-            directional_entry_allowed(jcfg, state, min_atr, current_atr, spot, ptb);
+            directional_entry_allowed(jcfg, state, min_atr, current_atr, spot, ptb)
+                && !fresh_cross_freeze;
         let confidence = crate::j_controller::endgame_confidence(
             jcfg,
             current_winner,
@@ -1441,6 +1467,34 @@ mod tests {
             &state,
             &late_chop
         ));
+    }
+
+    #[test]
+    fn fresh_cross_freeze_is_temporary_directional_only() {
+        let mut cfg = test_config();
+        cfg.j_endgame.fresh_cross_freeze_secs = 9;
+        let mid = MidCrossSnapshot {
+            last_cross_time_pct: Some(70.0),
+            ..Default::default()
+        };
+        assert!(fresh_cross_freeze_blocks_directional(
+            &cfg.j_endgame,
+            &mid,
+            72.0,
+            300
+        ));
+        assert!(!fresh_cross_freeze_blocks_directional(
+            &cfg.j_endgame,
+            &mid,
+            74.0,
+            300
+        ));
+
+        let state = JWindowState::default();
+        assert!(
+            directional_entry_allowed(&cfg.j_endgame, &state, 0.0, 40.0, 60_100.0, 60_000.0),
+            "freeze should be composed by caller, not persisted as chop state"
+        );
     }
 
     #[test]
