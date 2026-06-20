@@ -306,6 +306,25 @@ fn has_deployed_exposure(win_state: &WindowState) -> bool {
     win_state.spent > 1e-9 || win_state.up_shares > 1e-9 || win_state.down_shares > 1e-9
 }
 
+fn shares_for_side(side: &str, win_state: &WindowState) -> f64 {
+    if side == "UP" {
+        win_state.up_shares
+    } else {
+        win_state.down_shares
+    }
+}
+
+fn primary_avg_entry_ask(state: &JWindowState, win_state: &WindowState) -> Option<f64> {
+    let primary = state.primary_side.as_deref()?;
+    let shares = shares_for_side(primary, win_state);
+    let spent = state.primary_exposure_usd();
+    if shares > 1e-9 && spent > 1e-9 {
+        Some(spent / shares)
+    } else {
+        None
+    }
+}
+
 /// Hard cap for primary winner exposure by current ask. Old J worked best when
 /// it stayed simple and avoided huge late-cost entries; this keeps that shape
 /// while making the expensive tail explicit and testable.
@@ -434,6 +453,62 @@ pub fn plan_endgame_composite(
     })
 }
 
+pub fn plan_discount_reload(
+    config: &Config,
+    state: &JWindowState,
+    win_state: &WindowState,
+    current_winner: &str,
+    ask: f64,
+    gz: f64,
+    available_cash: f64,
+) -> Option<TierPlan> {
+    let cfg = &config.j_endgame;
+    if !cfg.discount_reload_enabled || !state.has_primary_exposure() {
+        return None;
+    }
+    let primary = state.primary_side.as_deref()?;
+    if primary != current_winner {
+        return None;
+    }
+    if ask <= 0.0 || ask > cfg.discount_reload_max_ask {
+        return None;
+    }
+    if state.discount_reload_clips >= cfg.discount_reload_max_clips {
+        return None;
+    }
+    let avg = primary_avg_entry_ask(state, win_state)?;
+    if avg - ask + 1e-9 < cfg.discount_reload_min_drop {
+        return None;
+    }
+    let gz_toward_primary = if primary == "UP" { gz } else { -gz };
+    if gz_toward_primary + 1e-9 < cfg.discount_reload_min_gap_z {
+        return None;
+    }
+
+    let tail_left = tail_cut_exposure_cap_usd(cfg, ask) - state.rescue_spent_usd;
+    let reload_left = cfg.discount_reload_max_usd - state.discount_reload_spent_usd;
+    let remaining = rescue_budget(config, state, win_state.spent, available_cash)
+        .min(tail_left)
+        .min(reload_left)
+        .max(0.0);
+    if remaining + 1e-9 < cfg.probe_clip_usd {
+        return None;
+    }
+    let clip = cfg
+        .discount_reload_clip_usd
+        .max(cfg.probe_clip_usd)
+        .min(remaining);
+    Some(TierPlan {
+        tier: EndgameTier::DiscountReload,
+        max_pay: ask.min(cfg.taker_max_ask),
+        need_tape: false,
+        budget_left: remaining,
+        sweep_clips: 1,
+        side: Some(primary.to_string()),
+        clip_usd: clip,
+    })
+}
+
 pub fn flip_hedge_budget_cap(cfg: &JEndgameConfig, state: &JWindowState) -> f64 {
     let primary = state.primary_exposure_usd();
     cfg.flip_tier_usd
@@ -540,14 +615,25 @@ pub fn plan_j_window(
         );
     }
 
-    // Endgame zone (Accumulate / Late / Rescue / FinalSeal): flip-hedge first
-    // (defends a reversal), then the composite target-exposure engine.
+    // Endgame zone: flip-hedge first (defends a reversal), then discount reload
+    // if our existing thesis is still winner but got cheaper, then composite.
     plan_flip_hedge_rescue(cfg, state, current_winner, spot, ptb, gz, prices, mid_cross).or_else(
         || {
             if !allow_directional {
                 return None;
             }
             let ask = side_ask(current_winner, prices);
+            if let Some(plan) = plan_discount_reload(
+                config,
+                state,
+                win_state,
+                current_winner,
+                ask,
+                gz,
+                available_cash,
+            ) {
+                return Some(plan);
+            }
             plan_endgame_composite(
                 config,
                 state,
@@ -838,6 +924,83 @@ mod tests {
                 .is_none(),
             "0.96 ask must stop at tailCapAsk97Usd"
         );
+    }
+
+    #[test]
+    fn discount_reload_adds_primary_when_discounted_and_still_winner() {
+        let j = {
+            let mut c = JEndgameConfig::default();
+            c.max_rescue_usd = 75.0;
+            c.max_usd_per_window = 80.0;
+            c.probe_clip_usd = 1.0;
+            c.discount_reload_enabled = true;
+            c.discount_reload_max_ask = 0.74;
+            c.discount_reload_min_drop = 0.12;
+            c.discount_reload_min_gap_z = 1.10;
+            c.discount_reload_clip_usd = 4.0;
+            c.discount_reload_max_usd = 12.0;
+            c.discount_reload_max_clips = 2;
+            c
+        };
+        let cfg = full_cfg(j);
+        let mut win = win_state_zero();
+        win.spent = 8.0;
+        win.up_shares = 8.0 / 0.98;
+        let state = JWindowState {
+            rescue_spent_usd: 8.0,
+            primary_side: Some("UP".to_string()),
+            clips_filled: 1,
+            ..Default::default()
+        };
+
+        let plan =
+            plan_discount_reload(&cfg, &state, &win, "UP", 0.70, 1.35, 500.0).expect("reload");
+        assert_eq!(plan.tier, EndgameTier::DiscountReload);
+        assert_eq!(plan.side.as_deref(), Some("UP"));
+        assert!((plan.clip_usd - 4.0).abs() < 1e-9, "clip={}", plan.clip_usd);
+    }
+
+    #[test]
+    fn discount_reload_does_not_average_losing_primary() {
+        let cfg = full_cfg(JEndgameConfig::default());
+        let mut win = win_state_zero();
+        win.spent = 8.0;
+        win.up_shares = 8.0 / 0.98;
+        let state = JWindowState {
+            rescue_spent_usd: 8.0,
+            primary_side: Some("UP".to_string()),
+            clips_filled: 1,
+            ..Default::default()
+        };
+
+        assert!(
+            plan_discount_reload(&cfg, &state, &win, "DOWN", 0.70, -1.35, 500.0).is_none(),
+            "reload must not buy more UP after UP is no longer the spot/PTB winner"
+        );
+    }
+
+    #[test]
+    fn discount_reload_respects_reload_budget() {
+        let j = {
+            let mut c = JEndgameConfig::default();
+            c.discount_reload_max_usd = 12.0;
+            c.discount_reload_max_clips = 2;
+            c
+        };
+        let cfg = full_cfg(j);
+        let mut win = win_state_zero();
+        win.spent = 20.0;
+        win.up_shares = 20.0 / 0.98;
+        let state = JWindowState {
+            rescue_spent_usd: 20.0,
+            discount_reload_spent_usd: 12.0,
+            discount_reload_clips: 2,
+            primary_side: Some("UP".to_string()),
+            clips_filled: 3,
+            ..Default::default()
+        };
+
+        assert!(plan_discount_reload(&cfg, &state, &win, "UP", 0.70, 1.35, 500.0).is_none());
     }
 
     #[test]

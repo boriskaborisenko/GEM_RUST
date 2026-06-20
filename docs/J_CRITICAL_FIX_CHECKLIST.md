@@ -26,6 +26,7 @@ Primary diagnosis from the code review:
 - [x] Enforce rescue impossibility / expensive-ask guard so the bot does not chase target profit at 97-99c when the math cannot reach target inside caps.
 - [x] Add price-tier tail caps for primary winner exposure and block fresh primary entries above 97c.
 - [x] Add a temporary fresh-cross freeze for directional composite buys after mid-price side crosses; sell-rescue and flip-hedge remain allowed.
+- [x] Add bounded discount reload: small same-side add only when primary is still current winner and ask is deeply below average entry.
 
 ## P1 Follow-Ups
 
@@ -36,8 +37,8 @@ Primary diagnosis from the code review:
 
 ## Validation
 
-- [x] `cargo test -q` — 80 passed, 1 ignored on 2026-06-20.
-- [x] Add targeted tests for: post-signal state does not mutate before execution, late chaos blocks new composite buys, expensive rescue guard, tail caps, fresh-cross freeze.
+- [x] `cargo test -q` — 83 passed, 1 ignored on 2026-06-20.
+- [x] Add targeted tests for: post-signal state does not mutate before execution, late chaos blocks new composite buys, expensive rescue guard, tail caps, fresh-cross freeze, discount reload.
 - [ ] Add an integration-style test for the trade-print SELL execution path.
 
 ## 2026-06-20 Implementation Notes
@@ -50,3 +51,4 @@ Primary diagnosis from the code review:
 - Added `tailCapAsk70Usd` / `tailCapAsk88Usd` / `tailCapAsk94Usd` / `tailCapAsk97Usd` so expensive winner asks cannot grow into large loss tails.
 - Added `freshCrossFreezeSecs` and lowered active `maxCrossesDirectional` to `6` to reduce adds immediately after fresh PTB/mid-lead churn.
 - Fixed dashboard window counters: the header now reports real traded/open-position/no-trade counts instead of lifecycle promotions as entries.
+- Added `discountReload*` knobs and `j_discount_reload_*` tier so J can improve average price on a still-valid primary thesis without averaging losers.

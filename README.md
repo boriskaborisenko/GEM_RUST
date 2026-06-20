@@ -133,6 +133,20 @@ Primary winner buys are now hard-capped by winner ask:
 
 Fresh directional buys also pause for `freshCrossFreezeSecs` after a mid-price side cross. This freeze does not block sell-rescue or flip hedge.
 
+### Discount reload
+
+Function: `plan_discount_reload()`.
+
+If J already bought a primary side too expensively, it may add a small reload clip only when:
+
+- `primary_side == current_winner` by spot/PTB
+- current ask is at or below `discountReloadMaxAsk`
+- current ask is lower than the primary average by at least `discountReloadMinDrop`
+- gap still confirms the thesis: `discountReloadMinGapZ`
+- reload-specific caps still have room: `discountReloadMaxUsd`, `discountReloadMaxClips`
+
+This is a thesis-alive average improvement, not a loser martingale. If the primary side stops being the current winner, J uses sell-rescue / flip-hedge instead of reload.
+
 ---
 
 ## Flip hedge
@@ -190,6 +204,13 @@ Key fields (current defaults):
     "tailCapAsk94Usd": 32.0,
     "tailCapAsk97Usd": 14.0,
     "freshCrossFreezeSecs": 8,
+    "discountReloadEnabled": true,
+    "discountReloadMaxAsk": 0.74,
+    "discountReloadMinDrop": 0.12,
+    "discountReloadMinGapZ": 1.10,
+    "discountReloadClipUsd": 4.0,
+    "discountReloadMaxUsd": 12.0,
+    "discountReloadMaxClips": 2,
     "confEnter": 0.58,
     "fullSizeGapZ": 1.8,
     "finalSealMinGapZ": 0.8,

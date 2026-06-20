@@ -249,6 +249,22 @@ pub struct JEndgameConfig {
     /// Flip hedge and sell-rescue are still allowed.
     #[serde(default = "j_default_fresh_cross_freeze_secs")]
     pub fresh_cross_freeze_secs: i64,
+    /// Buy a small extra clip on the existing primary side after a deep discount,
+    /// but only while that side is still the spot/PTB winner.
+    #[serde(default = "j_default_true")]
+    pub discount_reload_enabled: bool,
+    #[serde(default = "j_default_discount_reload_max_ask")]
+    pub discount_reload_max_ask: f64,
+    #[serde(default = "j_default_discount_reload_min_drop")]
+    pub discount_reload_min_drop: f64,
+    #[serde(default = "j_default_discount_reload_min_gap_z")]
+    pub discount_reload_min_gap_z: f64,
+    #[serde(default = "j_default_discount_reload_clip_usd")]
+    pub discount_reload_clip_usd: f64,
+    #[serde(default = "j_default_discount_reload_max_usd")]
+    pub discount_reload_max_usd: f64,
+    #[serde(default = "j_default_discount_reload_max_clips")]
+    pub discount_reload_max_clips: u16,
     #[serde(default = "j_default_true")]
     pub insurance_enabled: bool,
     #[serde(default = "j_default_insurance_max_elapsed_pct")]
@@ -501,6 +517,24 @@ fn j_default_tail_cap_ask97_usd() -> f64 {
 fn j_default_fresh_cross_freeze_secs() -> i64 {
     8
 }
+fn j_default_discount_reload_max_ask() -> f64 {
+    0.74
+}
+fn j_default_discount_reload_min_drop() -> f64 {
+    0.12
+}
+fn j_default_discount_reload_min_gap_z() -> f64 {
+    1.10
+}
+fn j_default_discount_reload_clip_usd() -> f64 {
+    4.0
+}
+fn j_default_discount_reload_max_usd() -> f64 {
+    12.0
+}
+fn j_default_discount_reload_max_clips() -> u16 {
+    2
+}
 fn j_default_insurance_max_elapsed_pct() -> f64 {
     30.0
 }
@@ -655,6 +689,13 @@ impl Default for JEndgameConfig {
             tail_cap_ask94_usd: j_default_tail_cap_ask94_usd(),
             tail_cap_ask97_usd: j_default_tail_cap_ask97_usd(),
             fresh_cross_freeze_secs: j_default_fresh_cross_freeze_secs(),
+            discount_reload_enabled: j_default_true(),
+            discount_reload_max_ask: j_default_discount_reload_max_ask(),
+            discount_reload_min_drop: j_default_discount_reload_min_drop(),
+            discount_reload_min_gap_z: j_default_discount_reload_min_gap_z(),
+            discount_reload_clip_usd: j_default_discount_reload_clip_usd(),
+            discount_reload_max_usd: j_default_discount_reload_max_usd(),
+            discount_reload_max_clips: j_default_discount_reload_max_clips(),
             insurance_enabled: j_default_insurance_enabled(),
             insurance_max_elapsed_pct: j_default_insurance_max_elapsed_pct(),
             insurance_max_ask: j_default_insurance_max_ask(),
