@@ -83,6 +83,76 @@ impl JEndgameStrategy {
             state.sell_rescue_done = true;
         }
     }
+
+    fn mark_buy_executed(&mut self, window_number: usize, signal: &OrderSignal) {
+        let Some(tier) = tier_from_signal_reason(&signal.reason) else {
+            return;
+        };
+        let state = self.windows.entry(window_number).or_default();
+        let usd = signal.amount.max(0.0);
+        match tier {
+            EndgameTier::Insurance => {
+                state.insurance_spent_usd += usd;
+                state.insurance_clips += 1;
+                if state.insurance_side.is_none() {
+                    state.insurance_side = Some(signal.side.clone());
+                }
+            }
+            EndgameTier::Rescue | EndgameTier::FinalSeal => {
+                state.rescue_spent_usd += usd;
+                state.last_endgame_buy_at = Some(Instant::now());
+                if state.primary_side.is_none() {
+                    state.primary_side = Some(signal.side.clone());
+                }
+            }
+            EndgameTier::Impulse => {
+                state.impulse_spent_usd += usd;
+                if state.primary_side.is_none() {
+                    state.primary_side = Some(signal.side.clone());
+                }
+            }
+            EndgameTier::Cheap => {
+                state.cheap_spent_usd += usd;
+                state.cheap_clips += 1;
+                if state.primary_side.is_none() {
+                    state.primary_side = Some(signal.side.clone());
+                }
+            }
+            EndgameTier::Late => {
+                state.late_spent_usd += usd;
+                state.late_clips += 1;
+                if state.primary_side.is_none() {
+                    state.primary_side = Some(signal.side.clone());
+                }
+            }
+            EndgameTier::FlipHedge => {
+                state.hedge_spent_usd += usd;
+                state.hedge_clips += 1;
+            }
+        }
+        state.clips_filled += 1;
+        state.winner_side = Some(signal.side.clone());
+    }
+}
+
+fn tier_from_signal_reason(reason: &str) -> Option<EndgameTier> {
+    if reason.starts_with("j_insurance_") {
+        Some(EndgameTier::Insurance)
+    } else if reason.starts_with("j_impulse_") {
+        Some(EndgameTier::Impulse)
+    } else if reason.starts_with("j_value_") {
+        Some(EndgameTier::Cheap)
+    } else if reason.starts_with("j_late_") {
+        Some(EndgameTier::Late)
+    } else if reason.starts_with("j_flip_hedge_") {
+        Some(EndgameTier::FlipHedge)
+    } else if reason.starts_with("j_rescue_") {
+        Some(EndgameTier::Rescue)
+    } else if reason.starts_with("j_final_seal_") {
+        Some(EndgameTier::FinalSeal)
+    } else {
+        None
+    }
 }
 
 fn side_book_mut<'a>(side: &str, prices: &'a mut PricesState) -> &'a mut SideBook {
@@ -219,6 +289,26 @@ pub(crate) fn capture_endgame_chop_snapshot(
     {
         state.directional_blocked_chop = true;
     }
+}
+
+pub(crate) fn live_chop_blocks_directional(
+    cfg: &crate::config::JEndgameConfig,
+    state: &JWindowState,
+    mid_cross: &MidCrossSnapshot,
+) -> bool {
+    if state.directional_blocked_chop {
+        return true;
+    }
+    let (base_cross, base_sig) = state.entry_cross_snapshot.unwrap_or((0, 0));
+    let raw_growth = mid_cross.cross_count.saturating_sub(base_cross);
+    let sig_growth = mid_cross.significant_cross_count.saturating_sub(base_sig);
+
+    (cfg.max_crosses_directional > 0
+        && (mid_cross.cross_count >= cfg.max_crosses_directional
+            || raw_growth >= cfg.max_crosses_directional))
+        || (cfg.max_sig_crosses_directional > 0
+            && (mid_cross.significant_cross_count >= cfg.max_sig_crosses_directional
+                || sig_growth >= cfg.max_sig_crosses_directional))
 }
 
 pub(crate) fn directional_entry_allowed(
@@ -577,6 +667,9 @@ impl TradeStrategy for JEndgameStrategy {
             }
         }
 
+        if live_chop_blocks_directional(jcfg, state, mid_cross) {
+            state.directional_blocked_chop = true;
+        }
         let allow_directional =
             directional_entry_allowed(jcfg, state, min_atr, current_atr, spot, ptb);
         let confidence = crate::j_controller::endgame_confidence(
@@ -709,48 +802,6 @@ impl TradeStrategy for JEndgameStrategy {
                     mid_cross.cross_count,
                 ),
             });
-            match plan.tier {
-                EndgameTier::Insurance => {
-                    state.insurance_spent_usd += usd;
-                    state.insurance_clips += 1;
-                    if state.insurance_side.is_none() {
-                        state.insurance_side = Some(side.to_string());
-                    }
-                }
-                EndgameTier::Rescue | EndgameTier::FinalSeal => {
-                    state.rescue_spent_usd += usd;
-                    state.last_endgame_buy_at = Some(Instant::now());
-                    if state.primary_side.is_none() {
-                        state.primary_side = Some(side.to_string());
-                    }
-                }
-                EndgameTier::Impulse => {
-                    state.impulse_spent_usd += usd;
-                    if state.primary_side.is_none() {
-                        state.primary_side = Some(side.to_string());
-                    }
-                }
-                EndgameTier::Cheap => {
-                    state.cheap_spent_usd += usd;
-                    state.cheap_clips += 1;
-                    if state.primary_side.is_none() {
-                        state.primary_side = Some(side.to_string());
-                    }
-                }
-                EndgameTier::Late => {
-                    state.late_spent_usd += usd;
-                    state.late_clips += 1;
-                    if state.primary_side.is_none() {
-                        state.primary_side = Some(side.to_string());
-                    }
-                }
-                EndgameTier::FlipHedge => {
-                    state.hedge_spent_usd += usd;
-                    state.hedge_clips += 1;
-                }
-            }
-            state.clips_filled += 1;
-            state.winner_side = Some(side.to_string());
         }
 
         signals
@@ -784,7 +835,9 @@ impl TradeStrategy for JEndgameStrategy {
     }
 
     fn notify_order_executed(&mut self, window_number: usize, signal: &OrderSignal) {
-        if !signal.is_buy && signal.reason.starts_with("j_sell_rescue") {
+        if signal.is_buy {
+            self.mark_buy_executed(window_number, signal);
+        } else if signal.reason.starts_with("j_sell_rescue") {
             self.mark_sell_rescue_executed(window_number);
         }
     }
@@ -939,6 +992,76 @@ mod tests {
             "reason={}",
             signals[0].reason
         );
+    }
+
+    #[test]
+    fn j_state_updates_only_after_confirmed_execution() {
+        let mut strat = strat_with_cash();
+        let prices = PricesState {
+            up: ContractPrices {
+                bid: 0.87,
+                ask: 0.88,
+                book: SideBook {
+                    asks: vec![BookLevel {
+                        price: 0.88,
+                        size: 50.0,
+                    }],
+                    ..Default::default()
+                },
+            },
+            down: ContractPrices::top(0.12, 0.13),
+        };
+        let win = WindowState {
+            window_number: 1,
+            role: "CURRENT".to_string(),
+            status: "LIVE".to_string(),
+            market: sample_market(),
+            spent: 0.0,
+            cash_returned: 0.0,
+            up_shares: 0.0,
+            down_shares: 0.0,
+            initial_up_shares: 0.0,
+            initial_down_shares: 0.0,
+            trades: vec![],
+            prices: prices.clone(),
+        };
+        let mid = MidCrossSnapshot {
+            armed: true,
+            current_side: Some(LeadSide::Up),
+            lead_gap: 0.20,
+            ..Default::default()
+        };
+        let signals = strat.process_live_tick(
+            &test_config(),
+            &prices,
+            Some(60_100.0),
+            &win.market,
+            &win,
+            60,
+            40.0,
+            SpotSignalSnapshot {
+                smoothed_velocity_usd_per_sec: Some(3.0),
+                ..Default::default()
+            },
+            &mid,
+            &CexMicroSnapshot {
+                buy_sell_imbalance_3s: 1.0,
+                ..Default::default()
+            },
+            &hot_tape(),
+        );
+        assert!(!signals.is_empty());
+
+        let before = strat.windows.get(&1).expect("state exists");
+        assert_eq!(before.clips_filled, 0);
+        assert!(before.primary_side.is_none());
+        assert_eq!(before.rescue_spent_usd, 0.0);
+
+        strat.notify_order_executed(1, &signals[0]);
+        let after = strat.windows.get(&1).expect("state exists");
+        assert_eq!(after.clips_filled, 1);
+        assert_eq!(after.primary_side.as_deref(), Some("UP"));
+        assert!(after.rescue_spent_usd > 0.0);
     }
 
     #[test]
@@ -1289,6 +1412,34 @@ mod tests {
             40.0,
             60_100.0,
             60_000.0
+        ));
+    }
+
+    #[test]
+    fn late_chop_growth_blocks_directional_composite() {
+        let mut cfg = test_config();
+        cfg.j_endgame.max_crosses_directional = 9;
+        cfg.j_endgame.max_sig_crosses_directional = 3;
+        let mut state = JWindowState::default();
+        let calm = MidCrossSnapshot {
+            cross_count: 1,
+            significant_cross_count: 0,
+            ..Default::default()
+        };
+        capture_endgame_chop_snapshot(&mut state, &cfg.j_endgame, &calm, true);
+        assert!(!state.directional_blocked_chop);
+        assert!(!live_chop_blocks_directional(&cfg.j_endgame, &state, &calm));
+
+        let late_chop = MidCrossSnapshot {
+            cross_count: 10,
+            significant_cross_count: 3,
+            last_cross_is_significant: true,
+            ..Default::default()
+        };
+        assert!(live_chop_blocks_directional(
+            &cfg.j_endgame,
+            &state,
+            &late_chop
         ));
     }
 

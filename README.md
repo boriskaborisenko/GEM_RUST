@@ -90,13 +90,15 @@ Function: `plan_endgame_composite()`.
 ```
 enter         = effective_conf_enter(ask, gap_z)   // lower for cheap ask / safe gap
 eff           = ramp(confidence, enter, 1.0)
-conf_target   = eff × maxRescueUsd                 // up to $75
-profit_target = USD needed for redeem PnL ≥ targetProfitUsd
-                (only when exposure already exists — not on a blank window)
-target        = min(max(conf_target, profit_target), maxRescueUsd)
-increment     = target − rescue_spent_usd
+conf_target      = eff × maxRescueUsd              // up to $75
+profit_increment = USD still needed for redeem PnL ≥ targetProfitUsd
+                   (only when exposure already exists — not on a blank window)
+target           = min(max(conf_target, rescue_spent_usd + profit_increment), maxRescueUsd)
+increment        = target − rescue_spent_usd
 clip          = increment capped by effective_max_clip
 ```
+
+If `profit_increment` cannot fit inside the remaining rescue/window/cash cap, or the ask is above `abortRescueIfAskAbove`, the rescue is skipped instead of chasing an unreachable target.
 
 ### Clip ramp (not $35 on tick one)
 
@@ -144,7 +146,7 @@ Flip hedge is partial cover on reversal when the thesis breaks after primary exp
 | Trade tape tracker | $ BUY flow on winner over `tapeWindowMs` |
 | Mid-cross tracker | lead side, chop (significant crosses) |
 
-Stale PM data → no trade. BUY intent ≠ fill: depth, budget, and gates can block.
+Stale PM data → no trade. BUY/SELL intent ≠ fill: depth, budget, and gates can block. J updates its internal clip/exposure state only after a paper/live fill is confirmed.
 
 ---
 
@@ -167,6 +169,7 @@ Key fields (current defaults):
     "minBuyIntervalMs": 3000,
     "expensiveAskThreshold": 0.94,
     "expensiveMinGapZ": 1.35,
+    "abortRescueIfAskAbove": 0.97,
     "confEnter": 0.58,
     "fullSizeGapZ": 1.8,
     "finalSealMinGapZ": 0.8,

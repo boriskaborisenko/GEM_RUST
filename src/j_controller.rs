@@ -370,13 +370,22 @@ pub fn plan_endgame_composite(
         eff = eff.max(0.55 + 0.45 * gz_boost);
     }
     let conf_target = eff * cfg.max_rescue_usd;
-    let profit_target = if has_deployed_exposure(win_state) {
+    let remaining = rescue_budget(config, state, win_state.spent, available_cash);
+    let profit_increment = if has_deployed_exposure(win_state) {
         usd_to_close_profit_gap(win_state, winner, ask, cfg.target_profit_usd, fee_bps)
     } else {
         0.0
     };
+    if profit_increment > 0.0 {
+        if ask > cfg.abort_rescue_if_ask_above {
+            return None;
+        }
+        if profit_increment > remaining + 1e-9 {
+            return None;
+        }
+    }
+    let profit_target = state.rescue_spent_usd + profit_increment;
     let target = conf_target.max(profit_target).min(cfg.max_rescue_usd);
-    let remaining = rescue_budget(config, state, win_state.spent, available_cash);
     let increment = (target - state.rescue_spent_usd).clamp(0.0, remaining);
     if increment + 1e-9 < cfg.probe_clip_usd {
         return None;
@@ -821,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn composite_sizes_for_profit_gap_at_high_ask() {
+    fn composite_aborts_impossible_profit_gap_at_high_ask() {
         // Reproduce log economics: $2 insurance lost, need target +$1 at ask 0.99.
         let j = {
             let mut c = JEndgameConfig::default();
@@ -845,14 +854,45 @@ mod tests {
             insurance_clips: 1,
             ..Default::default()
         };
-        let plan = plan_endgame_composite(&cfg, &state, &win, "UP", 0.99, 2.0, 0.8, 65.0, 500.0)
-            .expect("profit-aware clip");
-        // Need ~$303 to go from -2 to +1 at 0.99; capped by ramped max_clip per tick.
+        // Need roughly $300 to go from -2 to +1 at 0.99. With a $75 rescue cap,
+        // this is a controlled no-trade instead of chasing an unreachable target.
         assert!(
-            plan.clip_usd <= 25.0 + 1e-9,
-            "clip={} (should not dump full max on one tick)",
-            plan.clip_usd
+            plan_endgame_composite(&cfg, &state, &win, "UP", 0.99, 2.0, 0.8, 65.0, 500.0).is_none()
         );
+    }
+
+    #[test]
+    fn composite_allows_affordable_profit_gap() {
+        let j = {
+            let mut c = JEndgameConfig::default();
+            c.conf_enter = 0.5;
+            c.target_profit_usd = 1.0;
+            c.max_rescue_usd = 75.0;
+            c.max_usd_per_window = 80.0;
+            c.probe_clip_usd = 1.0;
+            c.max_clip_usd = 25.0;
+            c.final_seal_max_ask = 0.90;
+            c.taker_max_ask = 0.90;
+            c.fee_rate_bps = Some(0.0);
+            c
+        };
+        let cfg = full_cfg(j);
+        let mut win = win_state_zero();
+        win.spent = 10.0;
+        win.up_shares = 10.0;
+        let plan = plan_endgame_composite(
+            &cfg,
+            &JWindowState::default(),
+            &win,
+            "UP",
+            0.90,
+            2.0,
+            0.8,
+            65.0,
+            500.0,
+        )
+        .expect("affordable rescue gap");
+        assert!(plan.clip_usd > 0.0);
     }
 
     #[test]

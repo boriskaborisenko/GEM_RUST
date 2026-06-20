@@ -70,7 +70,7 @@
     "probeClipUsd": 1.0,
     "rescueZoneSecs": 20,
     "maxRescueUsd": 75.0,
-    "abortRescueIfAskAbove": 0.995,
+    "abortRescueIfAskAbove": 0.97,
     "finalSealSecs": 5,
     "finalSealMaxAsk": 0.99,
     "finalSealMinGapZ": 0.8,

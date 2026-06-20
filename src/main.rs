@@ -877,27 +877,63 @@ fn run_j_endgame_live_tick(
     );
     drop(strat);
 
+    execute_strategy_signals(
+        &app.run_log_dir,
+        &app.strategy,
+        &mut port,
+        window_number,
+        market,
+        prices,
+        &win_state,
+        signals,
+        current_atr,
+        app.spot_price,
+        secs_to_end,
+        spot_signal,
+    );
+}
+
+fn execute_strategy_signals(
+    log_dir: &str,
+    strategy: &Arc<Mutex<StrategyEngine>>,
+    port: &mut Portfolio,
+    window_number: usize,
+    market: &MarketWindow,
+    prices: &PricesState,
+    win_state: &WindowState,
+    signals: Vec<OrderSignal>,
+    current_atr: f64,
+    spot_price: Option<f64>,
+    secs_to_end: i64,
+    spot_signal: SpotSignalSnapshot,
+) {
     for sig in signals {
-        if sig.is_buy {
-            if port
-                .execute_buy(window_number, &sig.side, sig.amount, sig.price, &sig.reason)
+        let executed = if sig.is_buy {
+            port.execute_buy(window_number, &sig.side, sig.amount, sig.price, &sig.reason)
                 .is_some()
-            {
-                append_signal_event(
-                    &app.run_log_dir,
-                    window_number,
-                    &market.slug,
-                    &sig,
-                    true,
-                    current_atr,
-                    app.spot_price,
-                    market,
-                    prices,
-                    &win_state,
-                    secs_to_end,
-                    spot_signal,
-                );
-            }
+        } else {
+            port.execute_sell(window_number, &sig.side, sig.amount, sig.price, &sig.reason)
+                .is_some()
+        };
+        append_signal_event(
+            log_dir,
+            window_number,
+            &market.slug,
+            &sig,
+            executed,
+            current_atr,
+            spot_price,
+            market,
+            prices,
+            win_state,
+            secs_to_end,
+            spot_signal,
+        );
+        if executed {
+            strategy
+                .lock()
+                .unwrap()
+                .notify_order_executed(window_number, &sig);
         }
     }
 }
@@ -1662,9 +1698,6 @@ async fn process_event(
             port.get_or_create_window_state(window_number, "", &market)
                 .prices = prices.clone();
 
-            // Run Strategy Engine
-            let mut strat = app.strategy.lock().unwrap();
-
             if role == "CURRENT" {
                 if let Ok(end) = chrono::DateTime::parse_from_rfc3339(&market.end_time) {
                     let secs_to_end = (end.timestamp_millis() - timestamp) / 1000;
@@ -1720,65 +1753,43 @@ async fn process_event(
                     );
 
                     let cash = port.available_cash;
-                    strat.set_runtime_cash(cash);
-                    let signals = strat.process_live_tick(
-                        &app.config,
-                        &prices,
-                        app.spot_price,
-                        &win_state.market,
-                        &win_state,
-                        secs_to_end,
-                        current_atr,
-                        spot_signal,
-                        &mid_cross_snap,
-                        &cex_micro_snap,
-                        &tape_snap,
-                    );
-
-                    for sig in signals {
-                        if (app.config.strategy == "dynamic_grid_e"
-                            || app.config.strategy == "cheap_hold_h"
-                            || app.config.strategy == "j_endgame")
-                            && window_number == 0
-                        {
-                            continue;
-                        }
-                        let executed = if sig.is_buy {
-                            port.execute_buy(
-                                window_number,
-                                &sig.side,
-                                sig.amount,
-                                sig.price,
-                                &sig.reason,
-                            )
-                            .is_some()
-                        } else {
-                            port.execute_sell(
-                                window_number,
-                                &sig.side,
-                                sig.amount,
-                                sig.price,
-                                &sig.reason,
-                            )
-                            .is_some()
-                        };
-                        append_signal_event(
-                            &app.run_log_dir,
-                            window_number,
-                            &market.slug,
-                            &sig,
-                            executed,
-                            current_atr,
+                    let signals = {
+                        let mut strat = app.strategy.lock().unwrap();
+                        strat.set_runtime_cash(cash);
+                        strat.process_live_tick(
+                            &app.config,
+                            &prices,
                             app.spot_price,
+                            &win_state.market,
+                            &win_state,
+                            secs_to_end,
+                            current_atr,
+                            spot_signal,
+                            &mid_cross_snap,
+                            &cex_micro_snap,
+                            &tape_snap,
+                        )
+                    };
+
+                    if !((app.config.strategy == "dynamic_grid_e"
+                        || app.config.strategy == "cheap_hold_h"
+                        || app.config.strategy == "j_endgame")
+                        && window_number == 0)
+                    {
+                        execute_strategy_signals(
+                            &app.run_log_dir,
+                            &app.strategy,
+                            &mut port,
+                            window_number,
                             &win_state.market,
                             &prices,
                             &win_state,
+                            signals,
+                            current_atr,
+                            app.spot_price,
                             secs_to_end,
                             spot_signal,
                         );
-                        if executed {
-                            strat.notify_order_executed(window_number, &sig);
-                        }
                     }
 
                     // Sync local app state
@@ -1838,33 +1849,39 @@ async fn process_event(
                     app.config.j_endgame.tape_window_ms,
                 );
                 let cash = port.available_cash;
-                let mut strat = app.strategy.lock().unwrap();
-                strat.set_runtime_cash(cash);
-                let signals = strat.process_live_tick(
-                    &app.config,
-                    &prices,
-                    app.spot_price,
+                let signals = {
+                    let mut strat = app.strategy.lock().unwrap();
+                    strat.set_runtime_cash(cash);
+                    strat.process_live_tick(
+                        &app.config,
+                        &prices,
+                        app.spot_price,
+                        &market,
+                        &win_state,
+                        secs_to_end,
+                        current_atr,
+                        spot_signal,
+                        &mid_cross_snap,
+                        &cex_micro_snap,
+                        &tape_snap,
+                    )
+                };
+                execute_strategy_signals(
+                    &app.run_log_dir,
+                    &app.strategy,
+                    &mut port,
+                    window_number,
                     &market,
+                    &prices,
                     &win_state,
-                    secs_to_end,
+                    signals,
                     current_atr,
+                    app.spot_price,
+                    secs_to_end,
                     spot_signal,
-                    &mid_cross_snap,
-                    &cex_micro_snap,
-                    &tape_snap,
                 );
-                drop(strat);
-                for sig in signals {
-                    if sig.is_buy {
-                        let _ = port.execute_buy(
-                            window_number,
-                            &sig.side,
-                            sig.amount,
-                            sig.price,
-                            &sig.reason,
-                        );
-                    }
-                }
+                let updated = port.get_or_create_window_state(window_number, "CURRENT", &market);
+                app.current_window = Some(updated.clone());
             }
         }
     }
