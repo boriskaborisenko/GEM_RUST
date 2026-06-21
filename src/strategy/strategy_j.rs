@@ -628,7 +628,12 @@ impl TradeStrategy for JEndgameStrategy {
 
         let jcfg = &config.j_endgame;
         let fee_bps = jcfg.fee_rate_bps.unwrap_or(DEFAULT_CRYPTO_FEE_RATE_BPS);
-        let default_clip = jcfg.clip_usd.max(jcfg.probe_clip_usd);
+        let default_clip = if jcfg.bank_sizing_enabled {
+            jcfg.effective_probe_clip_usd(&config.session)
+        } else {
+            jcfg.clip_usd
+                .max(jcfg.effective_probe_clip_usd(&config.session))
+        };
         let state = self.windows.entry(window_number).or_insert(JWindowState {
             impulse_spent_usd: 0.0,
             cheap_spent_usd: 0.0,
@@ -693,9 +698,12 @@ impl TradeStrategy for JEndgameStrategy {
             return signals;
         }
 
-        let window_cap = jcfg
-            .max_usd_per_window
-            .min(config.session.max_window_budget);
+        let window_cap = if config.session.max_window_budget > 0.0 {
+            jcfg.effective_max_usd_per_window(&config.session)
+                .min(config.session.max_window_budget)
+        } else {
+            jcfg.effective_max_usd_per_window(&config.session)
+        };
         if win_state.spent >= window_cap - 1e-9 || state.clips_filled >= effective_max_clips(jcfg) {
             // allow final seal / rescue even at window budget cap
             if secs_to_end > jcfg.final_seal_secs {

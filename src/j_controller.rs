@@ -150,10 +150,17 @@ pub fn plan_insurance(
 
 fn rescue_budget(cfg: &Config, state: &JWindowState, win_spent: f64, available_cash: f64) -> f64 {
     let j = &cfg.j_endgame;
-    (j.max_usd_per_window - win_spent)
+    let max_window = j.effective_max_usd_per_window(&cfg.session);
+    let max_rescue = j.effective_max_rescue_usd(&cfg.session);
+    let window_left = (max_window - win_spent).max(0.0);
+    let window_left = if cfg.session.max_window_budget > 0.0 {
+        window_left.min(cfg.session.max_window_budget)
+    } else {
+        window_left
+    };
+    window_left
         .max(0.0)
-        .min(j.max_rescue_usd - state.rescue_spent_usd)
-        .min(cfg.session.max_window_budget)
+        .min(max_rescue - state.rescue_spent_usd)
         .min(available_cash.max(0.0))
 }
 
@@ -328,18 +335,20 @@ fn primary_avg_entry_ask(state: &JWindowState, win_state: &WindowState) -> Optio
 /// Hard cap for primary winner exposure by current ask. Old J worked best when
 /// it stayed simple and avoided huge late-cost entries; this keeps that shape
 /// while making the expensive tail explicit and testable.
-pub fn tail_cut_exposure_cap_usd(cfg: &JEndgameConfig, ask: f64) -> f64 {
+pub fn tail_cut_exposure_cap_usd(config: &Config, ask: f64) -> f64 {
     if !ask.is_finite() || ask <= 0.0 {
         return 0.0;
     }
+    let cfg = &config.j_endgame;
+    let session = &config.session;
     let cap = if ask <= 0.70 {
-        cfg.tail_cap_ask70_usd
+        cfg.effective_tail_cap_ask70_usd(session)
     } else if ask <= 0.88 {
-        cfg.tail_cap_ask88_usd
+        cfg.effective_tail_cap_ask88_usd(session)
     } else if ask <= 0.94 {
-        cfg.tail_cap_ask94_usd
+        cfg.effective_tail_cap_ask94_usd(session)
     } else if ask <= 0.97 {
-        cfg.tail_cap_ask97_usd
+        cfg.effective_tail_cap_ask97_usd(session)
     } else {
         0.0
     };
@@ -348,15 +357,17 @@ pub fn tail_cut_exposure_cap_usd(cfg: &JEndgameConfig, ask: f64) -> f64 {
 
 /// Per-tick clip cap: probe on first buy, then ramp with gap_z, time, and ask cheapness.
 fn effective_max_clip_usd(
-    cfg: &JEndgameConfig,
+    config: &Config,
     rescue_spent_usd: f64,
     gz: f64,
     ask: f64,
     elapsed_pct: f64,
 ) -> f64 {
-    let floor = cfg.probe_clip_usd.max(1e-9);
+    let cfg = &config.j_endgame;
+    let session = &config.session;
+    let floor = cfg.effective_probe_clip_usd(session).max(1e-9);
     if rescue_spent_usd < 1e-9 {
-        return cfg.first_clip_usd.max(floor);
+        return cfg.effective_first_clip_usd(session).max(floor);
     }
     let full = cfg.full_size_gap_z;
     let gz_ramp = ramp(gz.abs(), full * 0.75, full);
@@ -367,8 +378,8 @@ fn effective_max_clip_usd(
         ramp(cfg.expensive_ask_threshold - ask, 0.0, 0.04)
     };
     let scale = (gz_ramp * time_ramp.max(0.35 * cheap_ramp) * cheap_ramp).clamp(0.0, 1.0);
-    let max_clip = cfg.max_clip_usd.max(floor);
-    (floor + scale * (max_clip - floor)).max(cfg.first_clip_usd.max(floor))
+    let max_clip = cfg.effective_max_clip_usd(session).max(floor);
+    (floor + scale * (max_clip - floor)).max(cfg.effective_first_clip_usd(session).max(floor))
 }
 
 /// Target-exposure endgame: given composite confidence, compute how much USD we
@@ -402,7 +413,10 @@ pub fn plan_endgame_composite(
         return None;
     }
     let fee_bps = cfg.fee_rate_bps.unwrap_or(DEFAULT_CRYPTO_FEE_RATE_BPS);
-    let exposure_cap = tail_cut_exposure_cap_usd(cfg, ask).min(cfg.max_rescue_usd);
+    let max_rescue = cfg.effective_max_rescue_usd(&config.session);
+    let probe_clip = cfg.effective_probe_clip_usd(&config.session);
+    let min_increment = cfg.effective_min_increment_usd(&config.session);
+    let exposure_cap = tail_cut_exposure_cap_usd(config, ask).min(max_rescue);
     if exposure_cap <= 1e-9 || state.rescue_spent_usd + 1e-9 >= exposure_cap {
         return None;
     }
@@ -413,7 +427,7 @@ pub fn plan_endgame_composite(
         let gz_boost = ramp(gz.abs(), full * 0.75, full * 1.5);
         eff = eff.max(0.55 + 0.45 * gz_boost);
     }
-    let conf_target = (eff * cfg.max_rescue_usd).min(exposure_cap);
+    let conf_target = (eff * max_rescue).min(exposure_cap);
     let remaining = rescue_budget(config, state, win_state.spent, available_cash);
     let profit_increment = if has_deployed_exposure(win_state) {
         usd_to_close_profit_gap(win_state, winner, ask, cfg.target_profit_usd, fee_bps)
@@ -434,13 +448,13 @@ pub fn plan_endgame_composite(
     let profit_target = (state.rescue_spent_usd + profit_increment).min(exposure_cap);
     let target = conf_target.max(profit_target).min(exposure_cap);
     let increment = (target - state.rescue_spent_usd).clamp(0.0, remaining);
-    if increment + 1e-9 < cfg.probe_clip_usd {
+    if increment + 1e-9 < probe_clip {
         return None;
     }
-    if state.rescue_spent_usd > 1e-9 && increment + 1e-9 < cfg.min_increment_usd {
+    if state.rescue_spent_usd > 1e-9 && increment + 1e-9 < min_increment {
         return None;
     }
-    let max_clip = effective_max_clip_usd(cfg, state.rescue_spent_usd, gz, ask, elapsed_pct);
+    let max_clip = effective_max_clip_usd(config, state.rescue_spent_usd, gz, ask, elapsed_pct);
     let clip = increment.min(max_clip);
     Some(TierPlan {
         tier: EndgameTier::FinalSeal,
@@ -485,18 +499,20 @@ pub fn plan_discount_reload(
         return None;
     }
 
-    let tail_left = tail_cut_exposure_cap_usd(cfg, ask) - state.rescue_spent_usd;
-    let reload_left = cfg.discount_reload_max_usd - state.discount_reload_spent_usd;
+    let probe_clip = cfg.effective_probe_clip_usd(&config.session);
+    let tail_left = tail_cut_exposure_cap_usd(config, ask) - state.rescue_spent_usd;
+    let reload_left =
+        cfg.effective_discount_reload_max_usd(&config.session) - state.discount_reload_spent_usd;
     let remaining = rescue_budget(config, state, win_state.spent, available_cash)
         .min(tail_left)
         .min(reload_left)
         .max(0.0);
-    if remaining + 1e-9 < cfg.probe_clip_usd {
+    if remaining + 1e-9 < probe_clip {
         return None;
     }
     let clip = cfg
-        .discount_reload_clip_usd
-        .max(cfg.probe_clip_usd)
+        .effective_discount_reload_clip_usd(&config.session)
+        .max(probe_clip)
         .min(remaining);
     Some(TierPlan {
         tier: EndgameTier::DiscountReload,
@@ -509,15 +525,16 @@ pub fn plan_discount_reload(
     })
 }
 
-pub fn flip_hedge_budget_cap(cfg: &JEndgameConfig, state: &JWindowState) -> f64 {
+pub fn flip_hedge_budget_cap(config: &Config, state: &JWindowState) -> f64 {
+    let cfg = &config.j_endgame;
     let primary = state.primary_exposure_usd();
-    cfg.flip_tier_usd
+    cfg.effective_flip_tier_usd(&config.session)
         .max(primary * cfg.flip_hedge_exposure_ratio)
-        .min(cfg.flip_tier_max_usd)
+        .min(cfg.effective_flip_tier_max_usd(&config.session))
 }
 
 pub fn plan_flip_hedge_rescue(
-    cfg: &JEndgameConfig,
+    config: &Config,
     state: &JWindowState,
     current_winner: &str,
     spot: f64,
@@ -526,6 +543,7 @@ pub fn plan_flip_hedge_rescue(
     prices: &PricesState,
     mid_cross: &MidCrossSnapshot,
 ) -> Option<TierPlan> {
+    let cfg = &config.j_endgame;
     let primary = state.primary_side.as_deref()?;
     if !flip_hedge_triggered(
         cfg,
@@ -541,15 +559,18 @@ pub fn plan_flip_hedge_rescue(
     }
     let hedge_side = if primary == "UP" { "DOWN" } else { "UP" };
     let hedge_ask = side_ask(hedge_side, prices);
-    let budget_cap = flip_hedge_budget_cap(cfg, state);
+    let budget_cap = flip_hedge_budget_cap(config, state);
     if state.hedge_spent_usd + 1e-9 >= budget_cap || hedge_ask > cfg.flip_max_ask {
         return None;
     }
-    let hedge_clip_base = cfg.flip_hedge_clip_usd.max(cfg.probe_clip_usd);
+    let probe_clip = cfg.effective_probe_clip_usd(&config.session);
+    let hedge_clip_base = cfg
+        .effective_flip_hedge_clip_usd(&config.session)
+        .max(probe_clip);
     let budget_left = budget_cap - state.hedge_spent_usd;
     let hedge_clip = hedge_clip_base
         .min(budget_left)
-        .max(cfg.probe_clip_usd.min(budget_left));
+        .max(probe_clip.min(budget_left));
     Some(TierPlan {
         tier: EndgameTier::FlipHedge,
         max_pay: hedge_ask.min(cfg.flip_max_ask),
@@ -611,36 +632,44 @@ pub fn plan_j_window(
 
     // Endgame zone: flip-hedge first (defends a reversal), then discount reload
     // if our existing thesis is still winner but got cheaper, then composite.
-    plan_flip_hedge_rescue(cfg, state, current_winner, spot, ptb, gz, prices, mid_cross).or_else(
-        || {
-            if !allow_directional {
-                return None;
-            }
-            let ask = side_ask(current_winner, prices);
-            if let Some(plan) = plan_discount_reload(
-                config,
-                state,
-                win_state,
-                current_winner,
-                ask,
-                gz,
-                available_cash,
-            ) {
-                return Some(plan);
-            }
-            plan_endgame_composite(
-                config,
-                state,
-                win_state,
-                current_winner,
-                ask,
-                gz,
-                confidence,
-                elapsed_pct,
-                available_cash,
-            )
-        },
+    plan_flip_hedge_rescue(
+        config,
+        state,
+        current_winner,
+        spot,
+        ptb,
+        gz,
+        prices,
+        mid_cross,
     )
+    .or_else(|| {
+        if !allow_directional {
+            return None;
+        }
+        let ask = side_ask(current_winner, prices);
+        if let Some(plan) = plan_discount_reload(
+            config,
+            state,
+            win_state,
+            current_winner,
+            ask,
+            gz,
+            available_cash,
+        ) {
+            return Some(plan);
+        }
+        plan_endgame_composite(
+            config,
+            state,
+            win_state,
+            current_winner,
+            ask,
+            gz,
+            confidence,
+            elapsed_pct,
+            available_cash,
+        )
+    })
 }
 
 pub fn projected_redeem_pnl(win_state: &WindowState, winner: &str, fee_bps: f64) -> f64 {
@@ -1116,17 +1145,18 @@ mod tests {
         j.flip_tier_usd = 4.0;
         j.flip_hedge_exposure_ratio = 0.25;
         j.flip_tier_max_usd = 8.0;
+        let cfg = full_cfg(j);
         let state_small = JWindowState {
             rescue_spent_usd: 20.0,
             primary_side: Some("DOWN".to_string()),
             ..Default::default()
         };
-        assert!((flip_hedge_budget_cap(&j, &state_small) - 5.0).abs() < 1e-9);
+        assert!((flip_hedge_budget_cap(&cfg, &state_small) - 5.0).abs() < 1e-9);
         let state_large = JWindowState {
             rescue_spent_usd: 70.0,
             primary_side: Some("DOWN".to_string()),
             ..Default::default()
         };
-        assert!((flip_hedge_budget_cap(&j, &state_large) - 8.0).abs() < 1e-9);
+        assert!((flip_hedge_budget_cap(&cfg, &state_large) - 8.0).abs() < 1e-9);
     }
 }

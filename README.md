@@ -90,8 +90,9 @@ Function: `plan_endgame_composite()`.
 ```
 enter         = effective_conf_enter(ask, gap_z)   // lower for cheap ask / safe gap
 eff           = ramp(confidence, enter, 1.0)
-tail_cap      = tail_cut_exposure_cap_usd(ask)     // lower cap for expensive asks
-conf_target      = min(eff × maxRescueUsd, tail_cap)
+tail_cap      = tail_cut_exposure_cap_usd(ask)     // effective bank-sized cap by ask
+max_rescue    = effective_max_rescue_usd(bank)
+conf_target      = min(eff × max_rescue, tail_cap)
 profit_increment = USD still needed for redeem PnL ≥ targetProfitUsd
                    (only when exposure already exists — not on a blank window)
 target           = min(max(conf_target, rescue_spent_usd + profit_increment), tail_cap)
@@ -105,10 +106,14 @@ If `profit_increment` cannot fit inside the remaining rescue/window/cash cap, or
 
 | Stage | Rule |
 |-------|------|
-| **First BUY** | capped at `firstClipUsd` ($8) |
+| **First BUY** | capped at `effective_first_clip_usd` |
 | **Follow-up** | ramp on gap_z + window % + cheap ask |
-| **Ceiling** | `maxClipUsd` ($35) |
-| **Anti-spam** | `minIncrementUsd` ($5), `minBuyIntervalMs` (3000 ms) |
+| **Ceiling** | `effective_max_clip_usd` |
+| **Anti-spam** | `effective_min_increment_usd`, `minBuyIntervalMs` (3000 ms) |
+
+When `bankSizingEnabled` is true, these fixed USD values become clamps/fallbacks.
+Runtime size is `startingBank × pct`, clamped by `*MinFix` / `*MaxFix`, with
+`minTradeUsd` enforcing Polymarket's $1 minimum order.
 
 ### Expensive ask + weak gap
 
@@ -121,14 +126,15 @@ Protects against coin-flip entries @ 95–99¢.
 
 ### Tail-cut exposure caps
 
-Primary winner buys are now hard-capped by winner ask:
+Primary winner buys are hard-capped by winner ask. With bank sizing enabled,
+the active cap is the matching `*Pct` clamped by `*MinFix`/`*MaxFix`.
 
 | Winner ask | Max primary exposure |
 |------------|----------------------|
-| `<= 0.70` | `tailCapAsk70Usd` ($75) |
-| `<= 0.88` | `tailCapAsk88Usd` ($55) |
-| `<= 0.94` | `tailCapAsk94Usd` ($32) |
-| `<= 0.97` | `tailCapAsk97Usd` ($14) |
+| `<= 0.70` | `effective_tail_cap_ask70_usd` |
+| `<= 0.88` | `effective_tail_cap_ask88_usd` |
+| `<= 0.94` | `effective_tail_cap_ask94_usd` |
+| `<= 0.97` | `effective_tail_cap_ask97_usd` |
 | `> 0.97` | no fresh primary buy |
 
 Fresh directional buys also pause for `freshCrossFreezeSecs` after a mid-price side cross. This freeze does not block sell-rescue or flip hedge.
@@ -161,7 +167,7 @@ Arms when:
 
 Mid-lead flips alone no longer buy the opposite leg; they are treated as chop/freeze evidence.
 
-Taker buy on the opposite side is small: `flipHedgeClipUsd` ($4), up to `flipTierMaxUsd` ($8), max ask `flipMaxAsk` (0.85).
+Taker buy on the opposite side is small: `effective_flip_hedge_clip_usd`, up to `effective_flip_tier_max_usd`, max ask `flipMaxAsk` (0.85).
 
 Flip hedge is partial cover only after a real spot/PTB reversal when the thesis breaks after primary exposure is live.
 
@@ -192,35 +198,61 @@ Key fields (current defaults):
     "endgameSecs": 120,
     "cheapMinElapsedPct": 50.0,
     "targetProfitUsd": 1.0,
+    "bankSizingEnabled": true,
+    "minTradeUsd": 1.0,
     "maxRescueUsd": 75.0,
+    "maxRescueUsdPct": 15.0,
+    "maxRescueUsdMinFix": 3.0,
+    "maxRescueUsdMaxFix": 300.0,
     "maxUsdPerWindow": 80.0,
+    "maxUsdPerWindowPct": 16.0,
+    "maxUsdPerWindowMinFix": 3.0,
+    "maxUsdPerWindowMaxFix": 320.0,
     "firstClipUsd": 8.0,
+    "firstClipPct": 1.6,
+    "firstClipMinFix": 1.0,
+    "firstClipMaxFix": 32.0,
     "maxClipUsd": 35.0,
+    "maxClipPct": 7.0,
+    "maxClipMinFix": 1.0,
+    "maxClipMaxFix": 140.0,
     "minIncrementUsd": 5.0,
+    "minIncrementPct": 1.0,
+    "minIncrementMinFix": 1.0,
+    "minIncrementMaxFix": 20.0,
     "minBuyIntervalMs": 3000,
     "expensiveAskThreshold": 0.94,
     "expensiveMinGapZ": 1.35,
     "abortRescueIfAskAbove": 0.97,
     "tailCapAsk70Usd": 75.0,
+    "tailCapAsk70Pct": 15.0,
     "tailCapAsk88Usd": 55.0,
+    "tailCapAsk88Pct": 11.0,
     "tailCapAsk94Usd": 32.0,
+    "tailCapAsk94Pct": 6.5,
     "tailCapAsk97Usd": 14.0,
+    "tailCapAsk97Pct": 3.0,
     "freshCrossFreezeSecs": 8,
     "discountReloadEnabled": true,
     "discountReloadMaxAsk": 0.74,
     "discountReloadMinDrop": 0.12,
     "discountReloadMinGapZ": 1.10,
     "discountReloadClipUsd": 4.0,
+    "discountReloadClipPct": 2.0,
     "discountReloadMaxUsd": 12.0,
+    "discountReloadMaxPct": 6.0,
     "discountReloadMaxClips": 2,
     "confEnter": 0.58,
     "fullSizeGapZ": 1.8,
     "finalSealMinGapZ": 0.8,
     "flipHedgeEnabled": true,
     "flipTierUsd": 4.0,
+    "flipTierPct": 2.0,
     "flipHedgeExposureRatio": 0.25,
     "flipTierMaxUsd": 8.0,
+    "flipTierMaxPct": 4.0,
     "flipHedgeClipUsd": 4.0,
+    "flipHedgeClipPct": 2.0,
     "flipSweepClipsPerTick": 1,
     "flipMaxAsk": 0.85,
     "flipRequireSpotCross": true,
@@ -250,7 +282,20 @@ cargo run --release -- ETH 5m
 
 `config.json` must have `"strategy": "j_endgame"`.
 
-Session budget: clamped by `session.maxWindowBudget` — currently up to **$80/window** on a $500 bank.
+Active config is debug-sized at **$20 per process/asset**. `startingBank` is the
+single value to change: for live per-process bank around **$200**, set only
+`session.startingBank` to `200`. Strategy J does not need `minWindowBudget` /
+`maxWindowBudget`; when omitted, J uses only the bank-sized caps from
+`jEndgame`.
+
+Effective examples:
+
+| Bank | Max window | Max rescue | First clip | Max clip | Reload clip |
+|------|------------|------------|------------|----------|-------------|
+| `$20` debug | `$3.20` | `$3.00` | `$1.00` | `$1.40` | `$1.00` |
+| `$200` live | `$32.00` | `$30.00` | `$3.20` | `$14.00` | `$4.00` |
+| `$1,000` | `$160.00` | `$150.00` | `$16.00` | `$70.00` | `$16.00` |
+| `$10,000` | `$320.00` | `$300.00` | `$32.00` | `$140.00` | `$16.00` |
 
 ---
 
@@ -302,7 +347,7 @@ Winrate on **400+ windows** is **97–100%** — useful as a sanity check, not t
 | winrate (400+ windows) | 97–100% | sustained drop below ~95% |
 | avg PnL / window | ~$1–4 | ≪ $0 over 50+ windows |
 | spent / window | stable, gated | unbounded ramp on weak gap |
-| first clip | ~$8 (`firstClipUsd`) | $35 on first tick |
+| first clip | bank-sized `effective_first_clip_usd` | max clip on first tick |
 | `j_flip_hedge_*` on losses | hedge fired when thesis broke | 0 hedge on clear reversal |
 | sig mid-crosses at entry | 0–2 | heavy chop ignored at entry |
 
@@ -333,9 +378,9 @@ src/
 - **Paper ≠ live** — real CLOB depth, fees, and latency can differ; 97–100% is on paper over 400+ real-time windows.
 - **Cheap-ask trap** — winner @86¢ still loses if spot crosses PTB late; gates reduce frequency, they do not eliminate it.
 - **Chop filter is entry-time only** — `maxSigCrossesDirectional` uses crosses **at entry**; end-of-window panic chop can still hurt an open position (flip hedge is the backstop).
-- **Flip hedge cap $12** — partial, not delta-neutral.
+- **Flip hedge is partial** — capped by bank-sized `flipTierMax*`, not delta-neutral.
 - BUY amount is **USD**, not shares. Min notional ~$1.
-- `cargo test` — 70 unit tests on planner/sizing/flip.
+- `cargo test` — 84 unit tests on planner/sizing/flip.
 
 ---
 

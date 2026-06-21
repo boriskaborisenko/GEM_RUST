@@ -7,11 +7,11 @@ use std::path::Path;
 pub struct SessionConfig {
     #[serde(rename = "startingBank")]
     pub starting_bank: f64,
-    #[serde(rename = "minWindowBudget")]
+    #[serde(rename = "minWindowBudget", default)]
     pub min_window_budget: f64,
-    #[serde(rename = "maxWindowBudget")]
+    #[serde(rename = "maxWindowBudget", default)]
     pub max_window_budget: f64,
-    #[serde(rename = "windowBudgetPct")]
+    #[serde(rename = "windowBudgetPct", default = "default_window_budget_pct")]
     pub window_budget_pct: f64,
 }
 
@@ -87,6 +87,10 @@ fn default_llm_location() -> String {
 
 fn default_zero() -> f64 {
     0.0
+}
+
+fn default_window_budget_pct() -> f64 {
+    100.0
 }
 
 fn deserialize_llm_config<'de, D>(deserializer: D) -> Result<LlmConfig, D::Error>
@@ -298,6 +302,96 @@ pub struct JEndgameConfig {
     /// Upper bound for a single dynamic clip (USD).
     #[serde(default = "j_default_max_clip_usd")]
     pub max_clip_usd: f64,
+    /// Percent-based sizing for one process/asset. When enabled, fixed USD fields
+    /// become max clamps and effective sizes are bank_pct clamped by min/max fix.
+    #[serde(default)]
+    pub bank_sizing_enabled: bool,
+    #[serde(default = "j_default_min_trade_usd")]
+    pub min_trade_usd: f64,
+    #[serde(default = "j_default_max_usd_per_window_pct")]
+    pub max_usd_per_window_pct: f64,
+    #[serde(default = "j_default_max_usd_per_window_min_fix")]
+    pub max_usd_per_window_min_fix: f64,
+    #[serde(default = "j_default_max_usd_per_window")]
+    pub max_usd_per_window_max_fix: f64,
+    #[serde(default = "j_default_max_rescue_usd_pct")]
+    pub max_rescue_usd_pct: f64,
+    #[serde(default = "j_default_max_rescue_usd_min_fix")]
+    pub max_rescue_usd_min_fix: f64,
+    #[serde(default = "j_default_max_rescue_usd")]
+    pub max_rescue_usd_max_fix: f64,
+    #[serde(default = "j_default_tail_cap_ask70_pct")]
+    pub tail_cap_ask70_pct: f64,
+    #[serde(default = "j_default_tail_cap_ask70_min_fix")]
+    pub tail_cap_ask70_min_fix: f64,
+    #[serde(default = "j_default_tail_cap_ask70_usd")]
+    pub tail_cap_ask70_max_fix: f64,
+    #[serde(default = "j_default_tail_cap_ask88_pct")]
+    pub tail_cap_ask88_pct: f64,
+    #[serde(default = "j_default_tail_cap_ask88_min_fix")]
+    pub tail_cap_ask88_min_fix: f64,
+    #[serde(default = "j_default_tail_cap_ask88_usd")]
+    pub tail_cap_ask88_max_fix: f64,
+    #[serde(default = "j_default_tail_cap_ask94_pct")]
+    pub tail_cap_ask94_pct: f64,
+    #[serde(default = "j_default_tail_cap_ask94_min_fix")]
+    pub tail_cap_ask94_min_fix: f64,
+    #[serde(default = "j_default_tail_cap_ask94_usd")]
+    pub tail_cap_ask94_max_fix: f64,
+    #[serde(default = "j_default_tail_cap_ask97_pct")]
+    pub tail_cap_ask97_pct: f64,
+    #[serde(default = "j_default_tail_cap_ask97_min_fix")]
+    pub tail_cap_ask97_min_fix: f64,
+    #[serde(default = "j_default_tail_cap_ask97_usd")]
+    pub tail_cap_ask97_max_fix: f64,
+    #[serde(default = "j_default_first_clip_pct")]
+    pub first_clip_pct: f64,
+    #[serde(default = "j_default_first_clip_min_fix")]
+    pub first_clip_min_fix: f64,
+    #[serde(default = "j_default_first_clip_usd")]
+    pub first_clip_max_fix: f64,
+    #[serde(default = "j_default_max_clip_pct")]
+    pub max_clip_pct: f64,
+    #[serde(default = "j_default_max_clip_min_fix")]
+    pub max_clip_min_fix: f64,
+    #[serde(default = "j_default_max_clip_usd")]
+    pub max_clip_max_fix: f64,
+    #[serde(default = "j_default_min_increment_pct")]
+    pub min_increment_pct: f64,
+    #[serde(default = "j_default_min_increment_min_fix")]
+    pub min_increment_min_fix: f64,
+    #[serde(default = "j_default_min_increment_usd")]
+    pub min_increment_max_fix: f64,
+    #[serde(default = "j_default_flip_tier_pct")]
+    pub flip_tier_pct: f64,
+    #[serde(default = "j_default_flip_tier_min_fix")]
+    pub flip_tier_min_fix: f64,
+    #[serde(default = "j_default_flip_tier_usd")]
+    pub flip_tier_max_fix: f64,
+    #[serde(default = "j_default_flip_tier_max_pct")]
+    pub flip_tier_max_pct: f64,
+    #[serde(default = "j_default_flip_tier_max_min_fix")]
+    pub flip_tier_max_min_fix: f64,
+    #[serde(default = "j_default_flip_tier_max_usd")]
+    pub flip_tier_max_max_fix: f64,
+    #[serde(default = "j_default_flip_hedge_clip_pct")]
+    pub flip_hedge_clip_pct: f64,
+    #[serde(default = "j_default_flip_hedge_clip_min_fix")]
+    pub flip_hedge_clip_min_fix: f64,
+    #[serde(default = "j_default_flip_hedge_clip_usd")]
+    pub flip_hedge_clip_max_fix: f64,
+    #[serde(default = "j_default_discount_reload_clip_pct")]
+    pub discount_reload_clip_pct: f64,
+    #[serde(default = "j_default_discount_reload_clip_min_fix")]
+    pub discount_reload_clip_min_fix: f64,
+    #[serde(default = "j_default_discount_reload_clip_usd")]
+    pub discount_reload_clip_max_fix: f64,
+    #[serde(default = "j_default_discount_reload_max_pct")]
+    pub discount_reload_max_pct: f64,
+    #[serde(default = "j_default_discount_reload_max_min_fix")]
+    pub discount_reload_max_min_fix: f64,
+    #[serde(default = "j_default_discount_reload_max_usd")]
+    pub discount_reload_max_max_fix: f64,
     // ---- Composite-confidence endgame (target-exposure) ----
     /// Minimum composite confidence C (0..1) to deploy ANY endgame USD on the
     /// winner. Below this the window is treated as a coin flip and skipped.
@@ -575,6 +669,93 @@ fn j_default_full_size_gap_z() -> f64 {
 fn j_default_max_clip_usd() -> f64 {
     35.0
 }
+fn j_default_min_trade_usd() -> f64 {
+    1.0
+}
+fn j_default_max_usd_per_window_pct() -> f64 {
+    16.0
+}
+fn j_default_max_usd_per_window_min_fix() -> f64 {
+    3.0
+}
+fn j_default_max_rescue_usd_pct() -> f64 {
+    15.0
+}
+fn j_default_max_rescue_usd_min_fix() -> f64 {
+    3.0
+}
+fn j_default_tail_cap_ask70_pct() -> f64 {
+    15.0
+}
+fn j_default_tail_cap_ask70_min_fix() -> f64 {
+    3.0
+}
+fn j_default_tail_cap_ask88_pct() -> f64 {
+    11.0
+}
+fn j_default_tail_cap_ask88_min_fix() -> f64 {
+    2.0
+}
+fn j_default_tail_cap_ask94_pct() -> f64 {
+    6.5
+}
+fn j_default_tail_cap_ask94_min_fix() -> f64 {
+    1.0
+}
+fn j_default_tail_cap_ask97_pct() -> f64 {
+    3.0
+}
+fn j_default_tail_cap_ask97_min_fix() -> f64 {
+    1.0
+}
+fn j_default_first_clip_pct() -> f64 {
+    1.6
+}
+fn j_default_first_clip_min_fix() -> f64 {
+    1.0
+}
+fn j_default_max_clip_pct() -> f64 {
+    7.0
+}
+fn j_default_max_clip_min_fix() -> f64 {
+    1.0
+}
+fn j_default_min_increment_pct() -> f64 {
+    1.0
+}
+fn j_default_min_increment_min_fix() -> f64 {
+    1.0
+}
+fn j_default_flip_tier_pct() -> f64 {
+    2.0
+}
+fn j_default_flip_tier_min_fix() -> f64 {
+    1.0
+}
+fn j_default_flip_tier_max_pct() -> f64 {
+    4.0
+}
+fn j_default_flip_tier_max_min_fix() -> f64 {
+    1.0
+}
+fn j_default_flip_hedge_clip_pct() -> f64 {
+    2.0
+}
+fn j_default_flip_hedge_clip_min_fix() -> f64 {
+    1.0
+}
+fn j_default_discount_reload_clip_pct() -> f64 {
+    2.0
+}
+fn j_default_discount_reload_clip_min_fix() -> f64 {
+    1.0
+}
+fn j_default_discount_reload_max_pct() -> f64 {
+    6.0
+}
+fn j_default_discount_reload_max_min_fix() -> f64 {
+    1.0
+}
 fn j_default_conf_enter() -> f64 {
     0.58
 }
@@ -714,6 +895,50 @@ impl Default for JEndgameConfig {
             final_seal_min_gap_z: j_default_final_seal_min_gap_z(),
             full_size_gap_z: j_default_full_size_gap_z(),
             max_clip_usd: j_default_max_clip_usd(),
+            bank_sizing_enabled: false,
+            min_trade_usd: j_default_min_trade_usd(),
+            max_usd_per_window_pct: j_default_max_usd_per_window_pct(),
+            max_usd_per_window_min_fix: j_default_max_usd_per_window_min_fix(),
+            max_usd_per_window_max_fix: j_default_max_usd_per_window(),
+            max_rescue_usd_pct: j_default_max_rescue_usd_pct(),
+            max_rescue_usd_min_fix: j_default_max_rescue_usd_min_fix(),
+            max_rescue_usd_max_fix: j_default_max_rescue_usd(),
+            tail_cap_ask70_pct: j_default_tail_cap_ask70_pct(),
+            tail_cap_ask70_min_fix: j_default_tail_cap_ask70_min_fix(),
+            tail_cap_ask70_max_fix: j_default_tail_cap_ask70_usd(),
+            tail_cap_ask88_pct: j_default_tail_cap_ask88_pct(),
+            tail_cap_ask88_min_fix: j_default_tail_cap_ask88_min_fix(),
+            tail_cap_ask88_max_fix: j_default_tail_cap_ask88_usd(),
+            tail_cap_ask94_pct: j_default_tail_cap_ask94_pct(),
+            tail_cap_ask94_min_fix: j_default_tail_cap_ask94_min_fix(),
+            tail_cap_ask94_max_fix: j_default_tail_cap_ask94_usd(),
+            tail_cap_ask97_pct: j_default_tail_cap_ask97_pct(),
+            tail_cap_ask97_min_fix: j_default_tail_cap_ask97_min_fix(),
+            tail_cap_ask97_max_fix: j_default_tail_cap_ask97_usd(),
+            first_clip_pct: j_default_first_clip_pct(),
+            first_clip_min_fix: j_default_first_clip_min_fix(),
+            first_clip_max_fix: j_default_first_clip_usd(),
+            max_clip_pct: j_default_max_clip_pct(),
+            max_clip_min_fix: j_default_max_clip_min_fix(),
+            max_clip_max_fix: j_default_max_clip_usd(),
+            min_increment_pct: j_default_min_increment_pct(),
+            min_increment_min_fix: j_default_min_increment_min_fix(),
+            min_increment_max_fix: j_default_min_increment_usd(),
+            flip_tier_pct: j_default_flip_tier_pct(),
+            flip_tier_min_fix: j_default_flip_tier_min_fix(),
+            flip_tier_max_fix: j_default_flip_tier_usd(),
+            flip_tier_max_pct: j_default_flip_tier_max_pct(),
+            flip_tier_max_min_fix: j_default_flip_tier_max_min_fix(),
+            flip_tier_max_max_fix: j_default_flip_tier_max_usd(),
+            flip_hedge_clip_pct: j_default_flip_hedge_clip_pct(),
+            flip_hedge_clip_min_fix: j_default_flip_hedge_clip_min_fix(),
+            flip_hedge_clip_max_fix: j_default_flip_hedge_clip_usd(),
+            discount_reload_clip_pct: j_default_discount_reload_clip_pct(),
+            discount_reload_clip_min_fix: j_default_discount_reload_clip_min_fix(),
+            discount_reload_clip_max_fix: j_default_discount_reload_clip_usd(),
+            discount_reload_max_pct: j_default_discount_reload_max_pct(),
+            discount_reload_max_min_fix: j_default_discount_reload_max_min_fix(),
+            discount_reload_max_max_fix: j_default_discount_reload_max_usd(),
             conf_enter: j_default_conf_enter(),
             conf_w_gap: j_default_conf_w_gap(),
             conf_w_mom: j_default_conf_w_mom(),
@@ -777,6 +1002,173 @@ impl Config {
     }
 }
 
+impl JEndgameConfig {
+    fn sized_usd(
+        &self,
+        session: &SessionConfig,
+        fixed: f64,
+        pct: f64,
+        min_fix: f64,
+        max_fix: f64,
+    ) -> f64 {
+        if !self.bank_sizing_enabled {
+            return fixed.max(0.0);
+        }
+        let bank = session.starting_bank.max(0.0);
+        let min_fix = min_fix.max(self.min_trade_usd.max(1.0));
+        let max_fix = max_fix.max(min_fix);
+        (bank * pct.max(0.0) / 100.0).clamp(min_fix, max_fix)
+    }
+
+    pub fn effective_probe_clip_usd(&self, session: &SessionConfig) -> f64 {
+        if self.bank_sizing_enabled {
+            self.min_trade_usd.max(1.0)
+        } else {
+            self.probe_clip_usd.max(1e-9)
+        }
+    }
+
+    pub fn effective_max_usd_per_window(&self, session: &SessionConfig) -> f64 {
+        self.sized_usd(
+            session,
+            self.max_usd_per_window,
+            self.max_usd_per_window_pct,
+            self.max_usd_per_window_min_fix,
+            self.max_usd_per_window_max_fix,
+        )
+    }
+
+    pub fn effective_max_rescue_usd(&self, session: &SessionConfig) -> f64 {
+        self.sized_usd(
+            session,
+            self.max_rescue_usd,
+            self.max_rescue_usd_pct,
+            self.max_rescue_usd_min_fix,
+            self.max_rescue_usd_max_fix,
+        )
+    }
+
+    pub fn effective_tail_cap_ask70_usd(&self, session: &SessionConfig) -> f64 {
+        self.sized_usd(
+            session,
+            self.tail_cap_ask70_usd,
+            self.tail_cap_ask70_pct,
+            self.tail_cap_ask70_min_fix,
+            self.tail_cap_ask70_max_fix,
+        )
+    }
+
+    pub fn effective_tail_cap_ask88_usd(&self, session: &SessionConfig) -> f64 {
+        self.sized_usd(
+            session,
+            self.tail_cap_ask88_usd,
+            self.tail_cap_ask88_pct,
+            self.tail_cap_ask88_min_fix,
+            self.tail_cap_ask88_max_fix,
+        )
+    }
+
+    pub fn effective_tail_cap_ask94_usd(&self, session: &SessionConfig) -> f64 {
+        self.sized_usd(
+            session,
+            self.tail_cap_ask94_usd,
+            self.tail_cap_ask94_pct,
+            self.tail_cap_ask94_min_fix,
+            self.tail_cap_ask94_max_fix,
+        )
+    }
+
+    pub fn effective_tail_cap_ask97_usd(&self, session: &SessionConfig) -> f64 {
+        self.sized_usd(
+            session,
+            self.tail_cap_ask97_usd,
+            self.tail_cap_ask97_pct,
+            self.tail_cap_ask97_min_fix,
+            self.tail_cap_ask97_max_fix,
+        )
+    }
+
+    pub fn effective_first_clip_usd(&self, session: &SessionConfig) -> f64 {
+        self.sized_usd(
+            session,
+            self.first_clip_usd,
+            self.first_clip_pct,
+            self.first_clip_min_fix,
+            self.first_clip_max_fix,
+        )
+    }
+
+    pub fn effective_max_clip_usd(&self, session: &SessionConfig) -> f64 {
+        self.sized_usd(
+            session,
+            self.max_clip_usd,
+            self.max_clip_pct,
+            self.max_clip_min_fix,
+            self.max_clip_max_fix,
+        )
+    }
+
+    pub fn effective_min_increment_usd(&self, session: &SessionConfig) -> f64 {
+        self.sized_usd(
+            session,
+            self.min_increment_usd,
+            self.min_increment_pct,
+            self.min_increment_min_fix,
+            self.min_increment_max_fix,
+        )
+    }
+
+    pub fn effective_flip_tier_usd(&self, session: &SessionConfig) -> f64 {
+        self.sized_usd(
+            session,
+            self.flip_tier_usd,
+            self.flip_tier_pct,
+            self.flip_tier_min_fix,
+            self.flip_tier_max_fix,
+        )
+    }
+
+    pub fn effective_flip_tier_max_usd(&self, session: &SessionConfig) -> f64 {
+        self.sized_usd(
+            session,
+            self.flip_tier_max_usd,
+            self.flip_tier_max_pct,
+            self.flip_tier_max_min_fix,
+            self.flip_tier_max_max_fix,
+        )
+    }
+
+    pub fn effective_flip_hedge_clip_usd(&self, session: &SessionConfig) -> f64 {
+        self.sized_usd(
+            session,
+            self.flip_hedge_clip_usd,
+            self.flip_hedge_clip_pct,
+            self.flip_hedge_clip_min_fix,
+            self.flip_hedge_clip_max_fix,
+        )
+    }
+
+    pub fn effective_discount_reload_clip_usd(&self, session: &SessionConfig) -> f64 {
+        self.sized_usd(
+            session,
+            self.discount_reload_clip_usd,
+            self.discount_reload_clip_pct,
+            self.discount_reload_clip_min_fix,
+            self.discount_reload_clip_max_fix,
+        )
+    }
+
+    pub fn effective_discount_reload_max_usd(&self, session: &SessionConfig) -> f64 {
+        self.sized_usd(
+            session,
+            self.discount_reload_max_usd,
+            self.discount_reload_max_pct,
+            self.discount_reload_max_min_fix,
+            self.discount_reload_max_max_fix,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -789,10 +1181,25 @@ mod tests {
             "clip_usd={}",
             cfg.j_endgame.clip_usd
         );
-        assert!((cfg.session.starting_bank - 500.0).abs() < 1e-9);
+        assert!((cfg.session.starting_bank - 100.0).abs() < 1e-9);
+        assert!((cfg.session.min_window_budget - 0.0).abs() < 1e-9);
+        assert!((cfg.session.max_window_budget - 0.0).abs() < 1e-9);
+        assert!((cfg.session.window_budget_pct - 100.0).abs() < 1e-9);
         assert_eq!(cfg.j_endgame.max_clips_per_window, 0);
         assert!((cfg.j_endgame.max_usd_per_window - 80.0).abs() < 1e-9);
         assert!((cfg.j_endgame.max_rescue_usd - 75.0).abs() < 1e-9);
+        assert!(cfg.j_endgame.bank_sizing_enabled);
+        assert!((cfg.j_endgame.effective_max_usd_per_window(&cfg.session) - 16.0).abs() < 1e-9);
+        assert!((cfg.j_endgame.effective_max_rescue_usd(&cfg.session) - 15.0).abs() < 1e-9);
+        assert!((cfg.j_endgame.effective_first_clip_usd(&cfg.session) - 1.6).abs() < 1e-9);
+        assert!((cfg.j_endgame.effective_max_clip_usd(&cfg.session) - 7.0).abs() < 1e-9);
+        assert!(
+            (cfg.j_endgame
+                .effective_discount_reload_clip_usd(&cfg.session)
+                - 2.0)
+                .abs()
+                < 1e-9
+        );
         assert!((cfg.j_endgame.conf_enter - 0.58).abs() < 1e-9);
         assert!((cfg.j_endgame.max_clip_usd - 35.0).abs() < 1e-9);
         assert!((cfg.j_endgame.insurance_max_ask - 0.18).abs() < 1e-9);
