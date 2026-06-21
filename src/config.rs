@@ -196,6 +196,10 @@ pub struct JEndgameConfig {
     pub flip_sweep_clips_per_tick: u8,
     #[serde(default = "j_default_flip_max_ask")]
     pub flip_max_ask: f64,
+    /// Require the underlying spot to cross PTB against primary before buying
+    /// the opposite leg. Mid-lead flips alone only freeze/diagnose, not hedge.
+    #[serde(default = "j_default_true")]
+    pub flip_require_spot_cross: bool,
     #[serde(default)]
     pub flip_require_tape: bool,
     /// Enable selling the primary leg when the thesis breaks and bid salvage beats holding loser to $0.
@@ -440,28 +444,28 @@ fn j_default_flip_min_gap_z() -> f64 {
     0.4
 }
 fn j_default_flip_tier_usd() -> f64 {
-    12.0
+    4.0
 }
 fn j_default_flip_hedge_exposure_ratio() -> f64 {
-    0.45
+    0.25
 }
 fn j_default_flip_tier_max_usd() -> f64 {
-    45.0
+    8.0
 }
 fn j_default_flip_hedge_clip_usd() -> f64 {
-    15.0
+    4.0
 }
 fn j_default_flip_sweep_clips() -> u8 {
-    4
+    1
 }
 fn j_default_flip_max_ask() -> f64 {
-    0.97
+    0.85
 }
 fn j_default_sell_rescue_min_bid() -> f64 {
     0.20
 }
 fn j_default_sell_rescue_min_gap_z() -> f64 {
-    0.65
+    1.20
 }
 fn j_default_sell_rescue_min_value_usd() -> f64 {
     1.0
@@ -667,6 +671,7 @@ impl Default for JEndgameConfig {
             flip_hedge_clip_usd: j_default_flip_hedge_clip_usd(),
             flip_sweep_clips_per_tick: j_default_flip_sweep_clips(),
             flip_max_ask: j_default_flip_max_ask(),
+            flip_require_spot_cross: j_default_true(),
             flip_require_tape: j_default_false(),
             sell_rescue_enabled: j_default_true(),
             sell_rescue_min_bid: j_default_sell_rescue_min_bid(),

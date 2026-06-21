@@ -156,12 +156,14 @@ Function: `flip_hedge_triggered()` in `strategy_j.rs`.
 Arms when:
 
 - `has_primary_exposure()` — `primary_side` set **and** USD deployed (composite → `rescue_spent_usd`, not only cheap/late clip counters)
-- Spot **or** mid lead is **against** our side
-- Enough evidence: significant crosses / cross count / `|gap_z| ≥ flipMinGapZ`
+- Spot crosses PTB against our side (`flipRequireSpotCross: true`)
+- `gap_z` is sign-aware and against primary by at least `flipMinGapZ`
 
-Taker buy on the opposite side up to **`flipTierUsd`** ($12), max ask **`flipMaxAsk`** (0.99).
+Mid-lead flips alone no longer buy the opposite leg; they are treated as chop/freeze evidence.
 
-Flip hedge is partial cover on reversal when the thesis breaks after primary exposure is live.
+Taker buy on the opposite side is small: `flipHedgeClipUsd` ($4), up to `flipTierMaxUsd` ($8), max ask `flipMaxAsk` (0.85).
+
+Flip hedge is partial cover only after a real spot/PTB reversal when the thesis breaks after primary exposure is live.
 
 ---
 
@@ -215,7 +217,14 @@ Key fields (current defaults):
     "fullSizeGapZ": 1.8,
     "finalSealMinGapZ": 0.8,
     "flipHedgeEnabled": true,
-    "flipTierUsd": 12.0,
+    "flipTierUsd": 4.0,
+    "flipHedgeExposureRatio": 0.25,
+    "flipTierMaxUsd": 8.0,
+    "flipHedgeClipUsd": 4.0,
+    "flipSweepClipsPerTick": 1,
+    "flipMaxAsk": 0.85,
+    "flipRequireSpotCross": true,
+    "sellRescueMinGapZ": 1.20,
     "insuranceEnabled": false,
     "takerMode": true,
     "takerMaxAsk": 0.99,

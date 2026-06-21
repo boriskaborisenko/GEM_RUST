@@ -545,13 +545,7 @@ pub fn plan_flip_hedge_rescue(
     if state.hedge_spent_usd + 1e-9 >= budget_cap || hedge_ask > cfg.flip_max_ask {
         return None;
     }
-    let gz_against_primary = if primary == "UP" { -gz } else { gz };
-    let hedge_clip_base = if gz_against_primary >= cfg.flip_min_gap_z * 2.0 {
-        cfg.flip_hedge_clip_usd
-            .max(cfg.clip_usd.max(cfg.probe_clip_usd))
-    } else {
-        cfg.clip_usd.max(cfg.probe_clip_usd)
-    };
+    let hedge_clip_base = cfg.flip_hedge_clip_usd.max(cfg.probe_clip_usd);
     let budget_left = budget_cap - state.hedge_spent_usd;
     let hedge_clip = hedge_clip_base
         .min(budget_left)
@@ -1119,20 +1113,20 @@ mod tests {
     #[test]
     fn flip_hedge_budget_scales_with_primary_exposure() {
         let mut j = j_cfg();
-        j.flip_tier_usd = 12.0;
-        j.flip_hedge_exposure_ratio = 0.45;
-        j.flip_tier_max_usd = 45.0;
+        j.flip_tier_usd = 4.0;
+        j.flip_hedge_exposure_ratio = 0.25;
+        j.flip_tier_max_usd = 8.0;
         let state_small = JWindowState {
             rescue_spent_usd: 20.0,
             primary_side: Some("DOWN".to_string()),
             ..Default::default()
         };
-        assert!((flip_hedge_budget_cap(&j, &state_small) - 12.0).abs() < 1e-9);
+        assert!((flip_hedge_budget_cap(&j, &state_small) - 5.0).abs() < 1e-9);
         let state_large = JWindowState {
             rescue_spent_usd: 70.0,
             primary_side: Some("DOWN".to_string()),
             ..Default::default()
         };
-        assert!((flip_hedge_budget_cap(&j, &state_large) - 31.5).abs() < 1e-9);
+        assert!((flip_hedge_budget_cap(&j, &state_large) - 8.0).abs() < 1e-9);
     }
 }

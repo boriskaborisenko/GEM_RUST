@@ -396,6 +396,9 @@ pub(crate) fn flip_hedge_triggered(
     }
     let spot_against_primary =
         (primary_side == "UP" && spot < ptb) || (primary_side == "DOWN" && spot > ptb);
+    if cfg.flip_require_spot_cross && !spot_against_primary {
+        return false;
+    }
     let mid_against_primary = mid_cross
         .current_side
         .filter(|s| *s != LeadSide::Tie)
@@ -415,15 +418,13 @@ pub(crate) fn flip_hedge_triggered(
 
     // Sign-aware gap: gap_z>0 means UP leads, <0 means DOWN leads. The hedge
     // buys the side OPPOSITE `primary_side`, so it is only justified when the
-    // time/vol-normalized gap actually leans against our side. The old code
-    // used gz.abs(), which fired even when the gap strongly favored us (e.g. a
-    // one-tick spot blip) and burned the hedge clip on windows we were winning.
+    // time/vol-normalized gap actually leans against our side.
     let gz_against_primary = if primary_side == "UP" { -gz } else { gz };
 
     if spot_against_primary {
         return gz_against_primary >= cfg.flip_min_gap_z;
     }
-    // Mid lead flipped before spot crossed PTB — require chaos evidence.
+    // Legacy mode only: mid lead flipped before spot crossed PTB — require chaos evidence.
     sharp
 }
 
@@ -1522,9 +1523,10 @@ mod tests {
     }
 
     #[test]
-    fn flip_hedge_on_mid_lead_before_spot_cross() {
+    fn flip_hedge_ignores_mid_lead_before_spot_cross() {
         let mut strat = strat_with_cash();
-        let cfg = test_config();
+        let mut cfg = test_config();
+        cfg.j_endgame.sell_rescue_enabled = false;
         let prices = PricesState {
             up: ContractPrices {
                 bid: 0.52,
@@ -1568,6 +1570,24 @@ mod tests {
         mid.current_side = Some(LeadSide::Up);
         mid.cross_count = 8;
         mid.significant_cross_count = 3;
+        assert!(
+            !flip_hedge_triggered(
+                &cfg.j_endgame,
+                &JWindowState {
+                    cheap_spent_usd: 9.0,
+                    cheap_clips: 3,
+                    primary_side: Some("DOWN".to_string()),
+                    ..Default::default()
+                },
+                "DOWN",
+                "DOWN",
+                59_970.0,
+                60_000.0,
+                -1.0,
+                &mid,
+            ),
+            "mid-only flip should not buy a hedge while spot/PTB still supports primary"
+        );
         strat.windows.insert(
             1,
             JWindowState {
@@ -1592,11 +1612,12 @@ mod tests {
             &CexMicroSnapshot::default(),
             &TradeTapeSnapshot::default(),
         );
-        assert!(!signals.is_empty());
-        assert_eq!(signals[0].side, "UP");
         assert!(
-            signals[0].reason.starts_with("j_rescue")
-                || signals[0].reason.starts_with("j_flip_hedge")
+            signals
+                .iter()
+                .all(|s| !(s.side == "UP" && s.reason.starts_with("j_flip_hedge"))),
+            "mid-only flip must not emit opposite hedge: {:?}",
+            signals
         );
     }
 
@@ -1698,11 +1719,17 @@ mod tests {
             "reason={}",
             signals[0].reason
         );
+        assert!(
+            signals[0].amount <= cfg.j_endgame.flip_hedge_clip_usd + 1e-9,
+            "hedge clip should be small, amount={}",
+            signals[0].amount
+        );
     }
 
     #[test]
     fn sell_rescue_cuts_primary_when_thesis_breaks() {
-        let cfg = test_config();
+        let mut cfg = test_config();
+        cfg.j_endgame.sell_rescue_min_gap_z = 0.65;
         let mut strat = strat_with_cash();
         strat.windows.insert(
             1,
@@ -1760,7 +1787,8 @@ mod tests {
 
     #[test]
     fn sell_rescue_fires_when_window_budget_exhausted() {
-        let cfg = test_config();
+        let mut cfg = test_config();
+        cfg.j_endgame.sell_rescue_min_gap_z = 0.65;
         let mut strat = strat_with_cash();
         strat.windows.insert(
             1,
@@ -1819,7 +1847,8 @@ mod tests {
 
     #[test]
     fn sell_rescue_done_set_only_after_execution() {
-        let cfg = test_config();
+        let mut cfg = test_config();
+        cfg.j_endgame.sell_rescue_min_gap_z = 0.65;
         let mut strat = strat_with_cash();
         strat.windows.insert(
             1,
