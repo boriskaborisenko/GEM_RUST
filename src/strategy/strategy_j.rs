@@ -214,20 +214,14 @@ fn shares_for_side(side: &str, win_state: &WindowState) -> f64 {
     }
 }
 
-fn j_buy_order_type(cfg: &crate::config::JEndgameConfig) -> OrderType {
-    if cfg.taker_mode {
-        OrderType::Market
-    } else {
-        OrderType::Limit
-    }
+fn j_buy_order_type(_cfg: &crate::config::JEndgameConfig) -> OrderType {
+    // Endgame entries: market FOK; live executor prices from fresh CLOB book (no stale cap).
+    OrderType::Market
 }
 
-fn sell_rescue_order_type(cfg: &crate::config::JEndgameConfig, secs_to_end: i64) -> OrderType {
-    if cfg.sell_rescue_use_market || secs_to_end <= cfg.sell_rescue_market_secs {
-        OrderType::Market
-    } else {
-        OrderType::Limit
-    }
+fn sell_rescue_order_type(_cfg: &crate::config::JEndgameConfig, _secs_to_end: i64) -> OrderType {
+    // Rescue exits must execute immediately; live maps to market FOK.
+    OrderType::Market
 }
 
 pub(crate) fn winner_side(spot: f64, ptb: f64) -> Option<&'static str> {
@@ -824,12 +818,18 @@ pub(crate) fn tape_hot(
     usd >= cfg.min_tape_usd && count >= cfg.min_tape_buys
 }
 
+/// Worst price for an aggressive endgame buy: ask + slippage, capped by taker_max_ask.
+pub(crate) fn aggressive_buy_limit_price(
+    winner_ask: f64,
+    cfg: &crate::config::JEndgameConfig,
+) -> f64 {
+    (winner_ask + cfg.limit_ask_offset)
+        .min(cfg.taker_max_ask)
+        .max(cfg.min_winner_ask)
+}
+
 pub(crate) fn taker_max_pay(winner_ask: f64, cfg: &crate::config::JEndgameConfig) -> f64 {
-    if cfg.taker_mode {
-        winner_ask.min(cfg.taker_max_ask)
-    } else {
-        (winner_ask - cfg.limit_ask_offset).clamp(cfg.min_winner_ask, cfg.max_winner_ask)
-    }
+    aggressive_buy_limit_price(winner_ask, cfg)
 }
 
 pub(crate) fn sweep_endgame_clips(
@@ -1108,11 +1108,7 @@ impl TradeStrategy for JEndgameStrategy {
             return signals;
         }
 
-        let max_pay = if jcfg.taker_mode {
-            plan.max_pay
-        } else {
-            (winner_ask - jcfg.limit_ask_offset).clamp(jcfg.min_winner_ask, plan.max_pay)
-        };
+        let max_pay = aggressive_buy_limit_price(winner_ask, jcfg);
 
         let cheap_tier = matches!(
             plan.tier,
@@ -1182,7 +1178,7 @@ impl TradeStrategy for JEndgameStrategy {
             EndgameTier::DiscountReload => "discount_reload",
             EndgameTier::FinalSeal => "final_seal",
         };
-        let mode = if jcfg.taker_mode { "taker" } else { "limit" };
+        let mode = "limit";
 
         if let Some(sell) = sell_rescue {
             signals.push(sell);
@@ -1196,7 +1192,7 @@ impl TradeStrategy for JEndgameStrategy {
                 side,
                 j_buy_order_type(jcfg),
                 usd,
-                fill_price,
+                max_pay,
                 format!(
                     "j_{}_{}_{}_fill_{:.2}_ask_{:.2}_gap_z_{:+.2}_phase_{}_pnl_proj_{:+.2}_tape_${:.0}/{}_xc{}",
                     tier_label,
@@ -2515,7 +2511,7 @@ mod tests {
         assert!(!signals.is_empty());
         assert!(!signals[0].is_buy);
         assert_eq!(signals[0].side, "DOWN");
-        assert_eq!(signals[0].order_type.as_str(), "limit");
+        assert_eq!(signals[0].order_type.as_str(), "market");
         assert!(signals[0].reason.starts_with("j_sell_rescue"));
     }
 

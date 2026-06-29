@@ -139,8 +139,10 @@ pub struct ExecutionConfig {
     pub signature_type: LiveSignatureType,
     #[serde(default)]
     pub funder_address: Option<String>,
-    #[serde(default)]
-    pub market_order_type: LiveMarketOrderType,
+    #[serde(default = "execution_default_buy_market_order_type")]
+    pub buy_market_order_type: LiveMarketOrderType,
+    #[serde(default = "execution_default_sell_market_order_type")]
+    pub sell_market_order_type: LiveMarketOrderType,
     #[serde(default)]
     pub limit_order_type: LiveLimitOrderType,
     #[serde(default)]
@@ -162,7 +164,8 @@ impl Default for ExecutionConfig {
             clob_host: execution_default_clob_host(),
             signature_type: LiveSignatureType::Poly1271,
             funder_address: None,
-            market_order_type: LiveMarketOrderType::Fok,
+            buy_market_order_type: execution_default_buy_market_order_type(),
+            sell_market_order_type: execution_default_sell_market_order_type(),
             limit_order_type: LiveLimitOrderType::Gtd,
             limit_post_only: true,
             limit_ttl_ms: execution_default_limit_ttl_ms(),
@@ -174,6 +177,14 @@ impl Default for ExecutionConfig {
 
 fn execution_default_true() -> bool {
     true
+}
+
+fn execution_default_buy_market_order_type() -> LiveMarketOrderType {
+    LiveMarketOrderType::Fok
+}
+
+fn execution_default_sell_market_order_type() -> LiveMarketOrderType {
+    LiveMarketOrderType::Fok
 }
 
 fn execution_default_secrets_file() -> String {
@@ -1316,7 +1327,7 @@ mod tests {
             "clip_usd={}",
             cfg.j_endgame.clip_usd
         );
-        assert!((cfg.session.starting_bank - 100.0).abs() < 1e-9);
+        assert!((cfg.session.starting_bank - 10.0).abs() < 1e-9);
         assert!((cfg.session.min_window_budget - 0.0).abs() < 1e-9);
         assert!((cfg.session.max_window_budget - 0.0).abs() < 1e-9);
         assert!((cfg.session.window_budget_pct - 100.0).abs() < 1e-9);
@@ -1324,17 +1335,20 @@ mod tests {
         assert!((cfg.j_endgame.max_usd_per_window - 80.0).abs() < 1e-9);
         assert!((cfg.j_endgame.max_rescue_usd - 75.0).abs() < 1e-9);
         assert!(cfg.j_endgame.bank_sizing_enabled);
-        assert!((cfg.j_endgame.effective_max_usd_per_window(&cfg.session) - 16.0).abs() < 1e-9);
-        assert!((cfg.j_endgame.effective_max_rescue_usd(&cfg.session) - 15.0).abs() < 1e-9);
-        assert!((cfg.j_endgame.effective_first_clip_usd(&cfg.session) - 1.6).abs() < 1e-9);
-        assert!((cfg.j_endgame.effective_max_clip_usd(&cfg.session) - 7.0).abs() < 1e-9);
+        assert!((cfg.j_endgame.effective_max_usd_per_window(&cfg.session) - 3.0).abs() < 1e-9);
+        assert!((cfg.j_endgame.effective_max_rescue_usd(&cfg.session) - 3.0).abs() < 1e-9);
+        assert!((cfg.j_endgame.effective_first_clip_usd(&cfg.session) - 1.0).abs() < 1e-9);
+        assert!((cfg.j_endgame.effective_max_clip_usd(&cfg.session) - 1.0).abs() < 1e-9);
         assert!(
             (cfg.j_endgame
                 .effective_discount_reload_clip_usd(&cfg.session)
-                - 2.0)
+                - 1.0)
                 .abs()
                 < 1e-9
         );
+        assert_eq!(cfg.execution.buy_market_order_type, LiveMarketOrderType::Fok);
+        assert_eq!(cfg.execution.sell_market_order_type, LiveMarketOrderType::Fok);
+        assert!(cfg.j_endgame.taker_mode);
         assert!((cfg.j_endgame.conf_enter - 0.58).abs() < 1e-9);
         assert!((cfg.j_endgame.max_clip_usd - 35.0).abs() < 1e-9);
         assert!((cfg.j_endgame.insurance_max_ask - 0.18).abs() < 1e-9);

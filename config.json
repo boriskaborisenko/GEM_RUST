@@ -16,9 +16,10 @@
     "secretsFile": ".env.live",
     "clobHost": "https://clob.polymarket.com",
     "signatureType": "poly1271",
-    "marketOrderType": "fok",
+    "buyMarketOrderType": "fok",
+    "sellMarketOrderType": "fok",
     "limitOrderType": "gtd",
-    "limitPostOnly": true,
+    "limitPostOnly": false,
     "limitTtlMs": 25000,
     "maxOrderAgeMs": 3000,
     "minOrderUsd": 1.0
@@ -179,6 +180,7 @@
     "minTapeUsd": 3.0,
     "minTapeBuys": 2,
     "takerMode": true,
+    "limitAskOffset": 0.02,
     "feeRateBps": 0
   }
 }

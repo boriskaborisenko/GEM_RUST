@@ -1,16 +1,13 @@
 use crate::client::{get_now_ms, MarketWindow};
-use crate::config::{
-    ExecutionConfig, ExecutionMode, LiveLimitOrderType, LiveMarketOrderType, LiveSignatureType,
-};
+use crate::config::{ExecutionConfig, ExecutionMode, LiveMarketOrderType, LiveSignatureType};
 use crate::strategy::{OrderOperation, OrderSignal, OrderType as StrategyOrderType};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer as _;
 use anyhow::{anyhow, Context, Result};
-use chrono::{Duration, Utc};
-use polymarket_client_sdk_v2::auth::{state::Authenticated, Normal};
 use polymarket_client_sdk_v2::clob::types::request::{
     BalanceAllowanceRequest, UpdateBalanceAllowanceRequest,
 };
+use polymarket_client_sdk_v2::auth::{state::Authenticated, Normal};
 use polymarket_client_sdk_v2::clob::types::{
     Amount, AssetType, OrderStatusType, OrderType as ClobOrderType, Side as ClobSide,
     SignatureType,
@@ -99,6 +96,7 @@ impl LiveExecutorSession {
         }
         let secrets = LiveSecrets::load(&cfg.secrets_file)?;
         let signer = secrets.signer()?;
+        validate_deposit_wallet_live_config(cfg, &secrets, &signer)?;
         let client = authenticate_clob_client(cfg, &secrets, &signer).await?;
         Ok(Arc::new(Self {
             cfg: cfg.clone(),
@@ -106,6 +104,11 @@ impl LiveExecutorSession {
             client: Mutex::new(client),
             secrets,
         }))
+    }
+
+    /// GEM_RUST uses Polymarket deposit wallets (POLY_1271), not proto Safe/Proxy.
+    pub fn wallet_profile(&self) -> &'static str {
+        "DEPOSIT_WALLET/POLY_1271"
     }
 
     pub fn signer_address(&self) -> String {
@@ -238,66 +241,40 @@ impl LiveExecutorSession {
         let token_id = parse_token_id(&intent.token_id)?;
         let client = self.client.lock().await;
 
-        let response = match (intent.operation, intent.strategy_order_type) {
-            (OrderOperation::Buy, StrategyOrderType::Market) => {
+        let response = match intent.operation {
+            OrderOperation::Buy => {
                 client
                     .market_order()
                     .token_id(token_id)
                     .side(ClobSide::Buy)
-                    .price(decimal_price(intent.price)?)
                     .amount(Amount::usdc(decimal_usd(
-                        intent.amount_usd.unwrap_or(intent.estimated_notional_usd),
+                        intent.amount_usd.unwrap_or(signal.amount),
                     )?)?)
-                    .order_type(cfg.market_order_type.into())
+                    .order_type(cfg.buy_market_order_type.into())
                     .build_sign_and_post(&self.signer)
                     .await
             }
-            (OrderOperation::Sell, StrategyOrderType::Market) => {
+            OrderOperation::Sell => {
                 client
                     .market_order()
                     .token_id(token_id)
                     .side(ClobSide::Sell)
-                    .price(decimal_price(intent.price)?)
                     .amount(Amount::shares(decimal_shares(intent.shares)?)?)
-                    .order_type(cfg.market_order_type.into())
+                    .order_type(cfg.sell_market_order_type.into())
                     .build_sign_and_post(&self.signer)
                     .await
-            }
-            (OrderOperation::Buy, StrategyOrderType::Limit) => {
-                let mut builder = client
-                    .limit_order()
-                    .token_id(token_id)
-                    .side(ClobSide::Buy)
-                    .price(decimal_price(intent.price)?)
-                    .size(decimal_shares(intent.shares)?)
-                    .order_type(cfg.limit_order_type.into())
-                    .post_only(cfg.limit_post_only);
-                if cfg.limit_order_type == LiveLimitOrderType::Gtd {
-                    builder =
-                        builder.expiration(Utc::now() + Duration::milliseconds(cfg.limit_ttl_ms));
-                }
-                builder.build_sign_and_post(&self.signer).await
-            }
-            (OrderOperation::Sell, StrategyOrderType::Limit) => {
-                let mut builder = client
-                    .limit_order()
-                    .token_id(token_id)
-                    .side(ClobSide::Sell)
-                    .price(decimal_price(intent.price)?)
-                    .size(decimal_shares(intent.shares)?)
-                    .order_type(cfg.limit_order_type.into())
-                    .post_only(cfg.limit_post_only);
-                if cfg.limit_order_type == LiveLimitOrderType::Gtd {
-                    builder =
-                        builder.expiration(Utc::now() + Duration::milliseconds(cfg.limit_ttl_ms));
-                }
-                builder.build_sign_and_post(&self.signer).await
             }
         }
-        .map_err(|error| anyhow!("live CLOB post_order failed: {error}"))?;
+        .map_err(|error| {
+            explain_clob_order_error(
+                &format!("live CLOB post_order failed: {error}"),
+                &self.signer_address(),
+                &self.configured_funder_address(),
+            )
+        })?;
 
         let fill = matched_response_fill(&intent, &response);
-        let accepted = response.success && order_accepted(&intent, &response.status);
+        let accepted = response.success && order_accepted(&response, &fill);
         let executed = accepted;
         Ok(LiveExecutionResult {
             submitted: response.success,
@@ -336,14 +313,12 @@ pub async fn execute_j_live_signal(
     }
 }
 
-fn order_accepted(intent: &LiveOrderIntent, status: &OrderStatusType) -> bool {
-    match intent.strategy_order_type {
-        StrategyOrderType::Market => matches!(status, OrderStatusType::Matched),
-        StrategyOrderType::Limit => matches!(
-            status,
-            OrderStatusType::Matched | OrderStatusType::Live | OrderStatusType::Delayed
-        ),
+fn order_accepted(response: &polymarket_client_sdk_v2::clob::types::response::PostOrderResponse, fill: &Option<LiveFill>) -> bool {
+    if matches!(response.status, OrderStatusType::Matched) {
+        return true;
     }
+    // Rare: success with matched amounts but non-Matched status.
+    response.success && fill.is_some()
 }
 
 pub fn build_live_order_intent(
@@ -359,11 +334,7 @@ pub fn build_live_order_intent(
     }
 
     let operation = signal.operation();
-    let order_type = match operation {
-        OrderOperation::Buy => signal.order_type,
-        // Live J sells are defensive tail/rescue exits. Do not leave them resting.
-        OrderOperation::Sell => StrategyOrderType::Market,
-    };
+    let order_type = StrategyOrderType::Market;
     let token_id = token_id_for_side(market, &signal.side)?;
     let (amount_usd, shares, estimated_notional_usd) = match operation {
         OrderOperation::Buy => {
@@ -374,12 +345,18 @@ pub fn build_live_order_intent(
                     cfg.min_order_usd.max(1.0)
                 ));
             }
-            let shares = match order_type {
-                StrategyOrderType::Market => signal.amount / signal.price,
-                // Floor so notional never exceeds the strategy USD budget on resting limits.
-                StrategyOrderType::Limit => floor_2(signal.amount / signal.price),
-            };
-            (Some(signal.amount), shares, shares * signal.price)
+            let min_usd = cfg.min_order_usd.max(1.0);
+            let shares = signal.amount / signal.price;
+            let estimated_notional_usd = shares * signal.price;
+            if estimated_notional_usd + 1e-9 < min_usd {
+                return Err(anyhow!(
+                    "live buy notional {:.4} below min {:.4} at price {:.4}",
+                    estimated_notional_usd,
+                    min_usd,
+                    signal.price
+                ));
+            }
+            (Some(signal.amount), shares, estimated_notional_usd)
         }
         OrderOperation::Sell => {
             let notional = signal.amount * signal.price;
@@ -401,9 +378,9 @@ pub fn build_live_order_intent(
     Ok(LiveOrderIntent {
         operation,
         strategy_order_type: order_type,
-        clob_order_type: match order_type {
-            StrategyOrderType::Market => cfg.market_order_type.as_str().to_string(),
-            StrategyOrderType::Limit => cfg.limit_order_type.as_str().to_string(),
+        clob_order_type: match operation {
+            OrderOperation::Buy => cfg.buy_market_order_type.as_str().to_string(),
+            OrderOperation::Sell => cfg.sell_market_order_type.as_str().to_string(),
         },
         side: signal.side.clone(),
         token_id,
@@ -411,9 +388,79 @@ pub fn build_live_order_intent(
         amount_usd,
         shares,
         estimated_notional_usd,
-        post_only: order_type == StrategyOrderType::Limit && cfg.limit_post_only,
+        post_only: false,
         reason: signal.reason.clone(),
     })
+}
+
+/// Human-readable line for stderr + dashboard SYSTEM EVENT LOG (survives screen clear).
+pub fn format_live_terminal_event(
+    window_number: usize,
+    sig: &OrderSignal,
+    result: &LiveExecutionResult,
+) -> Option<String> {
+    let op = match sig.operation() {
+        OrderOperation::Buy => "BUY",
+        OrderOperation::Sell => "SELL",
+    };
+    if result.dry_run {
+        return Some(format!(
+            "[LIVE DRY-RUN] W#{window_number} {op} {} ${:.2} @ {:.4} — not sent to CLOB",
+            sig.side, sig.amount, sig.price
+        ));
+    }
+    if result.executed {
+        let (usd, shares, avg_px) = if let Some(fill) = &result.fill {
+            (fill.amount_usd, fill.shares, fill.avg_price)
+        } else if let Some(intent) = result.intent.as_ref() {
+            let usd = intent
+                .amount_usd
+                .unwrap_or(intent.estimated_notional_usd)
+                .min(sig.amount);
+            (usd, intent.shares, sig.price)
+        } else {
+            (sig.amount, sig.amount / sig.price.max(1e-9), sig.price)
+        };
+        let order_id = result
+            .order_id
+            .as_deref()
+            .map(|id| {
+                if id.len() > 14 {
+                    format!("{}…{}", &id[..8], &id[id.len() - 4..])
+                } else {
+                    id.to_string()
+                }
+            })
+            .unwrap_or_else(|| "?".to_string());
+        return Some(format!(
+            "[LIVE FILL] W#{window_number} {op} {} ${usd:.2} @ {avg_px:.4} = {shares:.4} sh | id {order_id}",
+            sig.side
+        ));
+    }
+    if !result.reject_reason.is_empty() {
+        return Some(format!(
+            "[LIVE REJECT] W#{window_number} {op} {} ${:.2} — {}",
+            sig.side,
+            sig.amount,
+            short_live_reject_reason(&result.reject_reason)
+        ));
+    }
+    None
+}
+
+fn short_live_reject_reason(reason: &str) -> String {
+    if reason.contains("FOK orders are fully filled") {
+        return "FOK kill — full size not available at CLOB book".to_string();
+    }
+    if reason.contains("signer address has to be the address of the API KEY") {
+        return "CLOB auth: API key / owner mismatch".to_string();
+    }
+    let one_line = reason.replace('\n', " ");
+    if one_line.len() > 120 {
+        format!("{}…", &one_line[..120])
+    } else {
+        one_line
+    }
 }
 
 pub fn apply_live_result_to_portfolio(
@@ -474,6 +521,49 @@ pub fn apply_live_result_to_portfolio(
     }
 }
 
+/// Live trading in GEM_RUST is deposit-wallet only. Do not use proto Safe/Proxy paths here.
+fn validate_deposit_wallet_live_config(
+    cfg: &ExecutionConfig,
+    secrets: &LiveSecrets,
+    signer: &PrivateKeySigner,
+) -> Result<()> {
+    if cfg.signature_type != LiveSignatureType::Poly1271 {
+        return Err(anyhow!(
+            "live mode requires execution.signatureType=poly1271 (deposit wallet). \
+             Got {:?}. Safe/Proxy (proto_v08) is not supported in GEM_RUST.",
+            cfg.signature_type
+        ));
+    }
+
+    let deposit = cfg
+        .funder_address
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| secrets.deposit_wallet_address())
+        .ok_or_else(|| {
+            anyhow!(
+                "POLYMARKET_DEPOSIT_WALLET_ADDRESS is required for live deposit-wallet trading. \
+                 This is where pUSD lives — not the owner EOA and not POLY_RELAYER_ADDRESS."
+            )
+        })?;
+
+    let owner = format!("{:#x}", signer.address());
+    if owner.eq_ignore_ascii_case(&deposit) {
+        return Err(anyhow!(
+            "deposit wallet address ({deposit}) must differ from owner EOA ({owner}). \
+             For POLY_1271: owner signs, deposit holds funds. \
+             Copy the Transfer Crypto / deposit address from polymarket.com, not the relayer signer."
+        ));
+    }
+
+    deposit
+        .parse::<Address>()
+        .with_context(|| format!("invalid POLYMARKET_DEPOSIT_WALLET_ADDRESS: {deposit}"))?;
+
+    Ok(())
+}
+
 async fn authenticate_clob_client(
     cfg: &ExecutionConfig,
     secrets: &LiveSecrets,
@@ -501,18 +591,26 @@ async fn authenticate_clob_client(
             "POLYMARKET_DEPOSIT_WALLET_ADDRESS is required for signatureType=poly1271"
         ));
     }
-    if let Some(funder) = funder {
+    let deposit_wallet = funder.clone().unwrap_or_default();
+    if let Some(funder_addr) = funder {
         builder = builder.funder(
-            funder
+            funder_addr
                 .parse::<Address>()
-                .with_context(|| format!("failed to parse deposit wallet address {funder}"))?,
+                .with_context(|| format!("failed to parse deposit wallet address {funder_addr}"))?,
         );
     }
 
     builder
         .authenticate()
         .await
-        .map_err(|error| anyhow!("CLOB authentication failed: {error}"))
+        .map_err(|error| {
+            explain_clob_account_error(
+                &format!("CLOB authentication failed: {error}"),
+                &format!("{:#x}", signer.address()),
+                &deposit_wallet,
+                secrets.get("POLY_RELAYER_ADDRESS").map(String::as_str),
+            )
+        })
 }
 
 fn matched_response_fill(
@@ -633,29 +731,11 @@ impl From<LiveMarketOrderType> for ClobOrderType {
     }
 }
 
-impl From<LiveLimitOrderType> for ClobOrderType {
-    fn from(value: LiveLimitOrderType) -> Self {
-        match value {
-            LiveLimitOrderType::Gtc => ClobOrderType::GTC,
-            LiveLimitOrderType::Gtd => ClobOrderType::GTD,
-        }
-    }
-}
-
 impl LiveMarketOrderType {
     fn as_str(self) -> &'static str {
         match self {
             Self::Fok => "fok",
             Self::Fak => "fak",
-        }
-    }
-}
-
-impl LiveLimitOrderType {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Gtc => "gtc",
-            Self::Gtd => "gtd",
         }
     }
 }
@@ -672,11 +752,6 @@ fn parse_token_id(value: &str) -> Result<U256> {
     value
         .parse::<U256>()
         .with_context(|| format!("failed to parse token id {value}"))
-}
-
-fn decimal_price(value: f64) -> Result<Decimal> {
-    Decimal::from_str(&format!("{:.2}", round_price(value)))
-        .with_context(|| format!("failed to convert price {value} to Decimal"))
 }
 
 fn decimal_usd(value: f64) -> Result<Decimal> {
@@ -702,12 +777,23 @@ fn round_price(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 
-fn ceil_2(value: f64) -> f64 {
-    (value * 100.0).ceil() / 100.0
-}
-
 fn floor_2(value: f64) -> f64 {
     (value * 100.0).floor() / 100.0
+}
+
+fn explain_clob_order_error(err: &str, owner: &str, deposit: &str) -> anyhow::Error {
+    if err.contains("signer address has to be the address of the API KEY") {
+        return anyhow!(
+            "{err} | deposit-wallet auth: API key must belong to owner EOA ({owner}), \
+             not deposit ({deposit}). Check POLYMARKET_PRIVATE_KEY matches the account that created API creds."
+        );
+    }
+    if err.contains("UNMATCHED") || err.to_ascii_lowercase().contains("fok") {
+        return anyhow!(
+            "{err} | FOK: full size not available at current book. SDK prices from live CLOB book at submit."
+        );
+    }
+    anyhow!("{err} | owner={owner} deposit={deposit}")
 }
 
 fn explain_clob_account_error(
@@ -788,14 +874,15 @@ mod tests {
     }
 
     #[test]
-    fn limit_buy_intent_floors_shares_to_two_decimals() {
+    fn live_buy_forces_market_fok_even_if_signal_says_limit() {
         let cfg = ExecutionConfig::default();
         let sig = OrderSignal::buy("DOWN", OrderType::Limit, 1.0, 0.99, "j_test");
         let intent = build_live_order_intent(&cfg, &market(), &sig).unwrap();
-        assert_eq!(intent.clob_order_type, "gtd");
+        assert_eq!(intent.strategy_order_type, StrategyOrderType::Market);
+        assert_eq!(intent.clob_order_type, "fok");
         assert_eq!(intent.token_id, "22");
-        assert_eq!(intent.shares, 1.01);
-        assert!(intent.estimated_notional_usd <= 1.0 + 1e-9);
+        assert_eq!(intent.amount_usd, Some(1.0));
+        assert!(intent.shares > 1.0);
     }
 
     #[test]
@@ -809,7 +896,7 @@ mod tests {
     }
 
     #[test]
-    fn live_sell_forces_market_fok_even_if_signal_is_limit() {
+    fn live_j_forces_market_even_if_signal_says_limit() {
         let cfg = ExecutionConfig::default();
         let sig = OrderSignal::sell("UP", OrderType::Limit, 2.345, 0.50, "j_sell");
         let intent = build_live_order_intent(&cfg, &market(), &sig).unwrap();
@@ -833,28 +920,59 @@ mod tests {
         assert!((collateral_balance_usd(&balance) - 9.960311).abs() < 1e-6);
     }
 
+    use polymarket_client_sdk_v2::clob::types::response::PostOrderResponse;
+
     #[test]
-    fn resting_limit_counts_as_accepted() {
-        let intent = LiveOrderIntent {
-            operation: OrderOperation::Buy,
-            strategy_order_type: StrategyOrderType::Limit,
-            clob_order_type: "gtd".to_string(),
-            side: "UP".to_string(),
-            token_id: "11".to_string(),
-            price: 0.95,
-            amount_usd: Some(1.0),
-            shares: 1.05,
-            estimated_notional_usd: 0.9975,
-            post_only: true,
-            reason: "j_test".to_string(),
+    fn market_matched_counts_as_executed() {
+        let matched = PostOrderResponse::builder()
+            .making_amount(Decimal::from_str("1").unwrap())
+            .taking_amount(Decimal::from_str("1").unwrap())
+            .order_id("oid")
+            .status(OrderStatusType::Matched)
+            .success(true)
+            .build();
+        assert!(order_accepted(&matched, &None));
+        let live = PostOrderResponse::builder()
+            .making_amount(Decimal::from_str("1").unwrap())
+            .taking_amount(Decimal::from_str("1").unwrap())
+            .order_id("oid")
+            .status(OrderStatusType::Live)
+            .success(true)
+            .build();
+        assert!(!order_accepted(&live, &None));
+    }
+
+    #[test]
+    fn live_fill_terminal_event_is_visible() {
+        let sig = OrderSignal::buy("DOWN", OrderType::Market, 1.0, 0.97, "j_test");
+        let result = LiveExecutionResult {
+            executed: true,
+            submitted: true,
+            order_id: Some("0xabcdef1234567890".to_string()),
+            status: Some("matched".to_string()),
+            fill: Some(LiveFill {
+                amount_usd: 1.0,
+                shares: 1.03,
+                avg_price: 0.97,
+            }),
+            intent: None,
+            ..LiveExecutionResult::default()
         };
-        assert!(order_accepted(&intent, &OrderStatusType::Live));
-        assert!(!order_accepted(
-            &LiveOrderIntent {
-                strategy_order_type: StrategyOrderType::Market,
-                ..intent.clone()
-            },
-            &OrderStatusType::Live
-        ));
+        let msg = format_live_terminal_event(1, &sig, &result).unwrap();
+        assert!(msg.contains("[LIVE FILL]"));
+        assert!(msg.contains("DOWN"));
+        assert!(msg.contains("$1.00"));
+    }
+
+    #[test]
+    fn live_reject_terminal_event_shortens_fok() {
+        let sig = OrderSignal::buy("DOWN", OrderType::Market, 1.0, 0.97, "j_test");
+        let result = LiveExecutionResult {
+            reject_reason: "FOK orders are fully filled or killed".to_string(),
+            ..LiveExecutionResult::default()
+        };
+        let msg = format_live_terminal_event(1, &sig, &result).unwrap();
+        assert!(msg.contains("[LIVE REJECT]"));
+        assert!(msg.contains("FOK kill"));
     }
 }

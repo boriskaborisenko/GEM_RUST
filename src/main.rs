@@ -30,7 +30,10 @@ use asset_price::{format_asset_price, format_atr, ptb_implausible};
 use cex_micro::CexMicroManager;
 use client::{get_now_ms, MarketEvent, MarketWindow, PricesState};
 use config::{Config, ExecutionMode, LiveMarketOrderType};
-use live_executor::{apply_live_result_to_portfolio, LiveAccountStatus, LiveExecutorSession};
+use live_executor::{
+    apply_live_result_to_portfolio, format_live_terminal_event, LiveAccountStatus,
+    LiveExecutorSession,
+};
 use llm::{LlmForecastRequest, LlmForecaster, LlmRecentWindowContext, LlmRecentWindowRow};
 use mid_cross_tracker::{LeadSide, MidCrossEvent, MidCrossSnapshot, MidCrossTracker};
 use redeem_hold::{
@@ -404,13 +407,14 @@ async fn main() -> anyhow::Result<()> {
         config.execution.dry_run = dry_run;
     }
     if live_requested {
-        config.execution.market_order_type = LiveMarketOrderType::Fok;
         config.j_endgame.taker_mode = true;
+        config.execution.buy_market_order_type = LiveMarketOrderType::Fok;
+        config.execution.sell_market_order_type = LiveMarketOrderType::Fok;
     }
 
     let live_session = if config.execution.mode == ExecutionMode::Live {
         println!(
-            "[LIVE] PROFILE: {} FOK | takerMode=true | dryRun={}",
+            "[LIVE] PROFILE: {} | deposit-wallet POLY_1271 | BUY market FOK | SELL market FOK | dryRun={}",
             if config.execution.dry_run {
                 "DRY-RUN"
             } else {
@@ -1021,6 +1025,7 @@ async fn run_j_endgame_live_tick(
         &cex_micro_snap,
         &tape_snap,
         app.live_session.as_ref(),
+        &mut app.system_logs,
     )
     .await;
 }
@@ -1050,6 +1055,14 @@ fn j_clob_prices_ready(prices: &PricesState) -> bool {
     up_bid > 0.0 && up_ask > 0.0 && down_bid > 0.0 && down_ask > 0.0
 }
 
+fn trim_system_logs(logs: &mut Vec<String>) {
+    const MAX: usize = 30;
+    if logs.len() > MAX {
+        let drop = logs.len() - MAX;
+        logs.drain(0..drop);
+    }
+}
+
 async fn execute_strategy_signals(
     config: &Config,
     log_dir: &str,
@@ -1068,6 +1081,7 @@ async fn execute_strategy_signals(
     cex_micro: &CexMicroSnapshot,
     tape: &TradeTapeSnapshot,
     live_session: Option<&Arc<LiveExecutorSession>>,
+    system_logs: &mut Vec<String>,
 ) {
     for sig in signals {
         let (executed, reject_reason): (bool, String) = if sig.reason.starts_with("j_") {
@@ -1109,6 +1123,11 @@ async fn execute_strategy_signals(
                     let result = session
                         .execute_j_signal(market, &sig, get_now_ms())
                         .await;
+                    if let Some(msg) = format_live_terminal_event(window_number, &sig, &result) {
+                        eprintln!("\n>>>\n>>>\n>>> {msg}\n>>>\n>>>");
+                        system_logs.push(msg);
+                        trim_system_logs(system_logs);
+                    }
                     if result.executed {
                         apply_live_result_to_portfolio(port, window_number, &sig, &result);
                     }
@@ -2057,6 +2076,7 @@ async fn process_event(
                             &cex_micro_snap,
                             &tape_snap,
                             app.live_session.as_ref(),
+                            &mut app.system_logs,
                         )
                         .await;
                     }
@@ -2589,10 +2609,19 @@ fn render_dashboard(app: &AppState) {
         )
     );
     println!("  {}", paint("SYSTEM EVENT LOG:", "cyan"));
-    let max_logs = 6;
+    let max_logs = 8;
     let start_idx = app.system_logs.len().saturating_sub(max_logs);
     for log in &app.system_logs[start_idx..] {
-        println!("  • {}", paint(log, "dim"));
+        let tone = if log.starts_with("[LIVE FILL]") {
+            "green"
+        } else if log.starts_with("[LIVE REJECT]") {
+            "red"
+        } else if log.starts_with("[LIVE DRY-RUN]") {
+            "yellow"
+        } else {
+            "dim"
+        };
+        println!("  • {}", paint(log, tone));
     }
     println!(
         "{}",
