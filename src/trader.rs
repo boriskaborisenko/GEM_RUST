@@ -168,20 +168,25 @@ impl Portfolio {
     }
 
     fn dashboard_window_counts(&self) -> (u32, u32, u32, u32) {
-        let total = self.windows.len() as u32;
         let mut traded = 0;
         let mut open_traded = 0;
+        let mut no_trade = 0;
 
         for win in self.windows.values() {
+            if win.window_number == 0 {
+                continue;
+            }
             if Self::has_traded(win) {
                 traded += 1;
                 if !Self::is_closed_or_skipped(&win.status) {
                     open_traded += 1;
                 }
+            } else if Self::is_closed_or_skipped(&win.status) {
+                no_trade += 1;
             }
         }
 
-        let no_trade = total.saturating_sub(traded);
+        let total = traded + no_trade;
         (total, traded, open_traded, no_trade)
     }
 
@@ -740,10 +745,74 @@ mod tests {
             snapshot.entered_windows, 19,
             "raw lifecycle counter stays visible"
         );
-        assert_eq!(snapshot.total_windows, 20);
+        assert_eq!(snapshot.total_windows, 18);
         assert_eq!(snapshot.traded_windows, 6);
         assert_eq!(snapshot.closed_windows, 6);
         assert_eq!(snapshot.open_traded_windows, 0);
-        assert_eq!(snapshot.no_trade_windows, 14);
+        assert_eq!(snapshot.no_trade_windows, 12);
+    }
+
+    #[test]
+    fn dashboard_ignores_warmup_current_and_next_without_trades() {
+        let mut portfolio =
+            Portfolio::new_with_log_dir(10.0, "/tmp/gem_rust_dashboard_startup_test".into());
+
+        portfolio.windows.insert(
+            0,
+            WindowState {
+                window_number: 0,
+                role: "CURRENT".to_string(),
+                status: "SKIPPED".to_string(),
+                market: sample_market(0),
+                spent: 0.0,
+                cash_returned: 0.0,
+                up_shares: 0.0,
+                down_shares: 0.0,
+                initial_up_shares: 0.0,
+                initial_down_shares: 0.0,
+                trades: vec![],
+                prices: sample_prices(),
+            },
+        );
+        portfolio.windows.insert(
+            1,
+            WindowState {
+                window_number: 1,
+                role: "CURRENT".to_string(),
+                status: "LIVE".to_string(),
+                market: sample_market(1),
+                spent: 0.0,
+                cash_returned: 0.0,
+                up_shares: 0.0,
+                down_shares: 0.0,
+                initial_up_shares: 0.0,
+                initial_down_shares: 0.0,
+                trades: vec![],
+                prices: sample_prices(),
+            },
+        );
+        portfolio.windows.insert(
+            2,
+            WindowState {
+                window_number: 2,
+                role: "NEXT".to_string(),
+                status: "WAITING_ENTRY".to_string(),
+                market: sample_market(2),
+                spent: 0.0,
+                cash_returned: 0.0,
+                up_shares: 0.0,
+                down_shares: 0.0,
+                initial_up_shares: 0.0,
+                initial_down_shares: 0.0,
+                trades: vec![],
+                prices: sample_prices(),
+            },
+        );
+
+        let snapshot = portfolio.get_portfolio_snapshot();
+        assert_eq!(snapshot.total_windows, 0);
+        assert_eq!(snapshot.traded_windows, 0);
+        assert_eq!(snapshot.open_traded_windows, 0);
+        assert_eq!(snapshot.no_trade_windows, 0);
     }
 }
