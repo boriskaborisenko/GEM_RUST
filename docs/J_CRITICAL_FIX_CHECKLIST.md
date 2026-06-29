@@ -33,7 +33,7 @@ Primary diagnosis from the code review:
 
 - [ ] Add explicit skip/diagnostic logging for `j_rescue_impossible`, `j_chop_block`, and `j_sell_rescue_skip`.
 - [ ] Align README/config docs with the real composite planner and mark legacy knobs as inactive/deprecated.
-- [ ] Consider asset-specific CEX micro flow; BTCUSDT flow should not have full confidence weight for ETH.
+- [x] Use asset-specific CEX micro flow; BTC runs BTCUSDT, ETH runs ETHUSDT.
 - [ ] Re-evaluate small early insurance only after PTB-at-armed logging and counterfactual analysis.
 
 ## Validation
@@ -54,3 +54,14 @@ Primary diagnosis from the code review:
 - Fixed dashboard window counters: the header now reports real traded/open-position/no-trade counts instead of lifecycle promotions as entries.
 - Added `discountReload*` knobs and `j_discount_reload_*` tier so J can improve average price on a still-valid primary thesis without averaging losers.
 - After reviewing the latest BTC/ETH logs, changed `flipRequireSpotCross=true`, lowered active flip hedge cap to `$8`, clip to `$4`, and raised `sellRescueMinGapZ` to `1.20`.
+
+## 2026-06-21 Audit P0 Repair Notes
+
+- Collapsed Strategy J runtime decisions to the single CLOB `MarketTick` contour; `SpotTick` updates spot/PTB/maintenance only, and `TradePrint` updates tape only.
+- All J decisions now pass through maintenance, CLOB age, and CLOB price readiness gates.
+- Added `maxClobAgeMs` and set active `config.json` to `2500`.
+- Top-only CLOB WS updates now clear stale book depth for that side instead of mixing fresh top prices with old depth.
+- CEX micro subscription is now asset-specific via `{ASSET}USDT`.
+- J recovery budget now uses net risk (`spent - cash_returned`) while portfolio `spent` remains gross cost basis for correct realized PnL.
+- `j_sell_rescue` no longer returns before the main planner; it can run beside flip-hedge/recovery.
+- Defensive tiers bypass global window clip/budget caps that previously blocked recovery exactly after exhaustion.

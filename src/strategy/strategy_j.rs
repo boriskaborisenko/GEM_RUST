@@ -1,12 +1,12 @@
 use crate::client::{MarketWindow, PricesState};
 use crate::config::Config;
-use crate::j_fees::DEFAULT_CRYPTO_FEE_RATE_BPS;
+use crate::j_fees::{leg_fee_usd, DEFAULT_CRYPTO_FEE_RATE_BPS};
 use crate::mid_cross_tracker::LeadSide;
 use crate::orderbook::{apply_fill_to_asks, ask_depth_usd, simulate_taker_buy_fill, SideBook};
 use crate::redeem_hold::expected_move_usd;
 use crate::strategy::{
-    CexMicroSnapshot, MidCrossSnapshot, OrderSignal, OrderType, SpotSignalSnapshot, StrategyState,
-    TradeStrategy,
+    CexMicroSnapshot, MidCrossSnapshot, OrderOperation, OrderSignal, OrderType, SpotSignalSnapshot,
+    StrategyState, TradeStrategy,
 };
 use crate::trade_tape::{TradeTapeSnapshot, TradeTapeTracker};
 use crate::trader::WindowState;
@@ -14,6 +14,9 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 const J_MIN_TRADEABLE_WINDOW: usize = 1;
+const J_TAIL_ADD_DANGER_ATR_MULT: f64 = 1.5;
+const J_TAIL_SELL_NEAR_ATR_MULT: f64 = 0.20;
+const J_TAIL_SELL_MAX_FRACTION: f64 = 0.50;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct JWindowState {
@@ -81,9 +84,11 @@ impl JEndgameStrategy {
         }
     }
 
-    pub(crate) fn mark_sell_rescue_executed(&mut self, window_number: usize) {
+    pub(crate) fn mark_sell_rescue_executed(&mut self, window_number: usize, signal: &OrderSignal) {
         if let Some(state) = self.windows.get_mut(&window_number) {
             state.sell_rescue_done = true;
+            let recovered_usd = (signal.amount * signal.price).max(0.0);
+            state.release_primary_exposure_usd(recovered_usd);
         }
     }
 
@@ -467,13 +472,12 @@ fn plan_sell_rescue_signal(
     if improvement + 1e-9 < cfg.sell_rescue_min_improvement_usd {
         return None;
     }
-    Some(OrderSignal {
-        side: primary.to_string(),
-        is_buy: false,
-        order_type: sell_rescue_order_type(cfg, secs_to_end),
-        amount: sell_shares,
-        price: bid,
-        reason: format!(
+    Some(OrderSignal::sell(
+        primary,
+        sell_rescue_order_type(cfg, secs_to_end),
+        sell_shares,
+        bid,
+        format!(
             "j_sell_rescue_{}_bid_{:.2}_shares_{:.4}_value_{:.2}_gap_z_against_{:+.2}_hold_pnl_{:+.2}_after_sell_{:+.2}",
             primary.to_lowercase(),
             bid,
@@ -483,7 +487,219 @@ fn plan_sell_rescue_signal(
             projected_hold_pnl,
             projected_after_sell,
         ),
-    })
+    ))
+}
+
+fn side_direction(side: &str) -> f64 {
+    if side == "UP" {
+        1.0
+    } else {
+        -1.0
+    }
+}
+
+fn adverse_velocity_usd_per_sec(side: &str, spot_signal: SpotSignalSnapshot) -> f64 {
+    let velocity = spot_signal
+        .smoothed_velocity_usd_per_sec
+        .or(spot_signal.raw_velocity_usd_per_sec)
+        .unwrap_or(0.0);
+    (-velocity * side_direction(side)).max(0.0)
+}
+
+fn aligned_velocity_usd_per_sec(side: &str, spot_signal: SpotSignalSnapshot) -> f64 {
+    let velocity = spot_signal
+        .smoothed_velocity_usd_per_sec
+        .or(spot_signal.raw_velocity_usd_per_sec)
+        .unwrap_or(0.0);
+    velocity * side_direction(side)
+}
+
+fn choppy_primary_add_velocity_blocks(
+    cfg: &crate::config::JEndgameConfig,
+    state: &JWindowState,
+    mid_cross: &MidCrossSnapshot,
+    tier: EndgameTier,
+    side: &str,
+    spot_signal: SpotSignalSnapshot,
+) -> bool {
+    if !matches!(
+        tier,
+        EndgameTier::Impulse
+            | EndgameTier::Cheap
+            | EndgameTier::Late
+            | EndgameTier::Rescue
+            | EndgameTier::DiscountReload
+            | EndgameTier::FinalSeal
+    ) {
+        return false;
+    }
+    if !crate::j_controller::mid_cross_soft_chop(cfg, mid_cross) {
+        return false;
+    }
+    if !state.has_primary_exposure() || state.primary_side.as_deref() != Some(side) {
+        return false;
+    }
+    let min_aligned_velocity = (cfg.mom_full_vel_usd_per_sec * 0.10).max(0.20);
+    aligned_velocity_usd_per_sec(side, spot_signal) + 1e-9 < min_aligned_velocity
+}
+
+fn tail_add_danger_secs(cfg: &crate::config::JEndgameConfig) -> i64 {
+    (cfg.rescue_zone_secs / 2)
+        .max(cfg.final_seal_secs)
+        .max(cfg.sell_rescue_market_secs)
+        .max(1)
+}
+
+fn tail_sell_safety_secs(cfg: &crate::config::JEndgameConfig) -> i64 {
+    cfg.final_seal_secs.max(cfg.sell_rescue_market_secs).max(1)
+}
+
+fn close_to_ptb_for_tail_add(
+    cfg: &crate::config::JEndgameConfig,
+    spot: f64,
+    ptb: f64,
+    current_atr: f64,
+) -> bool {
+    let raw_dist = (spot - ptb).abs();
+    let atr_close = current_atr.is_finite()
+        && current_atr > 0.0
+        && raw_dist <= current_atr * J_TAIL_ADD_DANGER_ATR_MULT;
+    let pct = ptb_dist_pct(spot, ptb);
+    let pct_close =
+        cfg.min_ptb_dist_pct > 0.0 && pct.is_finite() && pct <= cfg.min_ptb_dist_pct * 2.0;
+    atr_close || pct_close
+}
+
+fn close_to_ptb_for_tail_sell(
+    cfg: &crate::config::JEndgameConfig,
+    spot: f64,
+    ptb: f64,
+    current_atr: f64,
+) -> bool {
+    let raw_dist = (spot - ptb).abs();
+    let atr_close = current_atr.is_finite()
+        && current_atr > 0.0
+        && raw_dist <= current_atr * J_TAIL_SELL_NEAR_ATR_MULT;
+    let pct = ptb_dist_pct(spot, ptb);
+    let pct_close = cfg.min_ptb_dist_pct > 0.0 && pct.is_finite() && pct <= cfg.min_ptb_dist_pct;
+    atr_close || pct_close
+}
+
+fn tail_safety_blocks_primary_buy(
+    cfg: &crate::config::JEndgameConfig,
+    state: &JWindowState,
+    tier: EndgameTier,
+    side: &str,
+    spot: f64,
+    ptb: f64,
+    current_atr: f64,
+    secs_to_end: i64,
+) -> bool {
+    if !matches!(
+        tier,
+        EndgameTier::Impulse
+            | EndgameTier::Cheap
+            | EndgameTier::Late
+            | EndgameTier::Rescue
+            | EndgameTier::DiscountReload
+            | EndgameTier::FinalSeal
+    ) {
+        return false;
+    }
+    if secs_to_end <= 0 || secs_to_end > tail_add_danger_secs(cfg) {
+        return false;
+    }
+    if !state.has_primary_exposure() || state.primary_side.as_deref() != Some(side) {
+        return false;
+    }
+    if winner_side(spot, ptb) != Some(side) {
+        return false;
+    }
+    close_to_ptb_for_tail_add(cfg, spot, ptb, current_atr)
+}
+
+fn plan_tail_safety_sell_signal(
+    cfg: &crate::config::JEndgameConfig,
+    state: &JWindowState,
+    win_state: &WindowState,
+    prices: &PricesState,
+    current_winner: &str,
+    spot: f64,
+    ptb: f64,
+    current_atr: f64,
+    secs_to_end: i64,
+    spot_signal: SpotSignalSnapshot,
+    projected_hold_pnl: f64,
+    fee_bps: f64,
+) -> Option<OrderSignal> {
+    if !cfg.sell_rescue_enabled || state.sell_rescue_done || !state.has_primary_exposure() {
+        return None;
+    }
+    let primary = state.primary_side.as_deref()?;
+    if primary != current_winner {
+        return None;
+    }
+    if secs_to_end <= 0 || secs_to_end > tail_sell_safety_secs(cfg) {
+        return None;
+    }
+    if !close_to_ptb_for_tail_sell(cfg, spot, ptb, current_atr) {
+        return None;
+    }
+    let adverse_velocity = adverse_velocity_usd_per_sec(primary, spot_signal);
+    let min_adverse_velocity = (cfg.mom_full_vel_usd_per_sec * 0.75).max(1.0);
+    if adverse_velocity + 1e-9 < min_adverse_velocity {
+        return None;
+    }
+    let bid = side_bid(primary, prices);
+    if bid < cfg.sell_rescue_min_bid {
+        return None;
+    }
+    let shares = shares_for_side(primary, win_state);
+    if shares <= 1e-9 {
+        return None;
+    }
+    let sell_fraction = cfg
+        .sell_rescue_fraction
+        .clamp(0.0, J_TAIL_SELL_MAX_FRACTION);
+    let sell_shares = shares * sell_fraction;
+    let sell_value = sell_shares * bid;
+    if sell_value < cfg.sell_rescue_min_value_usd {
+        return None;
+    }
+    let projected_after_sell =
+        projected_winner_pnl_after_partial_sell(win_state, primary, sell_shares, bid, fee_bps);
+    let cost_vs_hold = (projected_hold_pnl - projected_after_sell).max(0.0);
+    Some(OrderSignal::sell(
+        primary,
+        sell_rescue_order_type(cfg, secs_to_end),
+        sell_shares,
+        bid,
+        format!(
+            "j_sell_rescue_tail_{}_bid_{:.2}_shares_{:.4}_value_{:.2}_adverse_v_{:.2}_hold_pnl_{:+.2}_after_hold_{:+.2}_cost_{:.2}",
+            primary.to_lowercase(),
+            bid,
+            sell_shares,
+            sell_value,
+            adverse_velocity,
+            projected_hold_pnl,
+            projected_after_sell,
+            cost_vs_hold,
+        ),
+    ))
+}
+
+fn projected_winner_pnl_after_partial_sell(
+    win_state: &WindowState,
+    winner: &str,
+    sell_shares: f64,
+    bid: f64,
+    fee_bps: f64,
+) -> f64 {
+    let shares = shares_for_side(winner, win_state);
+    let sold = sell_shares.clamp(0.0, shares.max(0.0));
+    let remaining = (shares - sold).max(0.0);
+    let redeem_fee = leg_fee_usd(1.0, remaining, fee_bps);
+    win_state.cash_returned + sold * bid + remaining - redeem_fee - win_state.spent
 }
 
 impl JWindowState {
@@ -502,6 +718,26 @@ impl JWindowState {
     pub(crate) fn primary_exposure_usd(&self) -> f64 {
         self.rescue_spent_usd + self.cheap_spent_usd + self.late_spent_usd + self.impulse_spent_usd
     }
+
+    fn release_primary_exposure_usd(&mut self, recovered_usd: f64) {
+        let mut remaining = recovered_usd.max(0.0);
+        reduce_usd(&mut self.rescue_spent_usd, &mut remaining);
+        reduce_usd(&mut self.cheap_spent_usd, &mut remaining);
+        reduce_usd(&mut self.late_spent_usd, &mut remaining);
+        reduce_usd(&mut self.impulse_spent_usd, &mut remaining);
+
+        let mut reload_recovery = recovered_usd.max(0.0);
+        reduce_usd(&mut self.discount_reload_spent_usd, &mut reload_recovery);
+    }
+}
+
+fn reduce_usd(bucket: &mut f64, remaining: &mut f64) {
+    if *remaining <= 0.0 || *bucket <= 0.0 {
+        return;
+    }
+    let take = (*bucket).min(*remaining);
+    *bucket -= take;
+    *remaining -= take;
 }
 
 pub(crate) fn flip_hedge_armed_display(
@@ -681,35 +917,12 @@ impl TradeStrategy for JEndgameStrategy {
             return signals;
         }
 
-        // SELL rescue must run even when the window BUY budget is exhausted.
-        let projected_hold_pnl =
-            crate::j_controller::projected_redeem_pnl(win_state, current_winner, fee_bps);
-        if let Some(sell) = plan_sell_rescue_signal(
-            jcfg,
-            state,
-            win_state,
-            prices,
-            current_winner,
-            gz,
-            secs_to_end,
-            projected_hold_pnl,
-        ) {
-            signals.push(sell);
-            return signals;
-        }
-
         let window_cap = if config.session.max_window_budget > 0.0 {
             jcfg.effective_max_usd_per_window(&config.session)
                 .min(config.session.max_window_budget)
         } else {
             jcfg.effective_max_usd_per_window(&config.session)
         };
-        if win_state.spent >= window_cap - 1e-9 || state.clips_filled >= effective_max_clips(jcfg) {
-            // allow final seal / rescue even at window budget cap
-            if secs_to_end > jcfg.final_seal_secs {
-                return signals;
-            }
-        }
 
         if live_chop_blocks_directional(jcfg, state, mid_cross) {
             state.directional_blocked_chop = true;
@@ -732,6 +945,34 @@ impl TradeStrategy for JEndgameStrategy {
             _cex_micro,
             tape,
         );
+        let projected_hold_pnl =
+            crate::j_controller::projected_redeem_pnl(win_state, current_winner, fee_bps);
+        let sell_rescue = plan_sell_rescue_signal(
+            jcfg,
+            state,
+            win_state,
+            prices,
+            current_winner,
+            gz,
+            secs_to_end,
+            projected_hold_pnl,
+        )
+        .or_else(|| {
+            plan_tail_safety_sell_signal(
+                jcfg,
+                state,
+                win_state,
+                prices,
+                current_winner,
+                spot,
+                ptb,
+                current_atr,
+                secs_to_end,
+                _spot_signal,
+                projected_hold_pnl,
+                fee_bps,
+            )
+        });
 
         let plan = crate::j_controller::plan_j_window(
             config,
@@ -751,6 +992,9 @@ impl TradeStrategy for JEndgameStrategy {
         );
 
         let Some(plan) = plan else {
+            if let Some(sell) = sell_rescue {
+                signals.push(sell);
+            }
             return signals;
         };
 
@@ -772,6 +1016,35 @@ impl TradeStrategy for JEndgameStrategy {
         } else {
             default_clip
         };
+        let sell_blocks_primary_buy = sell_rescue
+            .as_ref()
+            .map(|s| s.side == side && s.reason.starts_with("j_sell_rescue_tail_"))
+            .unwrap_or(false);
+        if sell_blocks_primary_buy
+            || choppy_primary_add_velocity_blocks(
+                jcfg,
+                state,
+                mid_cross,
+                plan.tier,
+                side,
+                _spot_signal,
+            )
+            || tail_safety_blocks_primary_buy(
+                jcfg,
+                state,
+                plan.tier,
+                side,
+                spot,
+                ptb,
+                current_atr,
+                secs_to_end,
+            )
+        {
+            if let Some(sell) = sell_rescue {
+                signals.push(sell);
+            }
+            return signals;
+        }
 
         if plan.need_tape && !tape_hot(tape, side, jcfg) {
             return signals;
@@ -805,12 +1078,27 @@ impl TradeStrategy for JEndgameStrategy {
 
         let remaining = if matches!(
             plan.tier,
-            EndgameTier::Rescue | EndgameTier::DiscountReload | EndgameTier::FinalSeal
+            EndgameTier::Insurance
+                | EndgameTier::FlipHedge
+                | EndgameTier::Rescue
+                | EndgameTier::DiscountReload
+                | EndgameTier::FinalSeal
         ) {
             plan.budget_left
         } else {
-            plan.budget_left
-                .min((window_cap - win_state.spent).max(0.0))
+            let net_risk = (win_state.spent - win_state.cash_returned).max(0.0);
+            plan.budget_left.min((window_cap - net_risk).max(0.0))
+        };
+        let max_clips_window = if matches!(
+            plan.tier,
+            EndgameTier::FlipHedge
+                | EndgameTier::Rescue
+                | EndgameTier::DiscountReload
+                | EndgameTier::FinalSeal
+        ) {
+            u16::MAX
+        } else {
+            effective_max_clips(jcfg)
         };
         let mut prices_mut = prices.clone();
         let fills = sweep_endgame_clips(
@@ -822,7 +1110,7 @@ impl TradeStrategy for JEndgameStrategy {
             plan.sweep_clips,
             remaining,
             state.clips_filled,
-            effective_max_clips(jcfg),
+            max_clips_window,
         );
 
         let (tape_usd, tape_count) = TradeTapeTracker::winner_stats(tape, side);
@@ -839,14 +1127,20 @@ impl TradeStrategy for JEndgameStrategy {
         };
         let mode = if jcfg.taker_mode { "taker" } else { "limit" };
 
+        if let Some(sell) = sell_rescue {
+            signals.push(sell);
+        }
+        let min_buy_usd = jcfg.effective_probe_clip_usd(&config.session).max(1.0);
         for (fill_price, usd) in fills {
-            signals.push(OrderSignal {
-                side: side.to_string(),
-                is_buy: true,
-                order_type: j_buy_order_type(jcfg),
-                amount: usd,
-                price: fill_price,
-                reason: format!(
+            if usd + 1e-9 < min_buy_usd {
+                continue;
+            }
+            signals.push(OrderSignal::buy(
+                side,
+                j_buy_order_type(jcfg),
+                usd,
+                fill_price,
+                format!(
                     "j_{}_{}_{}_fill_{:.2}_ask_{:.2}_gap_z_{:+.2}_phase_{}_pnl_proj_{:+.2}_tape_${:.0}/{}_xc{}",
                     tier_label,
                     mode,
@@ -860,7 +1154,7 @@ impl TradeStrategy for JEndgameStrategy {
                     tape_count,
                     mid_cross.cross_count,
                 ),
-            });
+            ));
         }
 
         signals
@@ -894,10 +1188,13 @@ impl TradeStrategy for JEndgameStrategy {
     }
 
     fn notify_order_executed(&mut self, window_number: usize, signal: &OrderSignal) {
-        if signal.is_buy {
-            self.mark_buy_executed(window_number, signal);
-        } else if signal.reason.starts_with("j_sell_rescue") {
-            self.mark_sell_rescue_executed(window_number);
+        match signal.operation() {
+            OrderOperation::Buy => self.mark_buy_executed(window_number, signal),
+            OrderOperation::Sell => {
+                if signal.reason.starts_with("j_sell_rescue") {
+                    self.mark_sell_rescue_executed(window_number, signal);
+                }
+            }
         }
     }
 }
@@ -974,6 +1271,15 @@ mod tests {
         TradeTapeSnapshot {
             up_buy_usd: 12.0,
             up_buy_count: 4,
+            window_ms: 5000,
+            ..Default::default()
+        }
+    }
+
+    fn hot_down_tape() -> TradeTapeSnapshot {
+        TradeTapeSnapshot {
+            down_buy_usd: 900.0,
+            down_buy_count: 40,
             window_ms: 5000,
             ..Default::default()
         }
@@ -1380,6 +1686,225 @@ mod tests {
     }
 
     #[test]
+    fn tail_safety_blocks_late_primary_add_near_ptb() {
+        let mut strat = strat_with_cash();
+        let cfg = test_config();
+        let prices = PricesState {
+            up: ContractPrices::top(0.21, 0.31),
+            down: ContractPrices {
+                bid: 0.69,
+                ask: 0.79,
+                book: SideBook {
+                    asks: vec![BookLevel {
+                        price: 0.79,
+                        size: 50.0,
+                    }],
+                    ..Default::default()
+                },
+            },
+        };
+        let mut win = WindowState {
+            window_number: 1,
+            role: "CURRENT".to_string(),
+            status: "LIVE".to_string(),
+            market: sample_market(),
+            spent: 4.7321,
+            cash_returned: 0.0,
+            up_shares: 0.0,
+            down_shares: 5.4619,
+            initial_up_shares: 0.0,
+            initial_down_shares: 0.0,
+            trades: vec![],
+            prices: prices.clone(),
+        };
+        win.market.price_to_beat = Some(60_000.0);
+        strat.windows.insert(
+            1,
+            JWindowState {
+                rescue_spent_usd: 4.7321,
+                clips_filled: 3,
+                primary_side: Some("DOWN".to_string()),
+                ..Default::default()
+            },
+        );
+        let mid = MidCrossSnapshot {
+            armed: true,
+            current_side: Some(LeadSide::Down),
+            lead_gap: 0.20,
+            ..Default::default()
+        };
+        let signals = strat.process_live_tick(
+            &cfg,
+            &prices,
+            Some(59_950.0),
+            &win.market,
+            &win,
+            7,
+            40.0,
+            SpotSignalSnapshot {
+                smoothed_velocity_usd_per_sec: Some(-1.0),
+                ..Default::default()
+            },
+            &mid,
+            &CexMicroSnapshot {
+                buy_sell_imbalance_3s: -1.0,
+                ..Default::default()
+            },
+            &hot_down_tape(),
+        );
+
+        assert!(
+            signals.is_empty(),
+            "last-second primary add near PTB must be blocked, signals={signals:?}"
+        );
+    }
+
+    #[test]
+    fn tail_safety_does_not_dump_small_winner_on_weak_reversal() {
+        let mut strat = strat_with_cash();
+        let cfg = test_config();
+        let prices = PricesState {
+            up: ContractPrices::top(0.78, 0.79),
+            down: ContractPrices::top(0.21, 0.22),
+        };
+        let mut win = WindowState {
+            window_number: 1,
+            role: "CURRENT".to_string(),
+            status: "LIVE".to_string(),
+            market: sample_market(),
+            spent: 1.6000,
+            cash_returned: 0.0,
+            up_shares: 1.64948454,
+            down_shares: 0.0,
+            initial_up_shares: 0.0,
+            initial_down_shares: 0.0,
+            trades: vec![],
+            prices: prices.clone(),
+        };
+        win.market.price_to_beat = Some(64_103.1432);
+        strat.windows.insert(
+            1,
+            JWindowState {
+                rescue_spent_usd: 1.6000,
+                clips_filled: 1,
+                primary_side: Some("UP".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let signals = strat.process_live_tick(
+            &cfg,
+            &prices,
+            Some(64_107.1259),
+            &win.market,
+            &win,
+            5,
+            24.0786,
+            SpotSignalSnapshot {
+                smoothed_velocity_usd_per_sec: Some(-0.598539),
+                ..Default::default()
+            },
+            &MidCrossSnapshot::default(),
+            &CexMicroSnapshot::default(),
+            &TradeTapeSnapshot::default(),
+        );
+
+        assert!(
+            signals.is_empty(),
+            "#27-like tiny winner should not be fully dumped, signals={signals:?}"
+        );
+    }
+
+    #[test]
+    fn tail_safety_sells_primary_before_cross_when_velocity_against() {
+        let mut strat = strat_with_cash();
+        let cfg = test_config();
+        let prices = PricesState {
+            up: ContractPrices::top(0.48, 0.50),
+            down: ContractPrices::top(0.52, 0.55),
+        };
+        let mut win = WindowState {
+            window_number: 1,
+            role: "CURRENT".to_string(),
+            status: "LIVE".to_string(),
+            market: sample_market(),
+            spent: 8.0,
+            cash_returned: 0.0,
+            up_shares: 0.0,
+            down_shares: 10.0,
+            initial_up_shares: 0.0,
+            initial_down_shares: 0.0,
+            trades: vec![],
+            prices: prices.clone(),
+        };
+        win.market.price_to_beat = Some(60_000.0);
+        strat.windows.insert(
+            1,
+            JWindowState {
+                rescue_spent_usd: 8.0,
+                clips_filled: 3,
+                primary_side: Some("DOWN".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let signals = strat.process_live_tick(
+            &cfg,
+            &prices,
+            Some(59_998.5),
+            &win.market,
+            &win,
+            1,
+            40.0,
+            SpotSignalSnapshot {
+                smoothed_velocity_usd_per_sec: Some(2.5),
+                ..Default::default()
+            },
+            &MidCrossSnapshot::default(),
+            &CexMicroSnapshot::default(),
+            &TradeTapeSnapshot::default(),
+        );
+
+        assert_eq!(signals.len(), 1, "signals={signals:?}");
+        assert!(!signals[0].is_buy, "tail safety must SELL, got {signals:?}");
+        assert_eq!(signals[0].side, "DOWN");
+        assert!(
+            signals[0].reason.starts_with("j_sell_rescue_tail_down"),
+            "reason={}",
+            signals[0].reason
+        );
+    }
+
+    #[test]
+    fn partial_winner_sell_projection_counts_lost_redeem() {
+        let mut win = WindowState {
+            window_number: 1,
+            role: "CURRENT".to_string(),
+            status: "LIVE".to_string(),
+            market: sample_market(),
+            spent: 1.6000,
+            cash_returned: 0.0,
+            up_shares: 1.64948454,
+            down_shares: 0.0,
+            initial_up_shares: 0.0,
+            initial_down_shares: 0.0,
+            trades: vec![],
+            prices: PricesState {
+                up: ContractPrices::top(0.78, 0.79),
+                down: ContractPrices::top(0.21, 0.22),
+            },
+        };
+        win.market.price_to_beat = Some(64_103.1432);
+
+        let after_half =
+            projected_winner_pnl_after_partial_sell(&win, "UP", win.up_shares * 0.5, 0.78, 0.0);
+        let hold = win.up_shares - win.spent;
+
+        assert!((hold - 0.04948454).abs() < 1e-8);
+        assert!((after_half - (-0.1319587594)).abs() < 1e-8);
+    }
+
+    #[test]
     fn tape_hot_respects_thresholds() {
         let cfg = JEndgameConfig::default();
         let tape = TradeTapeSnapshot {
@@ -1499,6 +2024,57 @@ mod tests {
             &cfg.j_endgame,
             &state,
             &late_chop
+        ));
+    }
+
+    #[test]
+    fn choppy_primary_add_requires_velocity_alignment() {
+        let mut cfg = test_config();
+        cfg.j_endgame.max_crosses_directional = 8;
+        cfg.j_endgame.max_sig_crosses_directional = 4;
+        cfg.j_endgame.mom_full_vel_usd_per_sec = 2.0;
+        let state = JWindowState {
+            rescue_spent_usd: 1.6,
+            primary_side: Some("UP".to_string()),
+            ..Default::default()
+        };
+        let soft_chop = MidCrossSnapshot {
+            cross_count: 5,
+            significant_cross_count: 1,
+            ..Default::default()
+        };
+        let weak_velocity = SpotSignalSnapshot {
+            smoothed_velocity_usd_per_sec: Some(0.05),
+            ..Default::default()
+        };
+        assert!(choppy_primary_add_velocity_blocks(
+            &cfg.j_endgame,
+            &state,
+            &soft_chop,
+            EndgameTier::FinalSeal,
+            "UP",
+            weak_velocity
+        ));
+
+        let aligned_velocity = SpotSignalSnapshot {
+            smoothed_velocity_usd_per_sec: Some(0.30),
+            ..Default::default()
+        };
+        assert!(!choppy_primary_add_velocity_blocks(
+            &cfg.j_endgame,
+            &state,
+            &soft_chop,
+            EndgameTier::FinalSeal,
+            "UP",
+            aligned_velocity
+        ));
+        assert!(!choppy_primary_add_velocity_blocks(
+            &cfg.j_endgame,
+            &state,
+            &MidCrossSnapshot::default(),
+            EndgameTier::FinalSeal,
+            "UP",
+            weak_velocity
         ));
     }
 
@@ -1845,8 +2421,16 @@ mod tests {
             &CexMicroSnapshot::default(),
             &TradeTapeSnapshot::default(),
         );
-        assert_eq!(signals.len(), 1);
-        assert!(!signals[0].is_buy);
+        assert!(
+            signals
+                .iter()
+                .any(|s| !s.is_buy && s.reason.starts_with("j_sell_rescue")),
+            "sell rescue must still fire at exhausted budget, signals={signals:?}"
+        );
+        assert!(
+            signals.iter().any(|s| s.reason.starts_with("j_flip_hedge")),
+            "defensive hedge may run beside sell rescue, signals={signals:?}"
+        );
         assert!(
             !strat.windows.get(&1).unwrap().sell_rescue_done,
             "sell_rescue_done must wait for fill"
@@ -1908,5 +2492,29 @@ mod tests {
         assert!(!strat.windows.get(&1).unwrap().sell_rescue_done);
         strat.notify_order_executed(1, &signals[0]);
         assert!(strat.windows.get(&1).unwrap().sell_rescue_done);
+    }
+
+    #[test]
+    fn sell_rescue_execution_releases_primary_exposure() {
+        let mut strat = strat_with_cash();
+        strat.windows.insert(
+            1,
+            JWindowState {
+                rescue_spent_usd: 10.0,
+                cheap_spent_usd: 2.0,
+                discount_reload_spent_usd: 3.0,
+                primary_side: Some("UP".to_string()),
+                ..Default::default()
+            },
+        );
+        let sig = OrderSignal::sell("UP", OrderType::Limit, 5.0, 0.50, "j_sell_rescue_up_test");
+
+        strat.notify_order_executed(1, &sig);
+
+        let state = strat.windows.get(&1).unwrap();
+        assert!(state.sell_rescue_done);
+        assert!((state.rescue_spent_usd - 7.5).abs() < 1e-9);
+        assert!((state.cheap_spent_usd - 2.0).abs() < 1e-9);
+        assert!((state.discount_reload_spent_usd - 0.5).abs() < 1e-9);
     }
 }

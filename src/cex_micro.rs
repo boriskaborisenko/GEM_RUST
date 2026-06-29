@@ -32,6 +32,7 @@ pub struct CexMicroSnapshot {
 pub struct CexMicroManager {
     trades: Arc<Mutex<VecDeque<TradeTick>>>,
     last_trade_price: Arc<Mutex<f64>>,
+    symbol: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -52,15 +53,21 @@ struct BybitTradeData {
 
 impl CexMicroManager {
     pub fn new() -> Self {
+        Self::new_for_asset("BTC")
+    }
+
+    pub fn new_for_asset(asset: &str) -> Self {
         Self {
             trades: Arc::new(Mutex::new(VecDeque::with_capacity(512))),
             last_trade_price: Arc::new(Mutex::new(0.0)),
+            symbol: bybit_linear_symbol(asset),
         }
     }
 
     pub fn start_tracking(&self) {
         let trades = self.trades.clone();
         let last_trade_price = self.last_trade_price.clone();
+        let symbol = self.symbol.clone();
 
         tokio::spawn(async move {
             loop {
@@ -74,7 +81,8 @@ impl CexMicroManager {
                 };
 
                 let (mut write, mut read) = ws_stream.split();
-                let subscribe_msg = r#"{"op": "subscribe", "args": ["publicTrade.BTCUSDT"]}"#;
+                let topic = format!("publicTrade.{}", symbol);
+                let subscribe_msg = format!(r#"{{"op":"subscribe","args":["{}"]}}"#, topic);
                 if write
                     .send(Message::Text(subscribe_msg.into()))
                     .await
@@ -83,14 +91,14 @@ impl CexMicroManager {
                     continue;
                 }
 
-                println!("[CEX Micro] Subscribed to publicTrade.BTCUSDT");
+                println!("[CEX Micro] Subscribed to {}", topic);
 
                 while let Some(message) = read.next().await {
                     match message {
                         Ok(Message::Text(text)) => {
                             if let Ok(response) = serde_json::from_str::<BybitTradeResponse>(&text)
                             {
-                                if response.topic.as_deref() == Some("publicTrade.BTCUSDT") {
+                                if response.topic.as_deref() == Some(topic.as_str()) {
                                     if let Some(data_list) = response.data {
                                         let mut buf = trades.lock().unwrap();
                                         let mut last_px = last_trade_price.lock().unwrap();
@@ -155,6 +163,15 @@ impl CexMicroManager {
             lead_vs_chainlink_bps,
             trade_count_3s: count_3s,
         }
+    }
+}
+
+fn bybit_linear_symbol(asset: &str) -> String {
+    let upper = asset.trim().to_ascii_uppercase();
+    if upper.ends_with("USDT") {
+        upper
+    } else {
+        format!("{}USDT", upper)
     }
 }
 

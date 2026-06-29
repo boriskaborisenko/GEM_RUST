@@ -235,6 +235,9 @@ pub struct JEndgameConfig {
     /// Window close goal (redeem PnL).
     #[serde(default = "j_default_target_profit_usd")]
     pub target_profit_usd: f64,
+    /// Hard J trading gate: ignore CLOB market ticks older than this.
+    #[serde(default = "j_default_max_clob_age_ms")]
+    pub max_clob_age_ms: i64,
     #[serde(default = "j_default_probe_clip_usd")]
     pub probe_clip_usd: f64,
     #[serde(default = "j_default_rescue_zone_secs")]
@@ -588,6 +591,9 @@ fn j_default_max_crosses_directional() -> u32 {
 fn j_default_target_profit_usd() -> f64 {
     1.0
 }
+fn j_default_max_clob_age_ms() -> i64 {
+    2_500
+}
 fn j_default_probe_clip_usd() -> f64 {
     1.0
 }
@@ -866,6 +872,7 @@ impl Default for JEndgameConfig {
             max_sig_crosses_directional: j_default_max_sig_crosses_directional(),
             max_crosses_directional: j_default_max_crosses_directional(),
             target_profit_usd: j_default_target_profit_usd(),
+            max_clob_age_ms: j_default_max_clob_age_ms(),
             probe_clip_usd: j_default_probe_clip_usd(),
             rescue_zone_secs: j_default_rescue_zone_secs(),
             max_rescue_usd: j_default_max_rescue_usd(),

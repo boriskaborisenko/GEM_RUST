@@ -14,6 +14,7 @@ mod config;
 mod h_stats;
 mod j_controller;
 mod j_fees;
+mod j_paper_executor;
 mod llm;
 mod mid_cross_tracker;
 mod orderbook;
@@ -34,8 +35,8 @@ use redeem_hold::{
     evaluate_redeem_hold, itm_gap_z, side_is_itm, RedeemHoldInput, REDEEM_HOLD_MIN_VALID_ATR,
 };
 use strategy::{
-    CexMicroSnapshot, EntryMode, EntrySignal, LlmForecast, OrderSignal, SpotSignalSnapshot,
-    StrategyEngine, TradeTapeSnapshot, LEGACY_CHEAPER_SIDE_RATIO,
+    CexMicroSnapshot, EntryMode, EntrySignal, LlmForecast, OrderOperation, OrderSignal,
+    SpotSignalSnapshot, StrategyEngine, TradeTapeSnapshot, LEGACY_CHEAPER_SIDE_RATIO,
 };
 use trade_tape::TradeTapeTracker;
 use trader::{Portfolio, TradeRecord, WindowCloseMeta, WindowState};
@@ -393,7 +394,7 @@ async fn main() -> anyhow::Result<()> {
     // Запускаем фоновое отслеживание живых тиков (+ REST refresh on reconnect/stale)
     volatility_mgr.start_tracking();
 
-    let cex_micro_mgr = CexMicroManager::new();
+    let cex_micro_mgr = CexMicroManager::new_for_asset(&asset);
     cex_micro_mgr.start_tracking();
 
     let run_id = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
@@ -838,6 +839,14 @@ fn run_j_endgame_live_tick(
     if app.maintenance.blocks_trading() {
         return;
     }
+    let clob_age_ms = (get_now_ms() - timestamp).max(0);
+    let max_clob_age_ms = app.config.j_endgame.max_clob_age_ms.max(0);
+    if max_clob_age_ms > 0 && clob_age_ms > max_clob_age_ms {
+        return;
+    }
+    if !j_clob_prices_ready(prices) {
+        return;
+    }
     let Ok(end) = chrono::DateTime::parse_from_rfc3339(&market.end_time) else {
         return;
     };
@@ -878,6 +887,7 @@ fn run_j_endgame_live_tick(
     drop(strat);
 
     execute_strategy_signals(
+        &app.config,
         &app.run_log_dir,
         &app.strategy,
         &mut port,
@@ -890,10 +900,39 @@ fn run_j_endgame_live_tick(
         app.spot_price,
         secs_to_end,
         spot_signal,
+        &mid_cross_snap,
+        &cex_micro_snap,
+        &tape_snap,
     );
 }
 
+fn j_clob_prices_ready(prices: &PricesState) -> bool {
+    let up_bid = if prices.up.book.best_bid() > 0.0 {
+        prices.up.book.best_bid()
+    } else {
+        prices.up.bid
+    };
+    let up_ask = if prices.up.book.best_ask() > 0.0 {
+        prices.up.book.best_ask()
+    } else {
+        prices.up.ask
+    };
+    let down_bid = if prices.down.book.best_bid() > 0.0 {
+        prices.down.book.best_bid()
+    } else {
+        prices.down.bid
+    };
+    let down_ask = if prices.down.book.best_ask() > 0.0 {
+        prices.down.book.best_ask()
+    } else {
+        prices.down.ask
+    };
+
+    up_bid > 0.0 && up_ask > 0.0 && down_bid > 0.0 && down_ask > 0.0
+}
+
 fn execute_strategy_signals(
+    config: &Config,
     log_dir: &str,
     strategy: &Arc<Mutex<StrategyEngine>>,
     port: &mut Portfolio,
@@ -906,16 +945,25 @@ fn execute_strategy_signals(
     spot_price: Option<f64>,
     secs_to_end: i64,
     spot_signal: SpotSignalSnapshot,
+    mid_cross: &MidCrossSnapshot,
+    cex_micro: &CexMicroSnapshot,
+    tape: &TradeTapeSnapshot,
 ) {
     for sig in signals {
-        let executed = if sig.is_buy {
-            port.execute_buy(window_number, &sig.side, sig.amount, sig.price, &sig.reason)
-                .is_some()
+        let executed = if sig.reason.starts_with("j_") {
+            j_paper_executor::execute_j_paper_signal(port, window_number, prices, &sig).executed
         } else {
-            port.execute_sell(window_number, &sig.side, sig.amount, sig.price, &sig.reason)
-                .is_some()
+            match sig.operation() {
+                OrderOperation::Buy => port
+                    .execute_buy(window_number, &sig.side, sig.amount, sig.price, &sig.reason)
+                    .is_some(),
+                OrderOperation::Sell => port
+                    .execute_sell(window_number, &sig.side, sig.amount, sig.price, &sig.reason)
+                    .is_some(),
+            }
         };
         append_signal_event(
+            config,
             log_dir,
             window_number,
             &market.slug,
@@ -928,6 +976,9 @@ fn execute_strategy_signals(
             win_state,
             secs_to_end,
             spot_signal,
+            mid_cross,
+            cex_micro,
+            tape,
         );
         if executed {
             strategy
@@ -1673,15 +1724,9 @@ async fn process_event(
                 }
             }
 
-            if let Some(curr) = app.current_window.clone() {
-                run_j_endgame_live_tick(
-                    app,
-                    curr.window_number,
-                    &curr.market,
-                    &curr.prices,
-                    timestamp_ms,
-                );
-            }
+            // Spot ticks only refresh spot/PTB/maintenance. Strategy J decisions
+            // are made from the single CLOB MarketTick contour so every trade
+            // uses a fresh executable orderbook tick.
         }
         MarketEvent::MarketTick {
             window_number,
@@ -1744,6 +1789,22 @@ async fn process_event(
                         }
                     }
 
+                    if app.config.strategy == "j_endgame" {
+                        let updated = port
+                            .get_or_create_window_state(window_number, "", &market)
+                            .clone();
+                        app.current_window = Some(updated.clone());
+                        drop(port);
+                        run_j_endgame_live_tick(
+                            app,
+                            window_number,
+                            &updated.market,
+                            &prices,
+                            timestamp,
+                        );
+                        return;
+                    }
+
                     let mid_cross_snap = app.mid_cross_tracker.snapshot(window_number);
                     let cex_micro_snap = app.cex_micro_mgr.snapshot(app.spot_price);
                     let tape_snap = app.trade_tape.snapshot(
@@ -1777,6 +1838,7 @@ async fn process_event(
                         && window_number == 0)
                     {
                         execute_strategy_signals(
+                            &app.config,
                             &app.run_log_dir,
                             &app.strategy,
                             &mut port,
@@ -1789,6 +1851,9 @@ async fn process_event(
                             app.spot_price,
                             secs_to_end,
                             spot_signal,
+                            &mid_cross_snap,
+                            &cex_micro_snap,
+                            &tape_snap,
                         );
                     }
 
@@ -1807,7 +1872,7 @@ async fn process_event(
         }
         MarketEvent::TradePrint {
             window_number,
-            role,
+            role: _,
             side,
             usd,
             is_buy,
@@ -1824,65 +1889,9 @@ async fn process_event(
                 timestamp,
                 app.config.j_endgame.tape_window_ms,
             );
-            if role != "CURRENT" || app.config.strategy != "j_endgame" || window_number == 0 {
-                return;
-            }
-            let Some(curr) = app.current_window.clone() else {
-                return;
-            };
-            let market = curr.market.clone();
-            let prices = curr.prices.clone();
-            let mut port = app.portfolio.lock().unwrap();
-            let win_state = port
-                .get_or_create_window_state(window_number, "CURRENT", &market)
-                .clone();
-
-            if let Ok(end) = chrono::DateTime::parse_from_rfc3339(&market.end_time) {
-                let secs_to_end = (end.timestamp_millis() - timestamp) / 1000;
-                let current_atr = app.volatility_mgr.get_current_atr();
-                let spot_signal = app.spot_series.snapshot();
-                let mid_cross_snap = app.mid_cross_tracker.snapshot(window_number);
-                let cex_micro_snap = app.cex_micro_mgr.snapshot(app.spot_price);
-                let tape_snap = app.trade_tape.snapshot(
-                    window_number,
-                    timestamp,
-                    app.config.j_endgame.tape_window_ms,
-                );
-                let cash = port.available_cash;
-                let signals = {
-                    let mut strat = app.strategy.lock().unwrap();
-                    strat.set_runtime_cash(cash);
-                    strat.process_live_tick(
-                        &app.config,
-                        &prices,
-                        app.spot_price,
-                        &market,
-                        &win_state,
-                        secs_to_end,
-                        current_atr,
-                        spot_signal,
-                        &mid_cross_snap,
-                        &cex_micro_snap,
-                        &tape_snap,
-                    )
-                };
-                execute_strategy_signals(
-                    &app.run_log_dir,
-                    &app.strategy,
-                    &mut port,
-                    window_number,
-                    &market,
-                    &prices,
-                    &win_state,
-                    signals,
-                    current_atr,
-                    app.spot_price,
-                    secs_to_end,
-                    spot_signal,
-                );
-                let updated = port.get_or_create_window_state(window_number, "CURRENT", &market);
-                app.current_window = Some(updated.clone());
-            }
+            // Trade prints only feed tape. Strategy J decisions are made from
+            // MarketTick so sell/buy recovery cannot run on stale current_window
+            // prices or bypass maintenance/CLOB freshness gates.
         }
     }
 }
@@ -3060,6 +3069,99 @@ fn csv_cell(value: &str) -> String {
     }
 }
 
+fn csv_f64(value: f64, decimals: usize) -> String {
+    if value.is_finite() {
+        format!("{:.*}", decimals, value)
+    } else {
+        String::new()
+    }
+}
+
+fn csv_opt_f64(value: Option<f64>, decimals: usize) -> String {
+    value.map(|v| csv_f64(v, decimals)).unwrap_or_default()
+}
+
+fn signal_side_dir(side: &str) -> f64 {
+    if side == "UP" {
+        1.0
+    } else {
+        -1.0
+    }
+}
+
+fn opposite_side(side: &str) -> &'static str {
+    if side == "UP" {
+        "DOWN"
+    } else {
+        "UP"
+    }
+}
+
+fn side_bid_ask(side: &str, prices: &PricesState) -> (f64, f64) {
+    if side == "UP" {
+        (prices.up.bid, prices.up.ask)
+    } else {
+        (prices.down.bid, prices.down.ask)
+    }
+}
+
+fn side_ask_depth_usd(side: &str, prices: &PricesState, max_pay: f64) -> f64 {
+    let book = if side == "UP" {
+        &prices.up.book
+    } else {
+        &prices.down.book
+    };
+    crate::orderbook::ask_depth_usd(&book.asks, max_pay)
+}
+
+fn mid_lead_side_label(mid_cross: &MidCrossSnapshot) -> &'static str {
+    match mid_cross.current_side {
+        Some(LeadSide::Up) => "UP",
+        Some(LeadSide::Down) => "DOWN",
+        Some(LeadSide::Tie) => "TIE",
+        None => "",
+    }
+}
+
+fn mid_lead_for_side(side: &str, mid_cross: &MidCrossSnapshot) -> f64 {
+    match mid_cross.current_side {
+        Some(LeadSide::Up) if side == "UP" => mid_cross.lead_gap,
+        Some(LeadSide::Down) if side == "DOWN" => mid_cross.lead_gap,
+        Some(LeadSide::Up | LeadSide::Down) => -mid_cross.lead_gap,
+        Some(LeadSide::Tie) | None => 0.0,
+    }
+}
+
+fn tape_stats_for_side(side: &str, tape: &TradeTapeSnapshot) -> (f64, u32, f64, u32, f64) {
+    let (signal_usd, signal_count, opposite_usd, opposite_count) = if side == "UP" {
+        (
+            tape.up_buy_usd,
+            tape.up_buy_count,
+            tape.down_buy_usd,
+            tape.down_buy_count,
+        )
+    } else {
+        (
+            tape.down_buy_usd,
+            tape.down_buy_count,
+            tape.up_buy_usd,
+            tape.up_buy_count,
+        )
+    };
+    let imbalance = if signal_usd + opposite_usd > 0.0 {
+        (signal_usd - opposite_usd) / (signal_usd + opposite_usd)
+    } else {
+        0.0
+    };
+    (
+        signal_usd,
+        signal_count,
+        opposite_usd,
+        opposite_count,
+        imbalance,
+    )
+}
+
 fn append_entry_event(
     log_dir: &str,
     window_number: usize,
@@ -3197,6 +3299,7 @@ fn append_llm_forecast_event(
 }
 
 fn append_signal_event(
+    config: &Config,
     log_dir: &str,
     window_number: usize,
     slug: &str,
@@ -3209,6 +3312,9 @@ fn append_signal_event(
     win_state: &WindowState,
     secs_to_end: i64,
     spot_signal: SpotSignalSnapshot,
+    mid_cross: &MidCrossSnapshot,
+    cex_micro: &CexMicroSnapshot,
+    tape: &TradeTapeSnapshot,
 ) {
     let duration_ms = match (
         chrono::DateTime::parse_from_rfc3339(&market.start_time),
@@ -3232,16 +3338,17 @@ fn append_signal_event(
     let paired_shares = win_state.up_shares.min(win_state.down_shares);
     let terminal_floor = win_state.cash_returned + paired_shares;
     let terminal_floor_gap = terminal_floor - win_state.spent;
-    let (signal_amount_kind, signal_shares, signal_usd_value) = if sig.is_buy {
-        let shares = if sig.price > 0.0 {
-            sig.amount / sig.price
+    let (signal_amount_kind, signal_shares, signal_usd_value) =
+        if sig.operation() == OrderOperation::Buy {
+            let shares = if sig.price > 0.0 {
+                sig.amount / sig.price
+            } else {
+                0.0
+            };
+            ("usd", shares, sig.amount)
         } else {
-            0.0
+            ("shares", sig.amount, sig.amount * sig.price)
         };
-        ("usd", shares, sig.amount)
-    } else {
-        ("shares", sig.amount, sig.amount * sig.price)
-    };
     let spot_velocity = spot_signal
         .raw_velocity_usd_per_sec
         .map(|v| format!("{:.6}", v))
@@ -3255,59 +3362,246 @@ fn append_signal_event(
         .map(|v| format!("{:.6}", v))
         .unwrap_or_else(|| "".to_string());
 
-    append_csv_row(
-        log_dir,
-        "strategy_signals.csv",
-        "timestamp,window_id,slug,action,order_type,side,amount,amount_kind,signal_shares,signal_usd_value,price,reason,executed,current_atr,secs_to_end,time_pct,spot_price,spot_velocity_usd_per_sec,spot_smoothed_velocity_usd_per_sec,spot_acceleration_usd_per_sec2,ptb,ptb_delta_usd,ptb_delta_pct,up_bid,up_ask,down_bid,down_ask,up_shares,down_shares,paired_shares,spent,returned,terminal_floor,terminal_floor_gap,mtm,unrealized_pnl",
-        &format!(
-            "{},{},{},{},{},{},{:.8},{},{:.8},{:.4},{:.4},{},{},{:.4},{},{:.2},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.8},{:.8},{:.8},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
-            get_now_ms(),
-            window_number,
-            slug,
-            if sig.is_buy { "BUY" } else { "SELL" },
-            sig.order_type.as_str(),
-            sig.side,
-            sig.amount,
-            signal_amount_kind,
-            signal_shares,
-            signal_usd_value,
-            sig.price,
-            sig.reason,
-            executed,
-            current_atr,
-            secs_to_end,
-            time_pct,
-            spot_price
-                .map(|p| format!("{:.4}", p))
-                .unwrap_or_else(|| "".to_string()),
-            spot_velocity,
-            spot_smoothed_velocity,
-            spot_acceleration,
-            market
-                .price_to_beat
-                .map(|p| format!("{:.4}", p))
-                .unwrap_or_else(|| "".to_string()),
-            ptb_delta_usd
-                .map(|p| format!("{:.4}", p))
-                .unwrap_or_else(|| "".to_string()),
-            ptb_delta_pct
-                .map(|p| format!("{:.6}", p))
-                .unwrap_or_else(|| "".to_string()),
-            prices.up.bid,
-            prices.up.ask,
-            prices.down.bid,
-            prices.down.ask,
-            win_state.up_shares,
-            win_state.down_shares,
-            paired_shares,
-            win_state.spent,
-            win_state.cash_returned,
-            terminal_floor,
-            terminal_floor_gap,
-            mtm,
-            unrealized_pnl
-        ),
-    );
+    let current_winner = match (spot_price, market.price_to_beat) {
+        (Some(spot), Some(ptb)) if ptb > 0.0 && spot > ptb => Some("UP"),
+        (Some(spot), Some(ptb)) if ptb > 0.0 && spot < ptb => Some("DOWN"),
+        _ => None,
+    };
+    let current_gap_z = match (spot_price, market.price_to_beat) {
+        (Some(spot), Some(ptb)) if ptb > 0.0 => {
+            crate::strategy::strategy_j::gap_z(spot, ptb, current_atr, secs_to_end)
+        }
+        _ => f64::NAN,
+    };
+    let signal_side_gap_z = current_gap_z * signal_side_dir(&sig.side);
+    let signal_is_current_winner = current_winner
+        .map(|winner| winner == sig.side.as_str())
+        .unwrap_or(false);
+    let j_confidence = current_winner
+        .filter(|_| current_gap_z.is_finite())
+        .map(|winner| {
+            crate::j_controller::endgame_confidence(
+                &config.j_endgame,
+                winner,
+                current_gap_z,
+                &spot_signal,
+                mid_cross,
+                cex_micro,
+                tape,
+            )
+        })
+        .unwrap_or(0.0);
+
+    let (signal_bid, signal_ask) = side_bid_ask(&sig.side, prices);
+    let (opposite_bid, opposite_ask) = side_bid_ask(opposite_side(&sig.side), prices);
+    let combined_ask = prices.up.ask + prices.down.ask;
+    let signal_ask_depth_99c = side_ask_depth_usd(&sig.side, prices, 0.99);
+    let signal_ask_depth_limit = side_ask_depth_usd(&sig.side, prices, sig.price.max(signal_ask));
+
+    let side_dir = signal_side_dir(&sig.side);
+    let spot_velocity_for_signal = spot_signal.raw_velocity_usd_per_sec.map(|v| v * side_dir);
+    let spot_smoothed_velocity_for_signal = spot_signal
+        .smoothed_velocity_usd_per_sec
+        .map(|v| v * side_dir);
+    let cex_velocity_1s_for_signal = cex_micro.trade_velocity_1s.map(|v| v * side_dir);
+    let cex_velocity_3s_for_signal = cex_micro.trade_velocity_3s.map(|v| v * side_dir);
+    let cex_velocity_5s_for_signal = cex_micro.trade_velocity_5s.map(|v| v * side_dir);
+    let cex_imbalance_for_signal = cex_micro.buy_sell_imbalance_3s * side_dir;
+    let cex_lead_for_signal_bps = cex_micro.lead_vs_chainlink_bps.map(|v| v * side_dir);
+    let cex_velocity_against_signal =
+        crate::cex_micro::cex_velocity_against_side(&sig.side, cex_micro);
+
+    let (
+        tape_signal_buy_usd,
+        tape_signal_buy_count,
+        tape_opposite_buy_usd,
+        tape_opposite_buy_count,
+        tape_imbalance_for_signal,
+    ) = tape_stats_for_side(&sig.side, tape);
+
+    let header = [
+        "timestamp",
+        "window_id",
+        "slug",
+        "action",
+        "order_type",
+        "side",
+        "amount",
+        "amount_kind",
+        "signal_shares",
+        "signal_usd_value",
+        "price",
+        "reason",
+        "executed",
+        "current_atr",
+        "secs_to_end",
+        "time_pct",
+        "spot_price",
+        "spot_velocity_usd_per_sec",
+        "spot_smoothed_velocity_usd_per_sec",
+        "spot_acceleration_usd_per_sec2",
+        "ptb",
+        "ptb_delta_usd",
+        "ptb_delta_pct",
+        "current_winner",
+        "current_gap_z",
+        "signal_side_gap_z",
+        "signal_is_current_winner",
+        "j_confidence",
+        "up_bid",
+        "up_ask",
+        "down_bid",
+        "down_ask",
+        "signal_bid",
+        "signal_ask",
+        "opposite_bid",
+        "opposite_ask",
+        "combined_ask",
+        "signal_ask_depth_99c",
+        "signal_ask_depth_limit",
+        "up_shares",
+        "down_shares",
+        "paired_shares",
+        "spent",
+        "returned",
+        "terminal_floor",
+        "terminal_floor_gap",
+        "mtm",
+        "unrealized_pnl",
+        "spot_velocity_for_signal",
+        "spot_smoothed_velocity_for_signal",
+        "mid_current_side",
+        "mid_lead_gap",
+        "mid_lead_for_signal",
+        "mid_cross_count",
+        "mid_sig_cross_count",
+        "mid_peak_lead_gap",
+        "mid_last_cross_from",
+        "mid_last_cross_to",
+        "mid_last_cross_time_pct",
+        "mid_last_cross_is_sig",
+        "mid_last_cross_atr",
+        "tape_signal_buy_usd",
+        "tape_signal_buy_count",
+        "tape_opposite_buy_usd",
+        "tape_opposite_buy_count",
+        "tape_imbalance_for_signal",
+        "tape_up_buy_usd",
+        "tape_up_buy_count",
+        "tape_down_buy_usd",
+        "tape_down_buy_count",
+        "tape_window_ms",
+        "cex_velocity_1s",
+        "cex_velocity_3s",
+        "cex_velocity_5s",
+        "cex_velocity_1s_for_signal",
+        "cex_velocity_3s_for_signal",
+        "cex_velocity_5s_for_signal",
+        "cex_imbalance_3s",
+        "cex_imbalance_for_signal",
+        "cex_trade_count_3s",
+        "cex_last_trade_price",
+        "cex_lead_vs_chainlink_bps",
+        "cex_lead_for_signal_bps",
+        "cex_velocity_against_signal",
+    ]
+    .join(",");
+
+    let row = vec![
+        get_now_ms().to_string(),
+        window_number.to_string(),
+        csv_cell(slug),
+        sig.operation().as_str().to_string(),
+        sig.order_type.as_str().to_string(),
+        sig.side.clone(),
+        csv_f64(sig.amount, 8),
+        signal_amount_kind.to_string(),
+        csv_f64(signal_shares, 8),
+        csv_f64(signal_usd_value, 4),
+        csv_f64(sig.price, 4),
+        csv_cell(&sig.reason),
+        executed.to_string(),
+        csv_f64(current_atr, 4),
+        secs_to_end.to_string(),
+        csv_f64(time_pct, 2),
+        csv_opt_f64(spot_price, 4),
+        spot_velocity,
+        spot_smoothed_velocity,
+        spot_acceleration,
+        csv_opt_f64(market.price_to_beat, 4),
+        csv_opt_f64(ptb_delta_usd, 4),
+        csv_opt_f64(ptb_delta_pct, 6),
+        current_winner.unwrap_or("").to_string(),
+        csv_f64(current_gap_z, 4),
+        csv_f64(signal_side_gap_z, 4),
+        signal_is_current_winner.to_string(),
+        csv_f64(j_confidence, 4),
+        csv_f64(prices.up.bid, 4),
+        csv_f64(prices.up.ask, 4),
+        csv_f64(prices.down.bid, 4),
+        csv_f64(prices.down.ask, 4),
+        csv_f64(signal_bid, 4),
+        csv_f64(signal_ask, 4),
+        csv_f64(opposite_bid, 4),
+        csv_f64(opposite_ask, 4),
+        csv_f64(combined_ask, 4),
+        csv_f64(signal_ask_depth_99c, 4),
+        csv_f64(signal_ask_depth_limit, 4),
+        csv_f64(win_state.up_shares, 8),
+        csv_f64(win_state.down_shares, 8),
+        csv_f64(paired_shares, 8),
+        csv_f64(win_state.spent, 4),
+        csv_f64(win_state.cash_returned, 4),
+        csv_f64(terminal_floor, 4),
+        csv_f64(terminal_floor_gap, 4),
+        csv_f64(mtm, 4),
+        csv_f64(unrealized_pnl, 4),
+        csv_opt_f64(spot_velocity_for_signal, 6),
+        csv_opt_f64(spot_smoothed_velocity_for_signal, 6),
+        mid_lead_side_label(mid_cross).to_string(),
+        csv_f64(mid_cross.lead_gap, 4),
+        csv_f64(mid_lead_for_side(&sig.side, mid_cross), 4),
+        mid_cross.cross_count.to_string(),
+        mid_cross.significant_cross_count.to_string(),
+        csv_f64(mid_cross.peak_lead_gap, 4),
+        mid_cross
+            .last_cross_from
+            .map(|side| side.as_str().to_string())
+            .unwrap_or_default(),
+        mid_cross
+            .last_cross_to
+            .map(|side| side.as_str().to_string())
+            .unwrap_or_default(),
+        csv_opt_f64(mid_cross.last_cross_time_pct, 2),
+        mid_cross.last_cross_is_significant.to_string(),
+        csv_f64(mid_cross.last_cross_atr, 4),
+        csv_f64(tape_signal_buy_usd, 4),
+        tape_signal_buy_count.to_string(),
+        csv_f64(tape_opposite_buy_usd, 4),
+        tape_opposite_buy_count.to_string(),
+        csv_f64(tape_imbalance_for_signal, 4),
+        csv_f64(tape.up_buy_usd, 4),
+        tape.up_buy_count.to_string(),
+        csv_f64(tape.down_buy_usd, 4),
+        tape.down_buy_count.to_string(),
+        tape.window_ms.to_string(),
+        csv_opt_f64(cex_micro.trade_velocity_1s, 6),
+        csv_opt_f64(cex_micro.trade_velocity_3s, 6),
+        csv_opt_f64(cex_micro.trade_velocity_5s, 6),
+        csv_opt_f64(cex_velocity_1s_for_signal, 6),
+        csv_opt_f64(cex_velocity_3s_for_signal, 6),
+        csv_opt_f64(cex_velocity_5s_for_signal, 6),
+        csv_f64(cex_micro.buy_sell_imbalance_3s, 6),
+        csv_f64(cex_imbalance_for_signal, 6),
+        cex_micro.trade_count_3s.to_string(),
+        csv_f64(cex_micro.last_trade_price, 4),
+        csv_opt_f64(cex_micro.lead_vs_chainlink_bps, 4),
+        csv_opt_f64(cex_lead_for_signal_bps, 4),
+        cex_velocity_against_signal.to_string(),
+    ]
+    .join(",");
+
+    append_csv_row(log_dir, "strategy_signals.csv", &header, &row);
 }
 
 fn window_duration_sec(market: &MarketWindow) -> f64 {

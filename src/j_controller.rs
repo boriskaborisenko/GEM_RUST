@@ -81,6 +81,7 @@ pub fn redeem_pnl_if_wins(
     up_shares: f64,
     down_shares: f64,
     spent: f64,
+    cash_returned: f64,
     winner: &str,
     fee_bps: f64,
 ) -> f64 {
@@ -90,7 +91,7 @@ pub fn redeem_pnl_if_wins(
         _ => 0.0,
     };
     let redeem_fee = leg_fee_usd(1.0, shares, fee_bps);
-    shares - redeem_fee - spent
+    cash_returned + shares - redeem_fee - spent
 }
 
 fn pick_underdog(prices: &PricesState, max_ask: f64) -> Option<(&'static str, f64)> {
@@ -148,11 +149,20 @@ pub fn plan_insurance(
     })
 }
 
-fn rescue_budget(cfg: &Config, state: &JWindowState, win_spent: f64, available_cash: f64) -> f64 {
+fn recovered_net_risk(win_state: &WindowState) -> f64 {
+    (win_state.spent - win_state.cash_returned).max(0.0)
+}
+
+fn rescue_budget(
+    cfg: &Config,
+    state: &JWindowState,
+    win_state: &WindowState,
+    available_cash: f64,
+) -> f64 {
     let j = &cfg.j_endgame;
     let max_window = j.effective_max_usd_per_window(&cfg.session);
     let max_rescue = j.effective_max_rescue_usd(&cfg.session);
-    let window_left = (max_window - win_spent).max(0.0);
+    let window_left = (max_window - recovered_net_risk(win_state)).max(0.0);
     let window_left = if cfg.session.max_window_budget > 0.0 {
         window_left.min(cfg.session.max_window_budget)
     } else {
@@ -299,6 +309,7 @@ fn usd_to_close_profit_gap(
         win_state.up_shares,
         win_state.down_shares,
         win_state.spent,
+        win_state.cash_returned,
         winner,
         fee_bps,
     );
@@ -355,6 +366,53 @@ pub fn tail_cut_exposure_cap_usd(config: &Config, ask: f64) -> f64 {
     cap.max(0.0)
 }
 
+fn soft_chop_threshold(limit: u32, backoff: u32) -> Option<u32> {
+    if limit == 0 {
+        None
+    } else {
+        Some(limit.saturating_sub(backoff).max(1))
+    }
+}
+
+pub(crate) fn mid_cross_hard_chop(cfg: &JEndgameConfig, mid_cross: &MidCrossSnapshot) -> bool {
+    (cfg.max_crosses_directional > 0 && mid_cross.cross_count >= cfg.max_crosses_directional)
+        || (cfg.max_sig_crosses_directional > 0
+            && mid_cross.significant_cross_count >= cfg.max_sig_crosses_directional)
+}
+
+pub(crate) fn mid_cross_soft_chop(cfg: &JEndgameConfig, mid_cross: &MidCrossSnapshot) -> bool {
+    if mid_cross_hard_chop(cfg, mid_cross) {
+        return true;
+    }
+    let soft_cross = soft_chop_threshold(cfg.max_crosses_directional, 3);
+    let soft_sig = soft_chop_threshold(cfg.max_sig_crosses_directional, 2);
+    soft_cross
+        .map(|limit| mid_cross.cross_count >= limit)
+        .unwrap_or(false)
+        || soft_sig
+            .map(|limit| mid_cross.significant_cross_count >= limit)
+            .unwrap_or(false)
+}
+
+pub fn chop_adjusted_primary_exposure_cap_usd(
+    config: &Config,
+    mid_cross: &MidCrossSnapshot,
+    base_cap: f64,
+) -> f64 {
+    let cfg = &config.j_endgame;
+    let first_clip = cfg
+        .effective_first_clip_usd(&config.session)
+        .max(cfg.effective_probe_clip_usd(&config.session))
+        .max(1.0);
+    if mid_cross_hard_chop(cfg, mid_cross) {
+        base_cap.min(first_clip)
+    } else if mid_cross_soft_chop(cfg, mid_cross) {
+        base_cap.min(first_clip * 2.0)
+    } else {
+        base_cap
+    }
+}
+
 /// Per-tick clip cap: probe on first buy, then ramp with gap_z, time, and ask cheapness.
 fn effective_max_clip_usd(
     config: &Config,
@@ -398,6 +456,32 @@ pub fn plan_endgame_composite(
     elapsed_pct: f64,
     available_cash: f64,
 ) -> Option<TierPlan> {
+    plan_endgame_composite_with_chop(
+        config,
+        state,
+        win_state,
+        winner,
+        ask,
+        gz,
+        confidence,
+        elapsed_pct,
+        available_cash,
+        &MidCrossSnapshot::default(),
+    )
+}
+
+pub fn plan_endgame_composite_with_chop(
+    config: &Config,
+    state: &JWindowState,
+    win_state: &WindowState,
+    winner: &str,
+    ask: f64,
+    gz: f64,
+    confidence: f64,
+    elapsed_pct: f64,
+    available_cash: f64,
+    mid_cross: &MidCrossSnapshot,
+) -> Option<TierPlan> {
     let cfg = &config.j_endgame;
     if ask <= 0.0 || ask > cfg.final_seal_max_ask {
         return None;
@@ -416,7 +500,11 @@ pub fn plan_endgame_composite(
     let max_rescue = cfg.effective_max_rescue_usd(&config.session);
     let probe_clip = cfg.effective_probe_clip_usd(&config.session);
     let min_increment = cfg.effective_min_increment_usd(&config.session);
-    let exposure_cap = tail_cut_exposure_cap_usd(config, ask).min(max_rescue);
+    let exposure_cap = chop_adjusted_primary_exposure_cap_usd(
+        config,
+        mid_cross,
+        tail_cut_exposure_cap_usd(config, ask).min(max_rescue),
+    );
     if exposure_cap <= 1e-9 || state.rescue_spent_usd + 1e-9 >= exposure_cap {
         return None;
     }
@@ -428,7 +516,7 @@ pub fn plan_endgame_composite(
         eff = eff.max(0.55 + 0.45 * gz_boost);
     }
     let conf_target = (eff * max_rescue).min(exposure_cap);
-    let remaining = rescue_budget(config, state, win_state.spent, available_cash);
+    let remaining = rescue_budget(config, state, win_state, available_cash);
     let profit_increment = if has_deployed_exposure(win_state) {
         usd_to_close_profit_gap(win_state, winner, ask, cfg.target_profit_usd, fee_bps)
     } else {
@@ -476,6 +564,28 @@ pub fn plan_discount_reload(
     gz: f64,
     available_cash: f64,
 ) -> Option<TierPlan> {
+    plan_discount_reload_with_chop(
+        config,
+        state,
+        win_state,
+        current_winner,
+        ask,
+        gz,
+        available_cash,
+        &MidCrossSnapshot::default(),
+    )
+}
+
+pub fn plan_discount_reload_with_chop(
+    config: &Config,
+    state: &JWindowState,
+    win_state: &WindowState,
+    current_winner: &str,
+    ask: f64,
+    gz: f64,
+    available_cash: f64,
+    mid_cross: &MidCrossSnapshot,
+) -> Option<TierPlan> {
     let cfg = &config.j_endgame;
     if !cfg.discount_reload_enabled || !state.has_primary_exposure() {
         return None;
@@ -500,10 +610,14 @@ pub fn plan_discount_reload(
     }
 
     let probe_clip = cfg.effective_probe_clip_usd(&config.session);
-    let tail_left = tail_cut_exposure_cap_usd(config, ask) - state.rescue_spent_usd;
+    let tail_left = chop_adjusted_primary_exposure_cap_usd(
+        config,
+        mid_cross,
+        tail_cut_exposure_cap_usd(config, ask),
+    ) - state.rescue_spent_usd;
     let reload_left =
         cfg.effective_discount_reload_max_usd(&config.session) - state.discount_reload_spent_usd;
-    let remaining = rescue_budget(config, state, win_state.spent, available_cash)
+    let remaining = rescue_budget(config, state, win_state, available_cash)
         .min(tail_left)
         .min(reload_left)
         .max(0.0);
@@ -568,9 +682,10 @@ pub fn plan_flip_hedge_rescue(
         .effective_flip_hedge_clip_usd(&config.session)
         .max(probe_clip);
     let budget_left = budget_cap - state.hedge_spent_usd;
-    let hedge_clip = hedge_clip_base
-        .min(budget_left)
-        .max(probe_clip.min(budget_left));
+    if budget_left + 1e-9 < probe_clip {
+        return None;
+    }
+    let hedge_clip = hedge_clip_base.min(budget_left);
     Some(TierPlan {
         tier: EndgameTier::FlipHedge,
         max_pay: hedge_ask.min(cfg.flip_max_ask),
@@ -647,7 +762,7 @@ pub fn plan_j_window(
             return None;
         }
         let ask = side_ask(current_winner, prices);
-        if let Some(plan) = plan_discount_reload(
+        if let Some(plan) = plan_discount_reload_with_chop(
             config,
             state,
             win_state,
@@ -655,10 +770,11 @@ pub fn plan_j_window(
             ask,
             gz,
             available_cash,
+            mid_cross,
         ) {
             return Some(plan);
         }
-        plan_endgame_composite(
+        plan_endgame_composite_with_chop(
             config,
             state,
             win_state,
@@ -668,6 +784,7 @@ pub fn plan_j_window(
             confidence,
             elapsed_pct,
             available_cash,
+            mid_cross,
         )
     })
 }
@@ -677,6 +794,7 @@ pub fn projected_redeem_pnl(win_state: &WindowState, winner: &str, fee_bps: f64)
         win_state.up_shares,
         win_state.down_shares,
         win_state.spent,
+        win_state.cash_returned,
         winner,
         fee_bps,
     )
@@ -950,6 +1068,131 @@ mod tests {
     }
 
     #[test]
+    fn soft_chop_caps_primary_exposure_to_two_first_clips() {
+        let j = {
+            let mut c = JEndgameConfig::default();
+            c.conf_enter = 0.5;
+            c.max_rescue_usd = 60.0;
+            c.max_usd_per_window = 60.0;
+            c.probe_clip_usd = 1.0;
+            c.first_clip_usd = 8.0;
+            c.min_increment_usd = 1.0;
+            c.max_clip_usd = 25.0;
+            c.tail_cap_ask94_usd = 60.0;
+            c.max_crosses_directional = 8;
+            c.max_sig_crosses_directional = 4;
+            c.final_seal_max_ask = 0.99;
+            c.taker_max_ask = 0.99;
+            c
+        };
+        let cfg = full_cfg(j);
+        let win = win_state_zero();
+        let state = JWindowState {
+            rescue_spent_usd: 8.0,
+            primary_side: Some("UP".to_string()),
+            ..Default::default()
+        };
+        let mid = MidCrossSnapshot {
+            cross_count: 5,
+            significant_cross_count: 1,
+            ..Default::default()
+        };
+        let plan = plan_endgame_composite_with_chop(
+            &cfg, &state, &win, "UP", 0.92, 2.0, 1.0, 80.0, 500.0, &mid,
+        )
+        .expect("soft chop still allows a small follow-up clip");
+        assert!(
+            plan.clip_usd <= 8.0 + 1e-9,
+            "soft chop should cap total exposure at two first clips, clip={}",
+            plan.clip_usd
+        );
+    }
+
+    #[test]
+    fn hard_chop_blocks_primary_add_after_first_clip() {
+        let j = {
+            let mut c = JEndgameConfig::default();
+            c.conf_enter = 0.5;
+            c.max_rescue_usd = 60.0;
+            c.max_usd_per_window = 60.0;
+            c.probe_clip_usd = 1.0;
+            c.first_clip_usd = 8.0;
+            c.min_increment_usd = 1.0;
+            c.max_clip_usd = 25.0;
+            c.tail_cap_ask94_usd = 60.0;
+            c.max_crosses_directional = 8;
+            c.max_sig_crosses_directional = 4;
+            c.final_seal_max_ask = 0.99;
+            c.taker_max_ask = 0.99;
+            c
+        };
+        let cfg = full_cfg(j);
+        let win = win_state_zero();
+        let state = JWindowState {
+            rescue_spent_usd: 8.0,
+            primary_side: Some("UP".to_string()),
+            ..Default::default()
+        };
+        let mid = MidCrossSnapshot {
+            cross_count: 8,
+            significant_cross_count: 4,
+            ..Default::default()
+        };
+        assert!(
+            plan_endgame_composite_with_chop(
+                &cfg, &state, &win, "UP", 0.92, 2.0, 1.0, 80.0, 500.0, &mid,
+            )
+            .is_none(),
+            "hard chop should keep primary exposure at one first clip"
+        );
+    }
+
+    #[test]
+    fn calm_window_keeps_large_follow_up_capacity() {
+        let j = {
+            let mut c = JEndgameConfig::default();
+            c.conf_enter = 0.5;
+            c.max_rescue_usd = 60.0;
+            c.max_usd_per_window = 60.0;
+            c.probe_clip_usd = 1.0;
+            c.first_clip_usd = 8.0;
+            c.min_increment_usd = 1.0;
+            c.max_clip_usd = 25.0;
+            c.tail_cap_ask94_usd = 60.0;
+            c.max_crosses_directional = 8;
+            c.max_sig_crosses_directional = 4;
+            c.final_seal_max_ask = 0.99;
+            c.taker_max_ask = 0.99;
+            c
+        };
+        let cfg = full_cfg(j);
+        let win = win_state_zero();
+        let state = JWindowState {
+            rescue_spent_usd: 8.0,
+            primary_side: Some("UP".to_string()),
+            ..Default::default()
+        };
+        let plan = plan_endgame_composite_with_chop(
+            &cfg,
+            &state,
+            &win,
+            "UP",
+            0.92,
+            2.0,
+            1.0,
+            80.0,
+            500.0,
+            &MidCrossSnapshot::default(),
+        )
+        .expect("calm follow-up");
+        assert!(
+            plan.clip_usd > 8.0,
+            "calm window should keep the old large follow-up capacity, clip={}",
+            plan.clip_usd
+        );
+    }
+
+    #[test]
     fn discount_reload_adds_primary_when_discounted_and_still_winner() {
         let j = {
             let mut c = JEndgameConfig::default();
@@ -1140,6 +1383,42 @@ mod tests {
     }
 
     #[test]
+    fn projected_redeem_pnl_counts_cash_returned() {
+        let mut win = win_state_zero();
+        win.spent = 10.0;
+        win.cash_returned = 4.0;
+        win.up_shares = 7.0;
+
+        let pnl = projected_redeem_pnl(&win, "UP", 0.0);
+
+        assert!((pnl - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rescue_budget_uses_recovered_net_risk_after_sell() {
+        let mut j = JEndgameConfig::default();
+        j.max_usd_per_window = 16.0;
+        j.max_rescue_usd = 16.0;
+        j.bank_sizing_enabled = false;
+        let cfg = full_cfg(j);
+        let mut win = win_state_zero();
+        win.spent = 16.0;
+        win.cash_returned = 8.0;
+        let state = JWindowState {
+            rescue_spent_usd: 8.0,
+            primary_side: Some("UP".to_string()),
+            ..Default::default()
+        };
+
+        let budget = rescue_budget(&cfg, &state, &win, 500.0);
+
+        assert!(
+            budget > 7.99,
+            "recovered cash should reopen risk budget, budget={budget}"
+        );
+    }
+
+    #[test]
     fn flip_hedge_budget_scales_with_primary_exposure() {
         let mut j = j_cfg();
         j.flip_tier_usd = 4.0;
@@ -1158,5 +1437,44 @@ mod tests {
             ..Default::default()
         };
         assert!((flip_hedge_budget_cap(&cfg, &state_large) - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn flip_hedge_suppresses_sub_min_notional_remainder() {
+        let mut j = j_cfg();
+        j.bank_sizing_enabled = false;
+        j.min_trade_usd = 1.0;
+        j.flip_tier_usd = 2.15;
+        j.flip_tier_max_usd = 2.15;
+        j.flip_hedge_clip_usd = 2.0;
+        j.flip_hedge_exposure_ratio = 0.0;
+        j.flip_min_gap_z = 0.4;
+        j.flip_require_spot_cross = true;
+        let cfg = full_cfg(j);
+        let state = JWindowState {
+            rescue_spent_usd: 8.60,
+            hedge_spent_usd: 2.00,
+            primary_side: Some("DOWN".to_string()),
+            ..Default::default()
+        };
+        let prices = PricesState {
+            up: ContractPrices::top(0.65, 0.66),
+            down: ContractPrices::top(0.31, 0.35),
+        };
+        let mid = MidCrossSnapshot {
+            armed: true,
+            cross_count: 7,
+            significant_cross_count: 5,
+            last_cross_is_significant: true,
+            ..Default::default()
+        };
+
+        let plan =
+            plan_flip_hedge_rescue(&cfg, &state, "UP", 64_084.0, 64_075.0, 0.55, &prices, &mid);
+
+        assert!(
+            plan.is_none(),
+            "remaining $0.15 hedge budget must not create a sub-$1 signal"
+        );
     }
 }

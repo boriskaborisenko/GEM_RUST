@@ -19,7 +19,7 @@ use crate::trader::WindowState;
 
 pub const LEGACY_CHEAPER_SIDE_RATIO: f64 = 0.60;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderType {
     Market,
     Limit,
@@ -34,6 +34,21 @@ impl OrderType {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderOperation {
+    Buy,
+    Sell,
+}
+
+impl OrderOperation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Buy => "BUY",
+            Self::Sell => "SELL",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OrderSignal {
     pub side: String,
@@ -44,6 +59,50 @@ pub struct OrderSignal {
     pub amount: f64,
     pub price: f64,
     pub reason: String,
+}
+
+impl OrderSignal {
+    pub fn buy(
+        side: impl Into<String>,
+        order_type: OrderType,
+        amount_usd: f64,
+        price: f64,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            side: side.into(),
+            is_buy: true,
+            order_type,
+            amount: amount_usd,
+            price,
+            reason: reason.into(),
+        }
+    }
+
+    pub fn sell(
+        side: impl Into<String>,
+        order_type: OrderType,
+        shares: f64,
+        price: f64,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            side: side.into(),
+            is_buy: false,
+            order_type,
+            amount: shares,
+            price,
+            reason: reason.into(),
+        }
+    }
+
+    pub fn operation(&self) -> OrderOperation {
+        if self.is_buy {
+            OrderOperation::Buy
+        } else {
+            OrderOperation::Sell
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
