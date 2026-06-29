@@ -70,6 +70,132 @@ impl Default for LlmConfig {
     }
 }
 
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    Paper,
+    Live,
+}
+
+impl Default for ExecutionMode {
+    fn default() -> Self {
+        Self::Paper
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveSignatureType {
+    Eoa,
+    Proxy,
+    GnosisSafe,
+    Poly1271,
+}
+
+impl Default for LiveSignatureType {
+    fn default() -> Self {
+        Self::Poly1271
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveMarketOrderType {
+    Fok,
+    Fak,
+}
+
+impl Default for LiveMarketOrderType {
+    fn default() -> Self {
+        Self::Fok
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveLimitOrderType {
+    Gtc,
+    Gtd,
+}
+
+impl Default for LiveLimitOrderType {
+    fn default() -> Self {
+        Self::Gtd
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionConfig {
+    #[serde(default)]
+    pub mode: ExecutionMode,
+    #[serde(default = "execution_default_true")]
+    pub dry_run: bool,
+    #[serde(default = "execution_default_secrets_file")]
+    pub secrets_file: String,
+    #[serde(default = "execution_default_clob_host")]
+    pub clob_host: String,
+    #[serde(default)]
+    pub signature_type: LiveSignatureType,
+    #[serde(default)]
+    pub funder_address: Option<String>,
+    #[serde(default)]
+    pub market_order_type: LiveMarketOrderType,
+    #[serde(default)]
+    pub limit_order_type: LiveLimitOrderType,
+    #[serde(default)]
+    pub limit_post_only: bool,
+    #[serde(default = "execution_default_limit_ttl_ms")]
+    pub limit_ttl_ms: i64,
+    #[serde(default = "execution_default_max_order_age_ms")]
+    pub max_order_age_ms: i64,
+    #[serde(default = "execution_default_min_order_usd")]
+    pub min_order_usd: f64,
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self {
+            mode: ExecutionMode::Paper,
+            dry_run: true,
+            secrets_file: execution_default_secrets_file(),
+            clob_host: execution_default_clob_host(),
+            signature_type: LiveSignatureType::Poly1271,
+            funder_address: None,
+            market_order_type: LiveMarketOrderType::Fok,
+            limit_order_type: LiveLimitOrderType::Gtd,
+            limit_post_only: true,
+            limit_ttl_ms: execution_default_limit_ttl_ms(),
+            max_order_age_ms: execution_default_max_order_age_ms(),
+            min_order_usd: execution_default_min_order_usd(),
+        }
+    }
+}
+
+fn execution_default_true() -> bool {
+    true
+}
+
+fn execution_default_secrets_file() -> String {
+    ".env.live".to_string()
+}
+
+fn execution_default_clob_host() -> String {
+    "https://clob.polymarket.com".to_string()
+}
+
+fn execution_default_limit_ttl_ms() -> i64 {
+    25_000
+}
+
+fn execution_default_max_order_age_ms() -> i64 {
+    3_000
+}
+
+fn execution_default_min_order_usd() -> f64 {
+    1.0
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum LlmConfigWire {
@@ -988,6 +1114,8 @@ pub struct Config {
     pub exit_before_end_seconds: i64,
     #[serde(rename = "forceCloseAtEnd")]
     pub force_close_at_end: bool,
+    #[serde(default)]
+    pub execution: ExecutionConfig,
     #[serde(rename = "jEndgame", default)]
     pub j_endgame: JEndgameConfig,
 }

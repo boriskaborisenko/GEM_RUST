@@ -1,3 +1,8 @@
 /target
 llm.json
 /logs/runs/
+.env
+.env.*
+!.env.example
+!.env.live.example
+secrets/

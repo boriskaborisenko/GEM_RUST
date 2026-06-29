@@ -543,6 +543,52 @@ fn choppy_primary_add_velocity_blocks(
     aligned_velocity_usd_per_sec(side, spot_signal) + 1e-9 < min_aligned_velocity
 }
 
+fn discount_reload_velocity_blocks(
+    cfg: &crate::config::JEndgameConfig,
+    tier: EndgameTier,
+    side: &str,
+    gz: f64,
+    spot_signal: SpotSignalSnapshot,
+) -> bool {
+    if tier != EndgameTier::DiscountReload {
+        return false;
+    }
+    let side_gap_z = gz * side_direction(side);
+    let shallow_gap = side_gap_z < cfg.full_size_gap_z.max(cfg.discount_reload_min_gap_z + 0.4);
+    let strong_adverse_velocity = aligned_velocity_usd_per_sec(side, spot_signal)
+        < -((cfg.mom_full_vel_usd_per_sec * 0.45).max(0.75));
+    shallow_gap && strong_adverse_velocity
+}
+
+fn post_target_primary_add_blocks(
+    cfg: &crate::config::JEndgameConfig,
+    state: &JWindowState,
+    tier: EndgameTier,
+    side: &str,
+    ask: f64,
+    gz: f64,
+    spot_signal: SpotSignalSnapshot,
+    projected_pnl: f64,
+) -> bool {
+    if !matches!(tier, EndgameTier::Rescue | EndgameTier::FinalSeal) {
+        return false;
+    }
+    if projected_pnl + 1e-9 < cfg.target_profit_usd {
+        return false;
+    }
+    if !state.has_primary_exposure() || state.primary_side.as_deref() != Some(side) {
+        return false;
+    }
+    let non_cheap_ask = cfg.discount_reload_max_ask.max(0.80);
+    if ask + 1e-9 < non_cheap_ask {
+        return false;
+    }
+    let side_gap_z = gz * side_direction(side);
+    let min_confirm_velocity = (cfg.mom_full_vel_usd_per_sec * 0.05).max(0.10);
+    side_gap_z < cfg.full_size_gap_z
+        && aligned_velocity_usd_per_sec(side, spot_signal) < min_confirm_velocity
+}
+
 fn tail_add_danger_secs(cfg: &crate::config::JEndgameConfig) -> i64 {
     (cfg.rescue_zone_secs / 2)
         .max(cfg.final_seal_secs)
@@ -1016,11 +1062,23 @@ impl TradeStrategy for JEndgameStrategy {
         } else {
             default_clip
         };
+        let projected_pnl = crate::j_controller::projected_redeem_pnl(win_state, side, fee_bps);
         let sell_blocks_primary_buy = sell_rescue
             .as_ref()
             .map(|s| s.side == side && s.reason.starts_with("j_sell_rescue_tail_"))
             .unwrap_or(false);
         if sell_blocks_primary_buy
+            || discount_reload_velocity_blocks(jcfg, plan.tier, side, gz, _spot_signal)
+            || post_target_primary_add_blocks(
+                jcfg,
+                state,
+                plan.tier,
+                side,
+                winner_ask,
+                gz,
+                _spot_signal,
+                projected_pnl,
+            )
             || choppy_primary_add_velocity_blocks(
                 jcfg,
                 state,
@@ -1114,7 +1172,6 @@ impl TradeStrategy for JEndgameStrategy {
         );
 
         let (tape_usd, tape_count) = TradeTapeTracker::winner_stats(tape, side);
-        let projected_pnl = crate::j_controller::projected_redeem_pnl(win_state, side, fee_bps);
         let tier_label = match plan.tier {
             EndgameTier::Insurance => "insurance",
             EndgameTier::Impulse => "impulse",
@@ -1232,6 +1289,7 @@ mod tests {
             dynamic_breakeven: None,
             exit_before_end_seconds: 25,
             force_close_at_end: false,
+            execution: Default::default(),
             j_endgame: JEndgameConfig::default(),
         }
     }
@@ -2075,6 +2133,98 @@ mod tests {
             EndgameTier::FinalSeal,
             "UP",
             weak_velocity
+        ));
+    }
+
+    #[test]
+    fn discount_reload_blocks_shallow_gap_when_velocity_sharply_against() {
+        let mut cfg = test_config();
+        cfg.j_endgame.full_size_gap_z = 1.8;
+        cfg.j_endgame.discount_reload_min_gap_z = 1.10;
+        cfg.j_endgame.mom_full_vel_usd_per_sec = 2.0;
+
+        assert!(discount_reload_velocity_blocks(
+            &cfg.j_endgame,
+            EndgameTier::DiscountReload,
+            "DOWN",
+            -1.21,
+            SpotSignalSnapshot {
+                smoothed_velocity_usd_per_sec: Some(0.95),
+                ..Default::default()
+            },
+        ));
+    }
+
+    #[test]
+    fn discount_reload_allows_deep_gap_despite_adverse_velocity() {
+        let mut cfg = test_config();
+        cfg.j_endgame.full_size_gap_z = 1.8;
+        cfg.j_endgame.discount_reload_min_gap_z = 1.10;
+        cfg.j_endgame.mom_full_vel_usd_per_sec = 2.0;
+
+        assert!(!discount_reload_velocity_blocks(
+            &cfg.j_endgame,
+            EndgameTier::DiscountReload,
+            "UP",
+            5.48,
+            SpotSignalSnapshot {
+                smoothed_velocity_usd_per_sec: Some(-1.12),
+                ..Default::default()
+            },
+        ));
+    }
+
+    #[test]
+    fn post_target_primary_add_requires_stronger_confirmation() {
+        let mut cfg = test_config();
+        cfg.j_endgame.target_profit_usd = 1.0;
+        cfg.j_endgame.full_size_gap_z = 1.8;
+        cfg.j_endgame.mom_full_vel_usd_per_sec = 2.0;
+        cfg.j_endgame.discount_reload_max_ask = 0.74;
+        let state = JWindowState {
+            rescue_spent_usd: 6.0,
+            primary_side: Some("DOWN".to_string()),
+            ..Default::default()
+        };
+
+        assert!(post_target_primary_add_blocks(
+            &cfg.j_endgame,
+            &state,
+            EndgameTier::FinalSeal,
+            "DOWN",
+            0.84,
+            -1.55,
+            SpotSignalSnapshot {
+                smoothed_velocity_usd_per_sec: Some(-0.06),
+                ..Default::default()
+            },
+            1.29,
+        ));
+        assert!(!post_target_primary_add_blocks(
+            &cfg.j_endgame,
+            &state,
+            EndgameTier::FinalSeal,
+            "DOWN",
+            0.84,
+            -1.88,
+            SpotSignalSnapshot {
+                smoothed_velocity_usd_per_sec: Some(-0.06),
+                ..Default::default()
+            },
+            1.05,
+        ));
+        assert!(!post_target_primary_add_blocks(
+            &cfg.j_endgame,
+            &state,
+            EndgameTier::FinalSeal,
+            "DOWN",
+            0.78,
+            -1.50,
+            SpotSignalSnapshot {
+                smoothed_velocity_usd_per_sec: Some(-0.06),
+                ..Default::default()
+            },
+            1.05,
         ));
     }
 

@@ -15,6 +15,7 @@ mod h_stats;
 mod j_controller;
 mod j_fees;
 mod j_paper_executor;
+mod live_executor;
 mod llm;
 mod mid_cross_tracker;
 mod orderbook;
@@ -28,7 +29,8 @@ mod window_stats;
 use asset_price::{format_asset_price, format_atr, ptb_implausible};
 use cex_micro::CexMicroManager;
 use client::{get_now_ms, MarketEvent, MarketWindow, PricesState};
-use config::Config;
+use config::{Config, ExecutionMode, LiveMarketOrderType};
+use live_executor::{apply_live_result_to_portfolio, LiveAccountStatus, LiveExecutorSession};
 use llm::{LlmForecastRequest, LlmForecaster, LlmRecentWindowContext, LlmRecentWindowRow};
 use mid_cross_tracker::{LeadSide, MidCrossEvent, MidCrossSnapshot, MidCrossTracker};
 use redeem_hold::{
@@ -82,6 +84,8 @@ struct AppState {
     maintenance_checked_window: Option<usize>,
     /// Throttle background NEXT-market discovery when the feed is missing.
     last_next_find_attempt_ms: i64,
+    live_session: Option<Arc<LiveExecutorSession>>,
+    live_account: LiveAccountStatus,
 }
 
 /// Polymarket platform health, polled once per window start from the public
@@ -328,17 +332,48 @@ fn allocate_entry_usd(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    install_rustls_crypto_provider();
+
     // ─── 1. CLI Arguments & Config ─────────────────────────────────────────
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 && (args[1] == "--help" || args[1] == "-h") {
         println!("GEM_RUST — Event-Driven Polymarket Volatility Harvester in Rust\n");
-        println!("Usage:\n  cargo run -- <asset> <interval>\n");
-        println!("Examples:\n  cargo run -- BTC 5m\n  cargo run -- ETH 5m\n  cargo run -- SOL 5m\n  cargo run -- XRP 5m\n  cargo run -- DOGE 5m");
+        println!("Usage:\n  cargo run -- <asset> <interval> [--paper|--live] [--dry-run]\n");
+        println!("Examples:\n  cargo run -- BTC 5m\n  cargo run -- BTC 5m --paper\n  cargo run -- BTC 5m --live --dry-run");
         return Ok(());
     }
 
-    let asset = args
-        .get(1)
+    let mut execution_mode_override: Option<ExecutionMode> = None;
+    let mut dry_run_override: Option<bool> = None;
+    let mut live_requested = false;
+    let mut dry_run_requested = false;
+    for arg in args.iter().skip(1) {
+        match arg.as_str() {
+            "--paper" => execution_mode_override = Some(ExecutionMode::Paper),
+            "--live" => {
+                execution_mode_override = Some(ExecutionMode::Live);
+                live_requested = true;
+            }
+            "--dry-run" => {
+                dry_run_override = Some(true);
+                dry_run_requested = true;
+            }
+            _ => {}
+        }
+    }
+    if live_requested && !dry_run_requested {
+        dry_run_override = Some(false);
+    }
+
+    let positional: Vec<String> = args
+        .iter()
+        .skip(1)
+        .filter(|arg| !arg.starts_with("--"))
+        .cloned()
+        .collect();
+
+    let asset = positional
+        .first()
         .cloned()
         .unwrap_or_else(|| "BTC".to_string())
         .to_uppercase();
@@ -349,18 +384,77 @@ async fn main() -> anyhow::Result<()> {
         );
         std::process::exit(1);
     }
-    let interval = args
-        .get(2)
+    let interval = positional
+        .get(1)
         .cloned()
         .unwrap_or_else(|| "5m".to_string())
         .to_lowercase();
 
-    let config = match Config::load("config.json") {
+    let mut config = match Config::load("config.json") {
         Ok(c) => c,
         Err(_) => {
             eprintln!("Missing or invalid config.json!");
             std::process::exit(1);
         }
+    };
+    if let Some(mode) = execution_mode_override {
+        config.execution.mode = mode;
+    }
+    if let Some(dry_run) = dry_run_override {
+        config.execution.dry_run = dry_run;
+    }
+    if live_requested {
+        config.execution.market_order_type = LiveMarketOrderType::Fok;
+        config.j_endgame.taker_mode = true;
+    }
+
+    let live_session = if config.execution.mode == ExecutionMode::Live {
+        println!(
+            "[LIVE] PROFILE: {} FOK | takerMode=true | dryRun={}",
+            if config.execution.dry_run {
+                "DRY-RUN"
+            } else {
+                "REAL"
+            },
+            config.execution.dry_run
+        );
+        match LiveExecutorSession::connect(&config.execution).await {
+            Ok(session) => {
+                println!(
+                    "[LIVE] CLOB auth ok | owner/signer={} | deposit={}",
+                    session.signer_address(),
+                    session.configured_funder_address()
+                );
+                if let Some(relayer) = session.relayer_address() {
+                    if !session.signer_address().eq_ignore_ascii_case(&relayer) {
+                        eprintln!(
+                            "[LIVE] WARNING: POLYMARKET_PRIVATE_KEY owner ({}) != POLY_RELAYER_ADDRESS ({relayer})",
+                            session.signer_address()
+                        );
+                    } else {
+                        println!(
+                            "[LIVE] owner matches POLY_RELAYER_ADDRESS — expected for deposit-wallet accounts"
+                        );
+                    }
+                }
+                if session
+                    .signer_address()
+                    .eq_ignore_ascii_case(&session.configured_funder_address())
+                {
+                    eprintln!(
+                        "[LIVE] WARNING: owner and deposit addresses are the same — \
+                         for POLY_1271 deposit wallets they should differ (owner EOA vs deposit 0xdb87...)"
+                    );
+                }
+                Some(session)
+            }
+            Err(error) => {
+                eprintln!("[LIVE] Failed to connect CLOB session: {error}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
     };
 
     println!("Synchronizing clock with Polymarket server...");
@@ -491,7 +585,20 @@ async fn main() -> anyhow::Result<()> {
         maintenance: MaintenanceStatus::default(),
         maintenance_checked_window: None,
         last_next_find_attempt_ms: 0,
+        live_session: live_session.clone(),
+        live_account: LiveAccountStatus::default(),
     };
+
+    if app_state.config.execution.mode == ExecutionMode::Live {
+        refresh_live_account(&mut app_state, None).await;
+        sync_live_bank_from_clob(&mut app_state, true, true).await;
+        log_live_account_startup(&app_state);
+    }
+
+    app_state.system_logs.push(format!(
+        "[EXEC] mode={:?} dry_run={}",
+        config.execution.mode, config.execution.dry_run
+    ));
 
     app_state
         .system_logs
@@ -635,6 +742,12 @@ async fn discover_initial_markets(
         // Subscribe prices
         let handle = client::subscribe_prices(0, "CURRENT".to_string(), active, event_tx.clone());
         app.current_sub = Some(handle);
+        drop(port);
+
+        if app.config.execution.mode == ExecutionMode::Live {
+            refresh_live_account(app, Some(0)).await;
+            sync_live_bank_from_clob(app, false, false).await;
+        }
     } else {
         app.system_logs
             .push("No active window found on Polymarket right now.".to_string());
@@ -824,7 +937,7 @@ async fn get_or_request_llm_forecast(
     }
 }
 
-fn run_j_endgame_live_tick(
+async fn run_j_endgame_live_tick(
     app: &mut AppState,
     window_number: usize,
     market: &MarketWindow,
@@ -855,6 +968,11 @@ fn run_j_endgame_live_tick(
         return;
     }
 
+    let paper_cash = {
+        let port = app.portfolio.lock().unwrap();
+        port.available_cash
+    };
+    let cash = prepare_strategy_cash(app, paper_cash);
     let mut port = app.portfolio.lock().unwrap();
     let win_state = port
         .get_or_create_window_state(window_number, "CURRENT", market)
@@ -868,7 +986,6 @@ fn run_j_endgame_live_tick(
         timestamp,
         app.config.j_endgame.tape_window_ms,
     );
-    let cash = port.available_cash;
     let mut strat = app.strategy.lock().unwrap();
     strat.set_runtime_cash(cash);
     let signals = strat.process_live_tick(
@@ -903,7 +1020,9 @@ fn run_j_endgame_live_tick(
         &mid_cross_snap,
         &cex_micro_snap,
         &tape_snap,
-    );
+        app.live_session.as_ref(),
+    )
+    .await;
 }
 
 fn j_clob_prices_ready(prices: &PricesState) -> bool {
@@ -931,7 +1050,7 @@ fn j_clob_prices_ready(prices: &PricesState) -> bool {
     up_bid > 0.0 && up_ask > 0.0 && down_bid > 0.0 && down_ask > 0.0
 }
 
-fn execute_strategy_signals(
+async fn execute_strategy_signals(
     config: &Config,
     log_dir: &str,
     strategy: &Arc<Mutex<StrategyEngine>>,
@@ -948,18 +1067,91 @@ fn execute_strategy_signals(
     mid_cross: &MidCrossSnapshot,
     cex_micro: &CexMicroSnapshot,
     tape: &TradeTapeSnapshot,
+    live_session: Option<&Arc<LiveExecutorSession>>,
 ) {
     for sig in signals {
-        let executed = if sig.reason.starts_with("j_") {
-            j_paper_executor::execute_j_paper_signal(port, window_number, prices, &sig).executed
+        let (executed, reject_reason): (bool, String) = if sig.reason.starts_with("j_") {
+            match config.execution.mode {
+                ExecutionMode::Paper => {
+                    let execution =
+                        j_paper_executor::execute_j_paper_signal(port, window_number, prices, &sig);
+                    (
+                        execution.executed,
+                        execution
+                            .reject
+                            .map(|r| r.as_str().to_string())
+                            .unwrap_or_default(),
+                    )
+                }
+                ExecutionMode::Live => {
+                    let Some(session) = live_session else {
+                        append_signal_event(
+                            config,
+                            log_dir,
+                            window_number,
+                            &market.slug,
+                            &sig,
+                            false,
+                            "live_session_missing",
+                            current_atr,
+                            spot_price,
+                            market,
+                            prices,
+                            win_state,
+                            secs_to_end,
+                            spot_signal,
+                            mid_cross,
+                            cex_micro,
+                            tape,
+                        );
+                        continue;
+                    };
+                    let result = session
+                        .execute_j_signal(market, &sig, get_now_ms())
+                        .await;
+                    if result.executed {
+                        apply_live_result_to_portfolio(port, window_number, &sig, &result);
+                    }
+                    let reject = if result.reject_reason.is_empty() {
+                        if result.dry_run {
+                            "live_dry_run".to_string()
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        result.reject_reason
+                    };
+                    (result.executed, reject)
+                }
+            }
         } else {
             match sig.operation() {
-                OrderOperation::Buy => port
-                    .execute_buy(window_number, &sig.side, sig.amount, sig.price, &sig.reason)
-                    .is_some(),
-                OrderOperation::Sell => port
-                    .execute_sell(window_number, &sig.side, sig.amount, sig.price, &sig.reason)
-                    .is_some(),
+                OrderOperation::Buy => {
+                    let ok = port
+                        .execute_buy(window_number, &sig.side, sig.amount, sig.price, &sig.reason)
+                        .is_some();
+                    (
+                        ok,
+                        if ok {
+                            String::new()
+                        } else {
+                            "portfolio_buy_rejected".to_string()
+                        },
+                    )
+                }
+                OrderOperation::Sell => {
+                    let ok = port
+                        .execute_sell(window_number, &sig.side, sig.amount, sig.price, &sig.reason)
+                        .is_some();
+                    (
+                        ok,
+                        if ok {
+                            String::new()
+                        } else {
+                            "portfolio_sell_rejected".to_string()
+                        },
+                    )
+                }
             }
         };
         append_signal_event(
@@ -969,6 +1161,7 @@ fn execute_strategy_signals(
             &market.slug,
             &sig,
             executed,
+            &reject_reason,
             current_atr,
             spot_price,
             market,
@@ -1616,6 +1809,11 @@ async fn promote_next_to_current(
     app.current_window = Some(promoted.clone());
     app.next_window = None;
     app.next_window_number += 1;
+    let promoted_window_number = promoted.window_number;
+    drop(port);
+
+    refresh_live_account(app, Some(promoted_window_number)).await;
+    sync_live_bank_from_clob(app, false, false).await;
 
     // Window may already be live when promoted — capture PTB immediately if spot is available.
     if let Some(spot) = app.spot_price {
@@ -1629,6 +1827,7 @@ async fn promote_next_to_current(
                 if let Some(curr) = app.current_window.as_mut() {
                     curr.market.price_to_beat = Some(ptb);
                 }
+                let mut port = app.portfolio.lock().unwrap();
                 if let Some(win) = port.windows.get_mut(&wn) {
                     win.market.price_to_beat = Some(ptb);
                 }
@@ -1646,7 +1845,6 @@ async fn promote_next_to_current(
     app.current_sub = Some(handle);
 
     // Search for new upcoming NEXT window
-    drop(port);
     find_and_subscribe_next(app, event_tx).await;
 }
 
@@ -1801,7 +1999,8 @@ async fn process_event(
                             &updated.market,
                             &prices,
                             timestamp,
-                        );
+                        )
+                        .await;
                         return;
                     }
 
@@ -1813,7 +2012,10 @@ async fn process_event(
                         app.config.j_endgame.tape_window_ms,
                     );
 
-                    let cash = port.available_cash;
+                    let paper_cash = port.available_cash;
+                    drop(port);
+                    let cash = prepare_strategy_cash(app, paper_cash);
+                    let mut port = app.portfolio.lock().unwrap();
                     let signals = {
                         let mut strat = app.strategy.lock().unwrap();
                         strat.set_runtime_cash(cash);
@@ -1854,7 +2056,9 @@ async fn process_event(
                             &mid_cross_snap,
                             &cex_micro_snap,
                             &tape_snap,
-                        );
+                            app.live_session.as_ref(),
+                        )
+                        .await;
                     }
 
                     // Sync local app state
@@ -1919,10 +2123,234 @@ fn resolve_display_window(
     Some(chosen)
 }
 
+fn install_rustls_crypto_provider() {
+    // rustls 0.23 requires an explicit process-wide provider when both aws-lc-rs and ring
+    // are present in the dependency graph (reqwest + tokio-tungstenite + polymarket SDK).
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
+fn live_trading_bank(app: &AppState) -> Option<f64> {
+    if app.config.execution.mode != ExecutionMode::Live {
+        return None;
+    }
+    if app.live_account.updated_at_ms <= 0 {
+        return None;
+    }
+    Some(app.live_account.balance_usd.max(0.0))
+}
+
+/// Cash available for the next order: CLOB collateral capped by the paper ledger in live mode.
+fn strategy_cash_for_tick(app: &AppState, port: &Portfolio) -> f64 {
+    let paper = port.available_cash.max(0.0);
+    match live_trading_bank(app) {
+        Some(clob) => clob.min(paper),
+        None => paper,
+    }
+}
+
+/// Apply bank sizing from the latest CLOB snapshot before each strategy tick.
+fn prepare_strategy_cash(app: &mut AppState, paper_cash: f64) -> f64 {
+    let live_bank = live_trading_bank(app);
+    let cash = live_bank
+        .map(|bank| bank.min(paper_cash.max(0.0)))
+        .unwrap_or_else(|| paper_cash.max(0.0));
+    if let Some(bank) = live_bank {
+        app.config.session.starting_bank = bank;
+    }
+    cash
+}
+
+/// Sync live bank from the latest CLOB snapshot.
+/// `full_reset`: cold start only — overwrite paper cash with CLOB collateral.
+/// Between windows, keep the paper ledger (instant redeem on close) and cap orders with min(CLOB, paper).
+async fn sync_live_bank_from_clob(app: &mut AppState, full_reset: bool, log: bool) {
+    let Some(bank) = live_trading_bank(app) else {
+        return;
+    };
+    {
+        let mut port = app.portfolio.lock().unwrap();
+        port.starting_bank = bank;
+        if full_reset {
+            port.available_cash = bank;
+            port.recalculate_equity();
+        }
+    }
+    sync_live_strategy_cash(app);
+    if log {
+        let (paper, cash) = {
+            let port = app.portfolio.lock().unwrap();
+            (port.available_cash, strategy_cash_for_tick(app, &port))
+        };
+        if (paper - bank).abs() > 0.01 && !full_reset {
+            println!(
+                "[LIVE] Strategy bank CLOB ${:.2} | paper ${:.2} | trade cash ${:.2} (redeem may be pending)",
+                bank, paper, cash
+            );
+            app.system_logs.push(format!(
+                "[LIVE] CLOB ${:.2} paper ${:.2} trade ${:.2} — redeem pending?",
+                bank, paper, cash
+            ));
+        } else {
+            println!(
+                "[LIVE] Strategy bank synced from CLOB collateral: ${:.2}",
+                bank
+            );
+            app.system_logs.push(format!(
+                "[LIVE] Strategy bank synced from CLOB: ${:.2}",
+                bank
+            ));
+        }
+    }
+}
+
+/// Push min(CLOB, paper) into strategy runtime cash after a CLOB refresh.
+fn sync_live_strategy_cash(app: &mut AppState) {
+    let Some(bank) = live_trading_bank(app) else {
+        return;
+    };
+    app.config.session.starting_bank = bank;
+    let cash = {
+        let port = app.portfolio.lock().unwrap();
+        strategy_cash_for_tick(app, &port)
+    };
+    app.strategy.lock().unwrap().set_runtime_cash(cash);
+}
+
 /**
- * ANSI Refreshing Dashboard UI.
- * Clears terminal and draws beautifully formatted, isolated stats and window tables!
+ * Refresh CLOB collateral balance for terminal display.
  */
+async fn refresh_live_account(app: &mut AppState, window_number: Option<usize>) {
+    if app.config.execution.mode != ExecutionMode::Live {
+        return;
+    }
+
+    let min_order = app.config.execution.min_order_usd.max(1.0);
+    let dry_run = app.config.execution.dry_run;
+    let prev = app.live_account.clone();
+
+    let Some(session) = app.live_session.as_ref() else {
+        app.live_account = LiveAccountStatus {
+            authenticated: false,
+            dry_run,
+            last_error: Some("live session missing".to_string()),
+            updated_at_ms: get_now_ms(),
+            window_number,
+            ..LiveAccountStatus::default()
+        };
+        return;
+    };
+
+    match session.refresh_account().await {
+        Ok(mut status) => {
+            status.dry_run = dry_run;
+            status.window_number = window_number;
+            status.ready_to_trade = status.authenticated
+                && status.allowance_contracts > 0
+                && status.balance_usd + 1e-9 >= min_order;
+            app.live_account = status;
+            sync_live_strategy_cash(app);
+        }
+        Err(error) => {
+            app.live_account = LiveAccountStatus {
+                authenticated: true,
+                balance_usd: prev.balance_usd,
+                allowance_contracts: prev.allowance_contracts,
+                ready_to_trade: false,
+                dry_run,
+                relayer_configured: prev.relayer_configured,
+                signer_address: session.signer_address(),
+                funder_address: session.configured_funder_address(),
+                last_error: Some(error.to_string()),
+                updated_at_ms: get_now_ms(),
+                window_number,
+            };
+        }
+    }
+}
+
+fn log_live_account_startup(app: &AppState) {
+    let a = &app.live_account;
+    if let Some(session) = app.live_session.as_ref() {
+        println!(
+            "[LIVE] owner/signer={} | deposit={}",
+            session.signer_address(),
+            session.configured_funder_address()
+        );
+    }
+    if let Some(err) = &a.last_error {
+        eprintln!("[LIVE] Balance sync failed: {err}");
+    } else {
+        println!(
+            "[LIVE] CLOB ready | balance=${:.2} | allowances={} | dry_run={}",
+            a.balance_usd, a.allowance_contracts, a.dry_run
+        );
+        if !a.relayer_configured {
+            println!(
+                "[LIVE] Relayer keys not set — on-chain approve/redeem must be done in Polymarket UI"
+            );
+        }
+        if !a.ready_to_trade {
+            eprintln!(
+                "[LIVE] Warning: not ready to trade (balance=${:.2}, allowances={})",
+                a.balance_usd, a.allowance_contracts
+            );
+        }
+    }
+}
+
+fn format_live_account_line(app: &AppState) -> String {
+    if app.config.execution.mode != ExecutionMode::Live {
+        return paint("LIVE CLOB: paper mode (simulated bank above)", "dim");
+    }
+
+    let a = &app.live_account;
+    let auth = if a.authenticated {
+        paint("AUTH ok", "green")
+    } else {
+        paint("NOT AUTH", "red")
+    };
+    let mode = if a.dry_run {
+        paint("dry-run", "yellow")
+    } else {
+        paint("LIVE $", "red")
+    };
+    let ready = if a.ready_to_trade {
+        paint("ready YES", "green")
+    } else {
+        paint("ready NO", "red")
+    };
+    let balance = paint(&format!("${:.2}", a.balance_usd), "bold");
+    let allowances = a.allowance_contracts.to_string();
+    let signer = if a.signer_address.is_empty() {
+        "?".to_string()
+    } else {
+        a.signer_address.clone()
+    };
+    let funder = if a.funder_address.is_empty() {
+        "?".to_string()
+    } else {
+        a.funder_address.clone()
+    };
+    let win = a
+        .window_number
+        .map(|wn| format!("win #{wn}"))
+        .unwrap_or_else(|| "startup".to_string());
+    let updated = if a.updated_at_ms > 0 {
+        format_utc(a.updated_at_ms)
+    } else {
+        "never".to_string()
+    };
+
+    let mut line = format!(
+        "LIVE CLOB: {} | {} | Balance {} | Allowances {} | {} | owner {} | deposit {} | {} @ {}",
+        auth, mode, balance, allowances, ready, signer, funder, win, updated
+    );
+    if let Some(err) = &a.last_error {
+        line.push_str(&format!(" | {}", paint(&format!("ERR: {err}"), "red")));
+    }
+    line
+}
+
 fn render_dashboard(app: &AppState) {
     let p = app.portfolio.lock().unwrap().get_portfolio_snapshot();
 
@@ -2066,6 +2494,7 @@ fn render_dashboard(app: &AppState) {
             pnl_color
         )
     );
+    println!("  {}", format_live_account_line(app));
     println!(
         "{}",
         paint(
@@ -3305,6 +3734,7 @@ fn append_signal_event(
     slug: &str,
     sig: &OrderSignal,
     executed: bool,
+    reject_reason: &str,
     current_atr: f64,
     spot_price: Option<f64>,
     market: &MarketWindow,
@@ -3433,6 +3863,7 @@ fn append_signal_event(
         "price",
         "reason",
         "executed",
+        "reject_reason",
         "current_atr",
         "secs_to_end",
         "time_pct",
@@ -3521,6 +3952,7 @@ fn append_signal_event(
         csv_f64(sig.price, 4),
         csv_cell(&sig.reason),
         executed.to_string(),
+        csv_cell(reject_reason),
         csv_f64(current_atr, 4),
         secs_to_end.to_string(),
         csv_f64(time_pct, 2),

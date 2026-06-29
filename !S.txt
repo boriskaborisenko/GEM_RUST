@@ -1,0 +1,29 @@
+Готово. Вот что починил:
+
+live_executor.rs
+LiveExecutorSession — один CLOB-клиент на весь прогон (heartbeats из SDK), без authenticate() на каждый ордер
+Лимитки — executed=true при Matched | Live | Delayed (resting limit не считается провалом)
+Limit buy — floor_2 shares, чтобы не превышать USD-бюджет
+warmup() — sync balance/allowance через CLOB API при старте
+apply_live_result_to_portfolio — учёт fill или resting limit в портфеле
+main.rs
+Live подключён: J-сигналы идут в paper или live по execution.mode
+CLI: --paper, --live, --dry-run (перебивают config)
+При --live — подключение сессии + warmup + лог баланса
+Config / env
+CLOB host: https://clob.polymarket.com (как в client.rs)
+limitPostOnly: true по умолчанию
+.env.live.example — пояснения owner key vs funder vs relayer
+Запуск
+# paper (как раньше)
+cargo run -- BTC 5m --paper
+# live dry-run (планирует ордера, не шлёт)
+cargo run -- BTC 5m --live --dry-run
+# live реальный
+cargo run -- BTC 5m --live
+Нужен .env.live с POLYMARKET_PRIVATE_KEY + POLYMARKET_FUNDER_ADDRESS.
+
+Что ещё не сделано (осознанно)
+Relayer approve/redeem — SDK v2 не даёт готового relayer client; ключи только проверяются, on-chain — через UI
+SDK v2 + deposit wallet — если CLOB auth упадёт с order signer address..., нужен unified polymarket-client (отдельная задача)
+Order tracking/cancel для долгих GTC — не в этом патче

@@ -8,7 +8,20 @@
   "minBtcAtr": 15.0,
   "minEthAtr": 1.0,
   "session": {
-    "startingBank": 100
+    "startingBank": 10
+  },
+  "execution": {
+    "mode": "paper",
+    "dryRun": false,
+    "secretsFile": ".env.live",
+    "clobHost": "https://clob.polymarket.com",
+    "signatureType": "poly1271",
+    "marketOrderType": "fok",
+    "limitOrderType": "gtd",
+    "limitPostOnly": true,
+    "limitTtlMs": 25000,
+    "maxOrderAgeMs": 3000,
+    "minOrderUsd": 1.0
   },
   "preStartEntry": {
     "enabled": false,

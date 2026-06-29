@@ -14,4 +14,7 @@ futures-util = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 crossterm = "0.28"
 anyhow = "1.0"
+alloy = { version = "1", default-features = false, features = ["signer-local", "signers"] }
 gcp_auth = "0.12"
+polymarket_client_sdk_v2 = { version = "0.6.0-canary.1", features = ["clob", "heartbeats"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
