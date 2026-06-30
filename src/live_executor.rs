@@ -463,6 +463,15 @@ pub fn format_live_terminal_event(
         OrderOperation::Sell => "SELL",
     };
     if result.dry_run {
+        if !result.executed && !result.reject_reason.is_empty() {
+            return Some(format!(
+                "[LIVE DRY-RUN REJECT] W#{window_number} {op} {} ${:.2} @ {:.4} — {}",
+                sig.side,
+                sig.amount,
+                sig.price,
+                short_live_reject_reason(&result.reject_reason)
+            ));
+        }
         return Some(format!(
             "[LIVE DRY-RUN] W#{window_number} {op} {} ${:.2} @ {:.4} — not sent to CLOB",
             sig.side, sig.amount, sig.price

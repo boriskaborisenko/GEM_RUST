@@ -34,7 +34,7 @@ use config::{Config, ExecutionMode, LiveMarketOrderType};
 use live_audit::LiveAudit;
 use live_executor::{
     apply_live_result_to_portfolio, format_live_terminal_event, LiveAccountStatus,
-    LiveExecutorSession,
+    LiveExecutorSession, LiveFill,
 };
 use llm::{LlmForecastRequest, LlmForecaster, LlmRecentWindowContext, LlmRecentWindowRow};
 use mid_cross_tracker::{LeadSide, MidCrossEvent, MidCrossSnapshot, MidCrossTracker};
@@ -42,7 +42,7 @@ use redeem_hold::{
     evaluate_redeem_hold, itm_gap_z, side_is_itm, RedeemHoldInput, REDEEM_HOLD_MIN_VALID_ATR,
 };
 use strategy::{
-    CexMicroSnapshot, EntryMode, EntrySignal, LlmForecast, OrderOperation, OrderSignal,
+    CexMicroSnapshot, EntryMode, EntrySignal, LlmForecast, OrderOperation, OrderSignal, OrderType,
     SpotSignalSnapshot, StrategyEngine, TradeTapeSnapshot, LEGACY_CHEAPER_SIDE_RATIO,
 };
 use trade_tape::TradeTapeTracker;
@@ -1079,6 +1079,19 @@ fn trim_system_logs(logs: &mut Vec<String>) {
     }
 }
 
+fn dry_run_fill_from_portfolio(port: &Portfolio, window_number: usize) -> Option<LiveFill> {
+    let win = port.windows.get(&window_number)?;
+    let trade = win.trades.last()?;
+    if !matches!(trade.trade_type.as_str(), "BUY" | "SELL") {
+        return None;
+    }
+    Some(LiveFill {
+        amount_usd: trade.usd_value,
+        shares: trade.shares,
+        avg_price: trade.price,
+    })
+}
+
 async fn execute_strategy_signals(
     config: &Config,
     log_dir: &str,
@@ -1137,12 +1150,35 @@ async fn execute_strategy_signals(
                         );
                         continue;
                     };
-                    let result = session.execute_j_signal(market, &sig, get_now_ms()).await;
-                    if let Some(msg) = format_live_terminal_event(window_number, &sig, &result) {
-                        eprintln!("\n>>>\n>>>\n>>> {msg}\n>>>\n>>>");
-                        if !result.executed || result.dry_run {
-                            system_logs.push(msg);
-                            trim_system_logs(system_logs);
+                    let mut result = session.execute_j_signal(market, &sig, get_now_ms()).await;
+                    if result.dry_run {
+                        let mut sim_sig = sig.clone();
+                        sim_sig.order_type = OrderType::Market;
+                        let execution = j_paper_executor::execute_j_paper_signal(
+                            port,
+                            window_number,
+                            prices,
+                            &sim_sig,
+                        );
+                        result.executed = execution.executed;
+                        if execution.executed {
+                            result.reject_reason.clear();
+                            result.fill = dry_run_fill_from_portfolio(port, window_number);
+                        } else {
+                            result.reject_reason = execution
+                                .reject
+                                .map(|r| format!("live_dry_run_sim_rejected: {}", r.as_str()))
+                                .unwrap_or_else(|| "live_dry_run_sim_rejected".to_string());
+                        }
+                    }
+                    if !result.dry_run || !result.executed {
+                        if let Some(msg) = format_live_terminal_event(window_number, &sig, &result)
+                        {
+                            eprintln!("\n>>>\n>>>\n>>> {msg}\n>>>\n>>>");
+                            if !result.executed || result.dry_run {
+                                system_logs.push(msg);
+                                trim_system_logs(system_logs);
+                            }
                         }
                     }
                     if let Some(audit) = live_audit {
@@ -1154,7 +1190,7 @@ async fn execute_strategy_signals(
                             trim_system_logs(system_logs);
                         }
                     }
-                    if result.executed {
+                    if result.executed && !result.dry_run {
                         if let Err(error) = apply_live_result_to_portfolio(
                             port,
                             window_number,
