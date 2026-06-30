@@ -18,3 +18,4 @@ alloy = { version = "1", default-features = false, features = ["signer-local", "
 gcp_auth = "0.12"
 polymarket_client_sdk_v2 = { version = "0.6.0-canary.1", features = ["clob", "heartbeats"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }

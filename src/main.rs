@@ -15,6 +15,7 @@ mod h_stats;
 mod j_controller;
 mod j_fees;
 mod j_paper_executor;
+mod live_audit;
 mod live_executor;
 mod llm;
 mod mid_cross_tracker;
@@ -30,6 +31,7 @@ use asset_price::{format_asset_price, format_atr, ptb_implausible};
 use cex_micro::CexMicroManager;
 use client::{get_now_ms, MarketEvent, MarketWindow, PricesState};
 use config::{Config, ExecutionMode, LiveMarketOrderType};
+use live_audit::LiveAudit;
 use live_executor::{
     apply_live_result_to_portfolio, format_live_terminal_event, LiveAccountStatus,
     LiveExecutorSession,
@@ -89,6 +91,7 @@ struct AppState {
     last_next_find_attempt_ms: i64,
     live_session: Option<Arc<LiveExecutorSession>>,
     live_account: LiveAccountStatus,
+    live_audit: Option<LiveAudit>,
 }
 
 /// Polymarket platform health, polled once per window start from the public
@@ -509,6 +512,17 @@ async fn main() -> anyhow::Result<()> {
             run_log_dir, e
         );
     }
+    let live_audit = if config.execution.mode == ExecutionMode::Live {
+        match LiveAudit::new(&run_log_dir) {
+            Ok(audit) => Some(audit),
+            Err(error) => {
+                eprintln!("[LIVE] SQLite audit disabled: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let portfolio = Arc::new(Mutex::new(Portfolio::new_with_log_dir(
         config.session.starting_bank,
@@ -591,6 +605,7 @@ async fn main() -> anyhow::Result<()> {
         last_next_find_attempt_ms: 0,
         live_session: live_session.clone(),
         live_account: LiveAccountStatus::default(),
+        live_audit,
     };
 
     if app_state.config.execution.mode == ExecutionMode::Live {
@@ -1025,6 +1040,7 @@ async fn run_j_endgame_live_tick(
         &cex_micro_snap,
         &tape_snap,
         app.live_session.as_ref(),
+        app.live_audit.as_ref(),
         &mut app.system_logs,
     )
     .await;
@@ -1081,6 +1097,7 @@ async fn execute_strategy_signals(
     cex_micro: &CexMicroSnapshot,
     tape: &TradeTapeSnapshot,
     live_session: Option<&Arc<LiveExecutorSession>>,
+    live_audit: Option<&LiveAudit>,
     system_logs: &mut Vec<String>,
 ) {
     for sig in signals {
@@ -1120,16 +1137,36 @@ async fn execute_strategy_signals(
                         );
                         continue;
                     };
-                    let result = session
-                        .execute_j_signal(market, &sig, get_now_ms())
-                        .await;
+                    let result = session.execute_j_signal(market, &sig, get_now_ms()).await;
                     if let Some(msg) = format_live_terminal_event(window_number, &sig, &result) {
                         eprintln!("\n>>>\n>>>\n>>> {msg}\n>>>\n>>>");
-                        system_logs.push(msg);
-                        trim_system_logs(system_logs);
+                        if !result.executed || result.dry_run {
+                            system_logs.push(msg);
+                            trim_system_logs(system_logs);
+                        }
+                    }
+                    if let Some(audit) = live_audit {
+                        if let Err(error) = audit.record_order(window_number, market, &sig, &result)
+                        {
+                            system_logs.push(format!(
+                                "[LIVE AUDIT] order write failed W#{window_number}: {error}"
+                            ));
+                            trim_system_logs(system_logs);
+                        }
                     }
                     if result.executed {
-                        apply_live_result_to_portfolio(port, window_number, &sig, &result);
+                        if let Err(error) = apply_live_result_to_portfolio(
+                            port,
+                            window_number,
+                            market,
+                            &sig,
+                            &result,
+                        ) {
+                            let msg = format!("[LIVE LEDGER WARN] W#{window_number} {}", error);
+                            eprintln!("\n>>>\n>>>\n>>> {msg}\n>>>\n>>>");
+                            system_logs.push(msg);
+                            trim_system_logs(system_logs);
+                        }
                     }
                     let reject = if result.reject_reason.is_empty() {
                         if result.dry_run {
@@ -1138,7 +1175,7 @@ async fn execute_strategy_signals(
                             String::new()
                         }
                     } else {
-                        result.reject_reason
+                        result.reject_reason.clone()
                     };
                     (result.executed, reject)
                 }
@@ -1173,6 +1210,11 @@ async fn execute_strategy_signals(
                 }
             }
         };
+        let event_win_state = port
+            .windows
+            .get(&window_number)
+            .cloned()
+            .unwrap_or_else(|| win_state.clone());
         append_signal_event(
             config,
             log_dir,
@@ -1185,7 +1227,7 @@ async fn execute_strategy_signals(
             spot_price,
             market,
             prices,
-            win_state,
+            &event_win_state,
             secs_to_end,
             spot_signal,
             mid_cross,
@@ -2076,6 +2118,7 @@ async fn process_event(
                             &cex_micro_snap,
                             &tape_snap,
                             app.live_session.as_ref(),
+                            app.live_audit.as_ref(),
                             &mut app.system_logs,
                         )
                         .await;
@@ -2137,8 +2180,12 @@ fn resolve_display_window(
         chosen.market = pw.market.clone();
         chosen.status = pw.status.clone();
         chosen.spent = pw.spent;
+        chosen.cash_returned = pw.cash_returned;
         chosen.up_shares = pw.up_shares;
         chosen.down_shares = pw.down_shares;
+        chosen.initial_up_shares = pw.initial_up_shares;
+        chosen.initial_down_shares = pw.initial_down_shares;
+        chosen.trades = pw.trades.clone();
     }
     Some(chosen)
 }
@@ -2221,6 +2268,22 @@ async fn sync_live_bank_from_clob(app: &mut AppState, full_reset: bool, log: boo
             ));
         }
     }
+    record_live_balance_audit(app);
+}
+
+fn record_live_balance_audit(app: &mut AppState) {
+    let Some(audit) = app.live_audit.as_ref() else {
+        return;
+    };
+    let (paper_cash, trade_cash) = {
+        let port = app.portfolio.lock().unwrap();
+        (port.available_cash, strategy_cash_for_tick(app, &port))
+    };
+    if let Err(error) = audit.record_balance(&app.live_account, paper_cash, trade_cash) {
+        app.system_logs
+            .push(format!("[LIVE AUDIT] balance write failed: {error}"));
+        trim_system_logs(&mut app.system_logs);
+    }
 }
 
 /// Push min(CLOB, paper) into strategy runtime cash after a CLOB refresh.
@@ -2286,6 +2349,7 @@ async fn refresh_live_account(app: &mut AppState, window_number: Option<usize>) 
             };
         }
     }
+    record_live_balance_audit(app);
 }
 
 fn log_live_account_startup(app: &AppState) {
@@ -2324,6 +2388,14 @@ fn format_live_account_line(app: &AppState) -> String {
     }
 
     let a = &app.live_account;
+    let (paper_cash, trade_cash) = {
+        let port = app.portfolio.lock().unwrap();
+        (
+            port.available_cash.max(0.0),
+            strategy_cash_for_tick(app, &port),
+        )
+    };
+    let pending_redeem_est = (paper_cash - a.balance_usd).max(0.0);
     let auth = if a.authenticated {
         paint("AUTH ok", "green")
     } else {
@@ -2340,6 +2412,13 @@ fn format_live_account_line(app: &AppState) -> String {
         paint("ready NO", "red")
     };
     let balance = paint(&format!("${:.2}", a.balance_usd), "bold");
+    let paper = paint(&format!("${:.2}", paper_cash), "bold");
+    let trade = paint(&format!("${:.2}", trade_cash), "cyan");
+    let pending = if pending_redeem_est > 0.01 {
+        paint(&format!("${:.2}", pending_redeem_est), "yellow")
+    } else {
+        "$0.00".to_string()
+    };
     let allowances = a.allowance_contracts.to_string();
     let signer = if a.signer_address.is_empty() {
         "?".to_string()
@@ -2362,8 +2441,8 @@ fn format_live_account_line(app: &AppState) -> String {
     };
 
     let mut line = format!(
-        "LIVE CLOB: {} | {} | Balance {} | Allowances {} | {} | owner {} | deposit {} | {} @ {}",
-        auth, mode, balance, allowances, ready, signer, funder, win, updated
+        "LIVE CLOB: {} | {} | CLOB cash {} | Local cash {} | Trade cash {} | pending redeem est {} | Allowances {} | {} | owner {} | deposit {} | {} @ {}",
+        auth, mode, balance, paper, trade, pending, allowances, ready, signer, funder, win, updated
     );
     if let Some(err) = &a.last_error {
         line.push_str(&format!(" | {}", paint(&format!("ERR: {err}"), "red")));
@@ -2504,8 +2583,14 @@ fn render_dashboard(app: &AppState) {
     } else {
         "red"
     };
+    let bank_label = if app.config.execution.mode == ExecutionMode::Live {
+        "Local ledger"
+    } else {
+        "Starting bank"
+    };
     println!(
-        "  Starting bank: ${:.2} | Cash: ${:.2} | Equity: ${:.2} | Realized PnL: {}",
+        "  {}: ${:.2} | Cash: ${:.2} | Equity: ${:.2} | Realized PnL: {}",
+        bank_label,
         p.starting_bank,
         p.available_cash,
         p.equity,

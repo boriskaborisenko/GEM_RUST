@@ -319,6 +319,78 @@ impl Portfolio {
         Some(trade)
     }
 
+    pub fn record_external_buy(
+        &mut self,
+        window_number: usize,
+        market: &MarketWindow,
+        side: &str,
+        usd_amount: f64,
+        shares_amount: f64,
+        avg_price: f64,
+        reason: &str,
+    ) -> Option<TradeRecord> {
+        if avg_price <= 0.0 || usd_amount <= 0.0 {
+            return None;
+        }
+        let shares = if shares_amount > 0.0 && shares_amount.is_finite() {
+            shares_amount
+        } else {
+            usd_amount / avg_price
+        };
+        if shares <= 0.0 || !shares.is_finite() {
+            return None;
+        }
+
+        let converts_skipped_to_live = self
+            .windows
+            .get(&window_number)
+            .map(|win| win.status == "SKIPPED" && win.spent <= 0.0)
+            .unwrap_or(false);
+
+        self.available_cash = (self.available_cash - usd_amount).max(0.0);
+        if converts_skipped_to_live {
+            self.skipped_windows = self.skipped_windows.saturating_sub(1);
+            self.entered_windows += 1;
+        }
+
+        let available_cash_after = self.available_cash;
+        let (trade, slug) = {
+            let win = self.get_or_create_window_state(window_number, "", market);
+            win.spent += usd_amount;
+
+            if side == "UP" {
+                win.up_shares += shares;
+                win.initial_up_shares += shares;
+            } else {
+                win.down_shares += shares;
+                win.initial_down_shares += shares;
+            }
+
+            if win.status == "WAITING_ENTRY" {
+                win.status = "ENTERED_PRE_START".to_string();
+            } else if win.status == "SKIPPED" {
+                win.status = "LIVE".to_string();
+            }
+
+            let trade = TradeRecord {
+                timestamp: get_now_ms(),
+                trade_type: "BUY".to_string(),
+                side: side.to_string(),
+                reason: format!("live_fill:{reason}"),
+                price: avg_price,
+                shares,
+                usd_value: usd_amount,
+                available_cash_after,
+            };
+
+            win.trades.push(trade.clone());
+            (trade, win.market.slug.clone())
+        };
+        Self::append_trade_event(&self.log_dir, window_number, &slug, &trade);
+        self.recalculate_equity();
+        Some(trade)
+    }
+
     pub fn execute_sell(
         &mut self,
         window_number: usize,
@@ -376,6 +448,72 @@ impl Portfolio {
                 price: bid_price,
                 shares,
                 usd_value,
+                available_cash_after,
+            };
+
+            win.trades.push(trade.clone());
+            (trade, win.market.slug.clone())
+        };
+        Self::append_trade_event(&self.log_dir, window_number, &slug, &trade);
+        self.recalculate_equity();
+        Some(trade)
+    }
+
+    pub fn record_external_sell(
+        &mut self,
+        window_number: usize,
+        market: &MarketWindow,
+        side: &str,
+        shares_amount: f64,
+        usd_value: f64,
+        avg_price: f64,
+        reason: &str,
+    ) -> Option<TradeRecord> {
+        if avg_price <= 0.0 || shares_amount <= 0.0 || usd_value <= 0.0 {
+            return None;
+        }
+
+        let available = if let Some(w) = self.windows.get(&window_number) {
+            if side == "UP" {
+                w.up_shares
+            } else {
+                w.down_shares
+            }
+        } else {
+            shares_amount
+        };
+
+        let shares = shares_amount.min(available).max(0.0);
+        if shares <= 0.0 {
+            return None;
+        }
+
+        let returned = if shares_amount > 0.0 {
+            usd_value * (shares / shares_amount)
+        } else {
+            shares * avg_price
+        };
+        self.available_cash += returned;
+        let available_cash_after = self.available_cash;
+
+        let (trade, slug) = {
+            let win = self.get_or_create_window_state(window_number, "", market);
+            win.cash_returned += returned;
+
+            if side == "UP" {
+                win.up_shares = (win.up_shares - shares).max(0.0);
+            } else {
+                win.down_shares = (win.down_shares - shares).max(0.0);
+            }
+
+            let trade = TradeRecord {
+                timestamp: get_now_ms(),
+                trade_type: "SELL".to_string(),
+                side: side.to_string(),
+                reason: format!("live_fill:{reason}"),
+                price: avg_price,
+                shares,
+                usd_value: returned,
                 available_cash_after,
             };
 

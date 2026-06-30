@@ -4,13 +4,12 @@ use crate::strategy::{OrderOperation, OrderSignal, OrderType as StrategyOrderTyp
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer as _;
 use anyhow::{anyhow, Context, Result};
+use polymarket_client_sdk_v2::auth::{state::Authenticated, Normal};
 use polymarket_client_sdk_v2::clob::types::request::{
     BalanceAllowanceRequest, UpdateBalanceAllowanceRequest,
 };
-use polymarket_client_sdk_v2::auth::{state::Authenticated, Normal};
 use polymarket_client_sdk_v2::clob::types::{
-    Amount, AssetType, OrderStatusType, OrderType as ClobOrderType, Side as ClobSide,
-    SignatureType,
+    Amount, AssetType, OrderStatusType, OrderType as ClobOrderType, Side as ClobSide, SignatureType,
 };
 use polymarket_client_sdk_v2::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk_v2::types::{Address, Decimal, U256};
@@ -20,6 +19,9 @@ use std::path::Path;
 use std::str::FromStr as _;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+const LIVE_FOK_RETRY_ATTEMPTS: usize = 3;
+const LIVE_FOK_RETRY_DELAY_MS: u64 = 250;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LiveOrderIntent {
@@ -56,6 +58,8 @@ pub struct LiveExecutionResult {
     pub transaction_count: usize,
     pub fill: Option<LiveFill>,
     pub intent: Option<LiveOrderIntent>,
+    pub raw_making_amount: Option<String>,
+    pub raw_taking_amount: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -239,62 +243,94 @@ impl LiveExecutorSession {
         }
 
         let token_id = parse_token_id(&intent.token_id)?;
+        let max_attempts = live_fok_retry_attempts(&intent);
         let client = self.client.lock().await;
 
-        let response = match intent.operation {
-            OrderOperation::Buy => {
-                client
-                    .market_order()
-                    .token_id(token_id)
-                    .side(ClobSide::Buy)
-                    .amount(Amount::usdc(decimal_usd(
-                        intent.amount_usd.unwrap_or(signal.amount),
-                    )?)?)
-                    .order_type(cfg.buy_market_order_type.into())
-                    .build_sign_and_post(&self.signer)
-                    .await
-            }
-            OrderOperation::Sell => {
-                client
-                    .market_order()
-                    .token_id(token_id)
-                    .side(ClobSide::Sell)
-                    .amount(Amount::shares(decimal_shares(intent.shares)?)?)
-                    .order_type(cfg.sell_market_order_type.into())
-                    .build_sign_and_post(&self.signer)
-                    .await
-            }
-        }
-        .map_err(|error| {
-            explain_clob_order_error(
-                &format!("live CLOB post_order failed: {error}"),
-                &self.signer_address(),
-                &self.configured_funder_address(),
-            )
-        })?;
+        for attempt in 1..=max_attempts {
+            let response_result = match intent.operation {
+                OrderOperation::Buy => {
+                    client
+                        .market_order()
+                        .token_id(token_id)
+                        .side(ClobSide::Buy)
+                        .amount(Amount::usdc(decimal_usd(
+                            intent.amount_usd.unwrap_or(signal.amount),
+                        )?)?)
+                        .order_type(cfg.buy_market_order_type.into())
+                        .build_sign_and_post(&self.signer)
+                        .await
+                }
+                OrderOperation::Sell => {
+                    client
+                        .market_order()
+                        .token_id(token_id)
+                        .side(ClobSide::Sell)
+                        .amount(Amount::shares(decimal_shares(intent.shares)?)?)
+                        .order_type(cfg.sell_market_order_type.into())
+                        .build_sign_and_post(&self.signer)
+                        .await
+                }
+            };
 
-        let fill = matched_response_fill(&intent, &response);
-        let accepted = response.success && order_accepted(&response, &fill);
-        let executed = accepted;
-        Ok(LiveExecutionResult {
-            submitted: response.success,
-            executed,
-            dry_run: false,
-            reject_reason: if executed {
+            let response = match response_result {
+                Ok(response) => response,
+                Err(error) => {
+                    let reject_reason = explain_clob_order_error(
+                        &format!("live CLOB post_order failed: {error}"),
+                        &self.signer_address(),
+                        &self.configured_funder_address(),
+                    )
+                    .to_string();
+                    if attempt < max_attempts && should_retry_fok_reject(&reject_reason) {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            LIVE_FOK_RETRY_DELAY_MS,
+                        ))
+                        .await;
+                        continue;
+                    }
+                    return Err(anyhow!(
+                        "{reject_reason} | attempts={attempt}/{max_attempts}"
+                    ));
+                }
+            };
+
+            let fill = matched_response_fill(&intent, &response);
+            let accepted = response.success && order_accepted(&response, &fill);
+            let executed = accepted;
+            let mut reject_reason = if executed {
                 String::new()
             } else {
                 response
                     .error_msg
                     .clone()
                     .unwrap_or_else(|| format!("live order rejected status={}", response.status))
-            },
-            order_id: Some(response.order_id),
-            status: Some(response.status.to_string()),
-            trade_count: response.trade_ids.len(),
-            transaction_count: response.transaction_hashes.len(),
-            fill,
-            intent: Some(intent),
-        })
+            };
+
+            if !executed && attempt < max_attempts && should_retry_fok_reject(&reject_reason) {
+                tokio::time::sleep(std::time::Duration::from_millis(LIVE_FOK_RETRY_DELAY_MS)).await;
+                continue;
+            }
+
+            if !reject_reason.is_empty() && attempt > 1 {
+                reject_reason.push_str(&format!(" | attempts={attempt}/{max_attempts}"));
+            }
+            return Ok(LiveExecutionResult {
+                submitted: response.success,
+                executed,
+                dry_run: false,
+                reject_reason,
+                order_id: Some(response.order_id),
+                status: Some(response.status.to_string()),
+                trade_count: response.trade_ids.len(),
+                transaction_count: response.transaction_hashes.len(),
+                fill,
+                intent: Some(intent),
+                raw_making_amount: Some(response.making_amount.to_string()),
+                raw_taking_amount: Some(response.taking_amount.to_string()),
+            });
+        }
+
+        Err(anyhow!("live CLOB order retry loop exhausted unexpectedly"))
     }
 }
 
@@ -305,7 +341,11 @@ pub async fn execute_j_live_signal(
     created_at_ms: i64,
 ) -> LiveExecutionResult {
     match LiveExecutorSession::connect(cfg).await {
-        Ok(session) => session.execute_j_signal(market, signal, created_at_ms).await,
+        Ok(session) => {
+            session
+                .execute_j_signal(market, signal, created_at_ms)
+                .await
+        }
         Err(error) => LiveExecutionResult {
             reject_reason: error.to_string(),
             ..LiveExecutionResult::default()
@@ -313,12 +353,31 @@ pub async fn execute_j_live_signal(
     }
 }
 
-fn order_accepted(response: &polymarket_client_sdk_v2::clob::types::response::PostOrderResponse, fill: &Option<LiveFill>) -> bool {
+fn order_accepted(
+    response: &polymarket_client_sdk_v2::clob::types::response::PostOrderResponse,
+    fill: &Option<LiveFill>,
+) -> bool {
     if matches!(response.status, OrderStatusType::Matched) {
         return true;
     }
     // Rare: success with matched amounts but non-Matched status.
     response.success && fill.is_some()
+}
+
+fn live_fok_retry_attempts(intent: &LiveOrderIntent) -> usize {
+    if intent.clob_order_type.eq_ignore_ascii_case("fok") {
+        LIVE_FOK_RETRY_ATTEMPTS
+    } else {
+        1
+    }
+}
+
+fn should_retry_fok_reject(reason: &str) -> bool {
+    let lower = reason.to_ascii_lowercase();
+    lower.contains("fok")
+        && (lower.contains("couldn't be fully filled")
+            || lower.contains("fully filled or killed")
+            || lower.contains("full size not available"))
 }
 
 pub fn build_live_order_intent(
@@ -466,39 +525,46 @@ fn short_live_reject_reason(reason: &str) -> String {
 pub fn apply_live_result_to_portfolio(
     port: &mut crate::trader::Portfolio,
     window_number: usize,
+    market: &MarketWindow,
     sig: &OrderSignal,
     result: &LiveExecutionResult,
-) {
+) -> Result<(), String> {
     if let Some(fill) = &result.fill {
         match sig.operation() {
             OrderOperation::Buy => {
-                let _ = port.execute_buy(
+                port.record_external_buy(
                     window_number,
+                    market,
                     &sig.side,
                     fill.amount_usd,
-                    fill.avg_price,
-                    &sig.reason,
-                );
-            }
-            OrderOperation::Sell => {
-                let _ = port.execute_sell(
-                    window_number,
-                    &sig.side,
                     fill.shares,
                     fill.avg_price,
                     &sig.reason,
-                );
+                )
+                .ok_or_else(|| "live ledger buy rejected".to_string())?;
+            }
+            OrderOperation::Sell => {
+                port.record_external_sell(
+                    window_number,
+                    market,
+                    &sig.side,
+                    fill.shares,
+                    fill.amount_usd,
+                    fill.avg_price,
+                    &sig.reason,
+                )
+                .ok_or_else(|| "live ledger sell rejected".to_string())?;
             }
         }
-        return;
+        return Ok(());
     }
 
     if !result.executed {
-        return;
+        return Ok(());
     }
 
     let Some(intent) = result.intent.as_ref() else {
-        return;
+        return Ok(());
     };
 
     match sig.operation() {
@@ -507,18 +573,32 @@ pub fn apply_live_result_to_portfolio(
                 .amount_usd
                 .unwrap_or(intent.estimated_notional_usd)
                 .min(sig.amount);
-            let _ = port.execute_buy(window_number, &sig.side, usd, sig.price, &sig.reason);
-        }
-        OrderOperation::Sell => {
-            let _ = port.execute_sell(
+            port.record_external_buy(
                 window_number,
+                market,
                 &sig.side,
+                usd,
                 intent.shares,
                 sig.price,
                 &sig.reason,
-            );
+            )
+            .ok_or_else(|| "live ledger buy fallback rejected".to_string())?;
+        }
+        OrderOperation::Sell => {
+            let usd = intent.shares * sig.price;
+            port.record_external_sell(
+                window_number,
+                market,
+                &sig.side,
+                intent.shares,
+                usd,
+                sig.price,
+                &sig.reason,
+            )
+            .ok_or_else(|| "live ledger sell fallback rejected".to_string())?;
         }
     }
+    Ok(())
 }
 
 /// Live trading in GEM_RUST is deposit-wallet only. Do not use proto Safe/Proxy paths here.
@@ -593,24 +673,20 @@ async fn authenticate_clob_client(
     }
     let deposit_wallet = funder.clone().unwrap_or_default();
     if let Some(funder_addr) = funder {
-        builder = builder.funder(
-            funder_addr
-                .parse::<Address>()
-                .with_context(|| format!("failed to parse deposit wallet address {funder_addr}"))?,
-        );
+        builder =
+            builder.funder(funder_addr.parse::<Address>().with_context(|| {
+                format!("failed to parse deposit wallet address {funder_addr}")
+            })?);
     }
 
-    builder
-        .authenticate()
-        .await
-        .map_err(|error| {
-            explain_clob_account_error(
-                &format!("CLOB authentication failed: {error}"),
-                &format!("{:#x}", signer.address()),
-                &deposit_wallet,
-                secrets.get("POLY_RELAYER_ADDRESS").map(String::as_str),
-            )
-        })
+    builder.authenticate().await.map_err(|error| {
+        explain_clob_account_error(
+            &format!("CLOB authentication failed: {error}"),
+            &format!("{:#x}", signer.address()),
+            &deposit_wallet,
+            secrets.get("POLY_RELAYER_ADDRESS").map(String::as_str),
+        )
+    })
 }
 
 fn matched_response_fill(
@@ -620,15 +696,35 @@ fn matched_response_fill(
     if !response.success || !matches!(response.status, OrderStatusType::Matched) {
         return None;
     }
+    let raw_making = decimal_to_f64(&response.making_amount);
+    let raw_taking = decimal_to_f64(&response.taking_amount);
+    let expected_usd = intent
+        .amount_usd
+        .unwrap_or(intent.estimated_notional_usd)
+        .max(0.0);
+    let expected_shares = intent.shares.max(0.0);
+
     let (amount_usd, shares) = match intent.operation {
-        OrderOperation::Buy => (
-            decimal_to_f64(&response.making_amount).or(intent.amount_usd)?,
-            decimal_to_f64(&response.taking_amount).filter(|v| *v > 0.0)?,
-        ),
-        OrderOperation::Sell => (
-            decimal_to_f64(&response.taking_amount).filter(|v| *v > 0.0)?,
-            decimal_to_f64(&response.making_amount).filter(|v| *v > 0.0)?,
-        ),
+        OrderOperation::Buy => {
+            let amount_usd = normalize_clob_amount(raw_making)
+                .or_else(|| positive(expected_usd))
+                .filter(|v| plausible_fill_amount(*v, expected_usd))
+                .or_else(|| positive(expected_usd))?;
+            let shares = normalize_clob_amount(raw_taking)
+                .or_else(|| positive(expected_shares))
+                .filter(|v| plausible_fill_amount(*v, expected_shares))
+                .or_else(|| positive(amount_usd / intent.price.max(1e-9)))?;
+            (amount_usd, shares)
+        }
+        OrderOperation::Sell => {
+            let amount_usd = normalize_clob_amount(raw_taking)
+                .filter(|v| plausible_fill_amount(*v, expected_usd))
+                .or_else(|| positive(expected_usd))?;
+            let shares = normalize_clob_amount(raw_making)
+                .filter(|v| plausible_fill_amount(*v, expected_shares))
+                .or_else(|| positive(expected_shares))?;
+            (amount_usd, shares)
+        }
     };
     let avg_price = amount_usd / shares;
     if !avg_price.is_finite() || avg_price <= 0.0 {
@@ -639,6 +735,33 @@ fn matched_response_fill(
         shares,
         avg_price,
     })
+}
+
+fn positive(value: f64) -> Option<f64> {
+    if value.is_finite() && value > 0.0 {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn normalize_clob_amount(raw: Option<f64>) -> Option<f64> {
+    let value = raw?;
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+    if value > 100_000.0 {
+        Some(value / 1_000_000.0)
+    } else {
+        Some(value)
+    }
+}
+
+fn plausible_fill_amount(value: f64, expected: f64) -> bool {
+    if expected <= 0.0 {
+        return value.is_finite() && value > 0.0;
+    }
+    value.is_finite() && value > 0.0 && value <= expected * 5.0 + 5.0
 }
 
 #[derive(Debug, Clone, Default)]
