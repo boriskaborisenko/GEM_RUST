@@ -232,7 +232,7 @@ curl http://$VPS_IP:8787/api/state
 ```bash
 cd ~/bots/gem-btc-5m
 ./target/release/gem_rust --server --stop
-./target/release/gem_rust BTC 5m  --server --server-bind 0.0.0.0:8787
+./target/release/gem_rust BTC 5m --paper  --server --server-bind 0.0.0.0:8787
 ```
 
 ## 13. VPS: запустить live dry-run
