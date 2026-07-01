@@ -397,6 +397,30 @@ pub struct JEndgameConfig {
     /// Flip hedge and sell-rescue are still allowed.
     #[serde(default = "j_default_fresh_cross_freeze_secs")]
     pub fresh_cross_freeze_secs: i64,
+    #[serde(default)]
+    pub mid_value_enabled: bool,
+    #[serde(default = "j_default_mid_value_start_secs_to_end")]
+    pub mid_value_start_secs_to_end: i64,
+    #[serde(default = "j_default_mid_value_end_secs_to_end")]
+    pub mid_value_end_secs_to_end: i64,
+    #[serde(default = "j_default_mid_value_max_ask")]
+    pub mid_value_max_ask: f64,
+    #[serde(default = "j_default_mid_value_max_against_gap_z")]
+    pub mid_value_max_against_gap_z: f64,
+    #[serde(default = "j_default_mid_value_max_against_cex_imbalance")]
+    pub mid_value_max_against_cex_imbalance: f64,
+    #[serde(default = "j_default_mid_value_book_contradict_gap")]
+    pub mid_value_book_contradict_gap: f64,
+    #[serde(default = "j_default_mid_value_clip_usd")]
+    pub mid_value_clip_usd: f64,
+    #[serde(default = "j_default_mid_value_clip_pct")]
+    pub mid_value_clip_pct: f64,
+    #[serde(default = "j_default_mid_value_clip_min_fix")]
+    pub mid_value_clip_min_fix: f64,
+    #[serde(default = "j_default_mid_value_clip_max_fix")]
+    pub mid_value_clip_max_fix: f64,
+    #[serde(default = "j_default_mid_value_max_clips")]
+    pub mid_value_max_clips: u16,
     /// Buy a small extra clip on the existing primary side after a deep discount,
     /// but only while that side is still the spot/PTB winner.
     #[serde(default = "j_default_true")]
@@ -758,6 +782,39 @@ fn j_default_tail_cap_ask97_usd() -> f64 {
 fn j_default_fresh_cross_freeze_secs() -> i64 {
     8
 }
+fn j_default_mid_value_start_secs_to_end() -> i64 {
+    180
+}
+fn j_default_mid_value_end_secs_to_end() -> i64 {
+    120
+}
+fn j_default_mid_value_max_ask() -> f64 {
+    0.50
+}
+fn j_default_mid_value_max_against_gap_z() -> f64 {
+    0.35
+}
+fn j_default_mid_value_max_against_cex_imbalance() -> f64 {
+    0.35
+}
+fn j_default_mid_value_book_contradict_gap() -> f64 {
+    0.12
+}
+fn j_default_mid_value_clip_usd() -> f64 {
+    1.0
+}
+fn j_default_mid_value_clip_pct() -> f64 {
+    2.0
+}
+fn j_default_mid_value_clip_min_fix() -> f64 {
+    1.0
+}
+fn j_default_mid_value_clip_max_fix() -> f64 {
+    50.0
+}
+fn j_default_mid_value_max_clips() -> u16 {
+    1
+}
 fn j_default_discount_reload_max_ask() -> f64 {
     0.74
 }
@@ -1019,6 +1076,18 @@ impl Default for JEndgameConfig {
             tail_cap_ask94_usd: j_default_tail_cap_ask94_usd(),
             tail_cap_ask97_usd: j_default_tail_cap_ask97_usd(),
             fresh_cross_freeze_secs: j_default_fresh_cross_freeze_secs(),
+            mid_value_enabled: j_default_false(),
+            mid_value_start_secs_to_end: j_default_mid_value_start_secs_to_end(),
+            mid_value_end_secs_to_end: j_default_mid_value_end_secs_to_end(),
+            mid_value_max_ask: j_default_mid_value_max_ask(),
+            mid_value_max_against_gap_z: j_default_mid_value_max_against_gap_z(),
+            mid_value_max_against_cex_imbalance: j_default_mid_value_max_against_cex_imbalance(),
+            mid_value_book_contradict_gap: j_default_mid_value_book_contradict_gap(),
+            mid_value_clip_usd: j_default_mid_value_clip_usd(),
+            mid_value_clip_pct: j_default_mid_value_clip_pct(),
+            mid_value_clip_min_fix: j_default_mid_value_clip_min_fix(),
+            mid_value_clip_max_fix: j_default_mid_value_clip_max_fix(),
+            mid_value_max_clips: j_default_mid_value_max_clips(),
             discount_reload_enabled: j_default_true(),
             discount_reload_max_ask: j_default_discount_reload_max_ask(),
             discount_reload_min_drop: j_default_discount_reload_min_drop(),
@@ -1172,6 +1241,16 @@ impl JEndgameConfig {
         } else {
             self.probe_clip_usd.max(1e-9)
         }
+    }
+
+    pub fn effective_mid_value_clip_usd(&self, session: &SessionConfig) -> f64 {
+        self.sized_usd(
+            session,
+            self.mid_value_clip_usd,
+            self.mid_value_clip_pct,
+            self.mid_value_clip_min_fix,
+            self.mid_value_clip_max_fix,
+        )
     }
 
     pub fn effective_max_usd_per_window(&self, session: &SessionConfig) -> f64 {

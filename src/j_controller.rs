@@ -106,6 +106,89 @@ fn pick_underdog(prices: &PricesState, max_ask: f64) -> Option<(&'static str, f6
     }
 }
 
+fn side_dir(side: &str) -> f64 {
+    if side == "UP" {
+        1.0
+    } else {
+        -1.0
+    }
+}
+
+fn mid_cross_side(mid_cross: &MidCrossSnapshot) -> Option<&'static str> {
+    match mid_cross.current_side {
+        Some(LeadSide::Up) => Some("UP"),
+        Some(LeadSide::Down) => Some("DOWN"),
+        Some(LeadSide::Tie) | None => None,
+    }
+}
+
+pub fn plan_mid_value_probe(
+    config: &Config,
+    state: &JWindowState,
+    win_state: &WindowState,
+    prices: &PricesState,
+    gz: f64,
+    secs_to_end: i64,
+    mid_cross: &MidCrossSnapshot,
+    cex: &CexMicroSnapshot,
+    available_cash: f64,
+) -> Option<TierPlan> {
+    let cfg = &config.j_endgame;
+    if !cfg.mid_value_enabled {
+        return None;
+    }
+    if cfg.mid_value_max_clips == 0 || state.mid_value_clips >= cfg.mid_value_max_clips {
+        return None;
+    }
+    if win_state.spent - win_state.cash_returned > 1e-9
+        || win_state.up_shares > 1e-9
+        || win_state.down_shares > 1e-9
+    {
+        return None;
+    }
+    let window_start = cfg
+        .mid_value_start_secs_to_end
+        .max(cfg.mid_value_end_secs_to_end);
+    let window_end = cfg
+        .mid_value_start_secs_to_end
+        .min(cfg.mid_value_end_secs_to_end);
+    if secs_to_end > window_start || secs_to_end < window_end {
+        return None;
+    }
+
+    let (side, ask) = pick_underdog(prices, cfg.mid_value_max_ask)?;
+    let dir = side_dir(side);
+    if gz * dir < -cfg.mid_value_max_against_gap_z {
+        return None;
+    }
+    if cex.buy_sell_imbalance_3s * dir < -cfg.mid_value_max_against_cex_imbalance {
+        return None;
+    }
+    if let Some(book_side) = mid_cross_side(mid_cross) {
+        if book_side != side && mid_cross.lead_gap >= cfg.mid_value_book_contradict_gap {
+            return None;
+        }
+    }
+
+    let min_trade = cfg.effective_probe_clip_usd(&config.session).max(1.0);
+    let clip = cfg
+        .effective_mid_value_clip_usd(&config.session)
+        .min(available_cash.max(0.0));
+    if clip + 1e-9 < min_trade {
+        return None;
+    }
+
+    Some(TierPlan {
+        tier: EndgameTier::MidValueProbe,
+        max_pay: (ask + cfg.limit_ask_offset).min(cfg.mid_value_max_ask),
+        need_tape: false,
+        budget_left: clip,
+        sweep_clips: 1,
+        side: Some(side.to_string()),
+        clip_usd: clip,
+    })
+}
+
 pub fn plan_insurance(
     cfg: &JEndgameConfig,
     state: &JWindowState,
@@ -764,6 +847,7 @@ pub fn plan_j_window(
     current_atr: f64,
     min_atr: f64,
     mid_cross: &MidCrossSnapshot,
+    cex: &CexMicroSnapshot,
     allow_directional: bool,
     confidence: f64,
     available_cash: f64,
@@ -778,8 +862,9 @@ pub fn plan_j_window(
     }
     let phase = detect_phase(elapsed_pct, secs_to_end, cfg, mid_cross);
 
-    // Early window: only insurance optionality is allowed.
-    if let JWindowPhase::Warmup | JWindowPhase::MidWindow = phase {
+    // Early window: only insurance optionality is allowed; mid window may take
+    // one cheap value probe if PTB/gap/book/CEX are not against it.
+    if let JWindowPhase::Warmup = phase {
         return None;
     }
     if let JWindowPhase::Insurance = phase {
@@ -793,6 +878,26 @@ pub fn plan_j_window(
             mid_cross,
             min_atr,
             current_atr,
+        );
+    }
+    if let JWindowPhase::MidWindow = phase {
+        if min_atr > 0.0 && current_atr < min_atr {
+            return None;
+        }
+        let dist = ptb_dist_pct(spot, ptb);
+        if cfg.min_ptb_dist_pct > 0.0 && dist.is_finite() && dist < cfg.min_ptb_dist_pct {
+            return None;
+        }
+        return plan_mid_value_probe(
+            config,
+            state,
+            win_state,
+            prices,
+            gz,
+            secs_to_end,
+            mid_cross,
+            cex,
+            available_cash,
         );
     }
 
@@ -946,6 +1051,100 @@ mod tests {
                 down: ContractPrices::top(0.07, 0.08),
             },
         }
+    }
+
+    fn mid_value_prices(up_ask: f64, down_ask: f64) -> PricesState {
+        PricesState {
+            up: ContractPrices {
+                ask: up_ask,
+                ..ContractPrices::top((up_ask - 0.01).max(0.0), up_ask)
+            },
+            down: ContractPrices {
+                ask: down_ask,
+                ..ContractPrices::top((down_ask - 0.01).max(0.0), down_ask)
+            },
+        }
+    }
+
+    #[test]
+    fn mid_value_probe_buys_one_cheap_side_without_cross_count_gate() {
+        let mut j = JEndgameConfig::default();
+        j.mid_value_enabled = true;
+        j.bank_sizing_enabled = true;
+        j.mid_value_clip_pct = 2.0;
+        j.mid_value_clip_min_fix = 1.0;
+        j.mid_value_clip_max_fix = 50.0;
+        let mut cfg = full_cfg(j);
+        cfg.session.starting_bank = 1_000.0;
+        let prices = mid_value_prices(0.49, 0.52);
+        let mid = MidCrossSnapshot {
+            significant_cross_count: 99,
+            cross_count: 99,
+            current_side: Some(LeadSide::Tie),
+            ..Default::default()
+        };
+        let plan = plan_mid_value_probe(
+            &cfg,
+            &JWindowState::default(),
+            &win_state_zero(),
+            &prices,
+            0.10,
+            150,
+            &mid,
+            &CexMicroSnapshot::default(),
+            1_000.0,
+        )
+        .expect("mid value probe");
+        assert_eq!(plan.tier, EndgameTier::MidValueProbe);
+        assert_eq!(plan.side.as_deref(), Some("UP"));
+        assert!((plan.max_pay - 0.50).abs() < 1e-9);
+        assert!((plan.clip_usd - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mid_value_probe_has_hard_size_cap_and_cex_block() {
+        let mut j = JEndgameConfig::default();
+        j.mid_value_enabled = true;
+        j.bank_sizing_enabled = true;
+        j.mid_value_clip_pct = 2.0;
+        j.mid_value_clip_min_fix = 1.0;
+        j.mid_value_clip_max_fix = 50.0;
+        let mut cfg = full_cfg(j);
+        cfg.session.starting_bank = 1_000_000.0;
+        let prices = mid_value_prices(0.49, 0.52);
+        let capped = plan_mid_value_probe(
+            &cfg,
+            &JWindowState::default(),
+            &win_state_zero(),
+            &prices,
+            0.10,
+            150,
+            &MidCrossSnapshot::default(),
+            &CexMicroSnapshot::default(),
+            1_000_000.0,
+        )
+        .expect("capped mid value probe");
+        assert!((capped.clip_usd - 50.0).abs() < 1e-9);
+
+        let cex_against = CexMicroSnapshot {
+            buy_sell_imbalance_3s: -0.80,
+            ..Default::default()
+        };
+        assert!(
+            plan_mid_value_probe(
+                &cfg,
+                &JWindowState::default(),
+                &win_state_zero(),
+                &prices,
+                0.10,
+                150,
+                &MidCrossSnapshot::default(),
+                &cex_against,
+                1_000_000.0,
+            )
+            .is_none(),
+            "UP value probe must not fire against strong CEX selling"
+        );
     }
 
     #[test]

@@ -25,6 +25,7 @@ pub(crate) struct JWindowState {
     pub(crate) late_spent_usd: f64,
     pub(crate) hedge_spent_usd: f64,
     pub(crate) insurance_spent_usd: f64,
+    pub(crate) mid_value_spent_usd: f64,
     /// USD deployed on the winner during the composite endgame this window.
     /// Used as the "already deployed" term for target-exposure throttling.
     pub(crate) rescue_spent_usd: f64,
@@ -33,10 +34,12 @@ pub(crate) struct JWindowState {
     pub(crate) late_clips: u16,
     pub(crate) hedge_clips: u16,
     pub(crate) insurance_clips: u16,
+    pub(crate) mid_value_clips: u16,
     pub(crate) discount_reload_clips: u16,
     pub(crate) clips_filled: u16,
     pub(crate) primary_side: Option<String>,
     pub(crate) insurance_side: Option<String>,
+    pub(crate) mid_value_side: Option<String>,
     pub(crate) winner_side: Option<String>,
     pub(crate) last_endgame_buy_at: Option<Instant>,
     pub(crate) sell_rescue_done: bool,
@@ -49,6 +52,7 @@ pub(crate) struct JWindowState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndgameTier {
     Insurance,
+    MidValueProbe,
     Impulse,
     Cheap,
     Late,
@@ -106,6 +110,13 @@ impl JEndgameStrategy {
                     state.insurance_side = Some(signal.side.clone());
                 }
             }
+            EndgameTier::MidValueProbe => {
+                state.mid_value_spent_usd += usd;
+                state.mid_value_clips += 1;
+                if state.mid_value_side.is_none() {
+                    state.mid_value_side = Some(signal.side.clone());
+                }
+            }
             EndgameTier::Rescue | EndgameTier::FinalSeal => {
                 state.rescue_spent_usd += usd;
                 state.last_endgame_buy_at = Some(Instant::now());
@@ -155,6 +166,8 @@ impl JEndgameStrategy {
 fn tier_from_signal_reason(reason: &str) -> Option<EndgameTier> {
     if reason.starts_with("j_insurance_") {
         Some(EndgameTier::Insurance)
+    } else if reason.starts_with("j_mid_value_probe_") {
+        Some(EndgameTier::MidValueProbe)
     } else if reason.starts_with("j_impulse_") {
         Some(EndgameTier::Impulse)
     } else if reason.starts_with("j_value_") {
@@ -893,16 +906,19 @@ impl TradeStrategy for JEndgameStrategy {
             late_spent_usd: 0.0,
             hedge_spent_usd: 0.0,
             insurance_spent_usd: 0.0,
+            mid_value_spent_usd: 0.0,
             rescue_spent_usd: 0.0,
             discount_reload_spent_usd: 0.0,
             cheap_clips: 0,
             late_clips: 0,
             hedge_clips: 0,
             insurance_clips: 0,
+            mid_value_clips: 0,
             discount_reload_clips: 0,
             clips_filled: 0,
             primary_side: None,
             insurance_side: None,
+            mid_value_side: None,
             winner_side: None,
             last_endgame_buy_at: None,
             sell_rescue_done: false,
@@ -1003,6 +1019,7 @@ impl TradeStrategy for JEndgameStrategy {
             current_atr,
             min_atr,
             mid_cross,
+            _cex_micro,
             allow_directional,
             confidence,
             self.available_cash,
@@ -1069,16 +1086,20 @@ impl TradeStrategy for JEndgameStrategy {
             return signals;
         }
 
-        let max_pay = aggressive_buy_limit_price(winner_ask, jcfg);
-
         let cheap_tier = matches!(
             plan.tier,
             EndgameTier::Insurance
+                | EndgameTier::MidValueProbe
                 | EndgameTier::FlipHedge
                 | EndgameTier::Rescue
                 | EndgameTier::DiscountReload
                 | EndgameTier::FinalSeal
         );
+        let max_pay = if plan.tier == EndgameTier::MidValueProbe {
+            plan.max_pay
+        } else {
+            aggressive_buy_limit_price(winner_ask, jcfg)
+        };
         if max_pay < jcfg.min_winner_ask && !cheap_tier {
             return signals;
         }
@@ -1094,6 +1115,7 @@ impl TradeStrategy for JEndgameStrategy {
         let remaining = if matches!(
             plan.tier,
             EndgameTier::Insurance
+                | EndgameTier::MidValueProbe
                 | EndgameTier::FlipHedge
                 | EndgameTier::Rescue
                 | EndgameTier::DiscountReload
@@ -1106,7 +1128,8 @@ impl TradeStrategy for JEndgameStrategy {
         };
         let max_clips_window = if matches!(
             plan.tier,
-            EndgameTier::FlipHedge
+            EndgameTier::MidValueProbe
+                | EndgameTier::FlipHedge
                 | EndgameTier::Rescue
                 | EndgameTier::DiscountReload
                 | EndgameTier::FinalSeal
@@ -1131,6 +1154,7 @@ impl TradeStrategy for JEndgameStrategy {
         let (tape_usd, tape_count) = TradeTapeTracker::winner_stats(tape, side);
         let tier_label = match plan.tier {
             EndgameTier::Insurance => "insurance",
+            EndgameTier::MidValueProbe => "mid_value_probe",
             EndgameTier::Impulse => "impulse",
             EndgameTier::Cheap => "value",
             EndgameTier::Late => "late",
