@@ -600,3 +600,21 @@ Clock synchronized! Offset: -448ms
 [ATR BTC] Подписка на kline.1.BTCUSDT
 [SERVER] background worker pid 50339 | dashboard http://127.0.0.1:8787
 [SERVER] Dashboard at http://127.0.0.1:8787 (read-only, stop via terminal)
+Synchronizing clock with Polymarket server...
+Clock synchronized! Offset: -764ms
+Инициализация ATR для BTC (BTCUSDT)...
+[LLM] Disabled | config llm.enabled=false
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTC] Подписка на kline.1.BTCUSDT
+[SERVER] background worker pid 20496 | dashboard http://127.0.0.1:8787
+[SERVER] Dashboard at http://127.0.0.1:8787 (read-only, stop via terminal)
+Synchronizing clock with Polymarket server...
+Clock synchronized! Offset: -61ms
+Инициализация ATR для BTC (BTCUSDT)...
+[LLM] Disabled | config llm.enabled=false
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTC] Подписка на kline.1.BTCUSDT
+[SERVER] background worker pid 92343 | dashboard http://127.0.0.1:8787
+[SERVER] Dashboard at http://127.0.0.1:8787 (read-only, stop via terminal)

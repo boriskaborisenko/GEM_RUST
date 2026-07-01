@@ -114,12 +114,158 @@ fn side_dir(side: &str) -> f64 {
     }
 }
 
+fn opposite_side(side: &str) -> &'static str {
+    if side == "UP" {
+        "DOWN"
+    } else {
+        "UP"
+    }
+}
+
+fn side_shares(win_state: &WindowState, side: &str) -> f64 {
+    if side == "UP" {
+        win_state.up_shares
+    } else {
+        win_state.down_shares
+    }
+}
+
+fn secs_to_end_in_range(secs_to_end: i64, start: i64, end: i64) -> bool {
+    let hi = start.max(end);
+    let lo = start.min(end);
+    secs_to_end <= hi && secs_to_end >= lo
+}
+
 fn mid_cross_side(mid_cross: &MidCrossSnapshot) -> Option<&'static str> {
     match mid_cross.current_side {
         Some(LeadSide::Up) => Some("UP"),
         Some(LeadSide::Down) => Some("DOWN"),
         Some(LeadSide::Tie) | None => None,
     }
+}
+
+pub fn plan_scout_winner(
+    config: &Config,
+    state: &JWindowState,
+    win_state: &WindowState,
+    current_winner: &str,
+    prices: &PricesState,
+    secs_to_end: i64,
+    available_cash: f64,
+) -> Option<TierPlan> {
+    let cfg = &config.j_endgame;
+    if !cfg.scout_winner_enabled {
+        return None;
+    }
+    if cfg.scout_winner_max_clips == 0 || state.scout_winner_clips >= cfg.scout_winner_max_clips {
+        return None;
+    }
+    if win_state.spent - win_state.cash_returned > 1e-9
+        || win_state.up_shares > 1e-9
+        || win_state.down_shares > 1e-9
+    {
+        return None;
+    }
+    if !secs_to_end_in_range(
+        secs_to_end,
+        cfg.scout_winner_start_secs_to_end,
+        cfg.scout_winner_end_secs_to_end,
+    ) {
+        return None;
+    }
+
+    let ask = side_ask(current_winner, prices);
+    if ask <= 0.0 || ask > cfg.scout_winner_max_ask {
+        return None;
+    }
+    let min_trade = cfg.effective_probe_clip_usd(&config.session).max(1.0);
+    let clip = cfg
+        .effective_scout_clip_usd(&config.session)
+        .min(available_cash.max(0.0));
+    if clip + 1e-9 < min_trade {
+        return None;
+    }
+
+    Some(TierPlan {
+        tier: EndgameTier::ScoutWinner,
+        max_pay: (ask + cfg.limit_ask_offset).min(cfg.scout_winner_max_ask),
+        need_tape: false,
+        budget_left: clip,
+        sweep_clips: 1,
+        side: Some(current_winner.to_string()),
+        clip_usd: clip,
+    })
+}
+
+pub fn plan_scout_pair_lock(
+    config: &Config,
+    state: &JWindowState,
+    win_state: &WindowState,
+    prices: &PricesState,
+    secs_to_end: i64,
+    available_cash: f64,
+) -> Option<TierPlan> {
+    let cfg = &config.j_endgame;
+    if !cfg.scout_pair_enabled || secs_to_end < cfg.scout_pair_min_secs_to_end {
+        return None;
+    }
+    if cfg.scout_pair_max_clips == 0 || state.scout_pair_clips >= cfg.scout_pair_max_clips {
+        return None;
+    }
+    let scout_side = state.scout_winner_side.as_deref()?;
+    if state.scout_winner_clips == 0 || state.scout_winner_spent_usd <= 1e-9 {
+        return None;
+    }
+    let non_scout_spent = state.impulse_spent_usd
+        + state.cheap_spent_usd
+        + state.late_spent_usd
+        + state.hedge_spent_usd
+        + state.insurance_spent_usd
+        + state.mid_value_spent_usd
+        + state.rescue_spent_usd
+        + state.discount_reload_spent_usd;
+    if non_scout_spent > 1e-9 {
+        return None;
+    }
+
+    let scout_shares = side_shares(win_state, scout_side);
+    if scout_shares <= 1e-9 {
+        return None;
+    }
+    let scout_avg = state.scout_winner_spent_usd / scout_shares;
+    let pair_side = opposite_side(scout_side);
+    let pair_ask = side_ask(pair_side, prices);
+    if pair_ask <= 0.0 || pair_ask > cfg.scout_pair_max_ask {
+        return None;
+    }
+    if 1.0 - (scout_avg + pair_ask) + 1e-9 < cfg.scout_pair_min_edge {
+        return None;
+    }
+
+    let min_trade = cfg.effective_probe_clip_usd(&config.session).max(1.0);
+    let cap = cfg.effective_scout_clip_usd(&config.session);
+    let target_usd = (scout_shares * pair_ask).max(min_trade);
+    let clip = target_usd.min(cap).min(available_cash.max(0.0));
+    if clip + 1e-9 < min_trade {
+        return None;
+    }
+
+    let pair_shares = clip / pair_ask;
+    let net_spent_after = (win_state.spent - win_state.cash_returned).max(0.0) + clip;
+    let worst_floor = scout_shares.min(pair_shares) - net_spent_after;
+    if worst_floor + 1e-9 < cfg.scout_pair_min_floor_usd {
+        return None;
+    }
+
+    Some(TierPlan {
+        tier: EndgameTier::ScoutPairLock,
+        max_pay: (pair_ask + cfg.limit_ask_offset).min(cfg.scout_pair_max_ask),
+        need_tape: false,
+        budget_left: clip,
+        sweep_clips: 1,
+        side: Some(pair_side.to_string()),
+        clip_usd: clip,
+    })
 }
 
 pub fn plan_mid_value_probe(
@@ -880,7 +1026,28 @@ pub fn plan_j_window(
             current_atr,
         );
     }
+    if let Some(plan) = plan_scout_pair_lock(
+        config,
+        state,
+        win_state,
+        prices,
+        secs_to_end,
+        available_cash,
+    ) {
+        return Some(plan);
+    }
     if let JWindowPhase::MidWindow = phase {
+        if let Some(plan) = plan_scout_winner(
+            config,
+            state,
+            win_state,
+            current_winner,
+            prices,
+            secs_to_end,
+            available_cash,
+        ) {
+            return Some(plan);
+        }
         if min_atr > 0.0 && current_atr < min_atr {
             return None;
         }
@@ -1067,7 +1234,7 @@ mod tests {
     }
 
     #[test]
-    fn mid_value_probe_buys_one_cheap_side_without_cross_count_gate() {
+    fn mid_value_probe_buys_cheap_loser_if_not_too_far_against() {
         let mut j = JEndgameConfig::default();
         j.mid_value_enabled = true;
         j.bank_sizing_enabled = true;
@@ -1088,7 +1255,7 @@ mod tests {
             &JWindowState::default(),
             &win_state_zero(),
             &prices,
-            0.10,
+            -0.10,
             150,
             &mid,
             &CexMicroSnapshot::default(),
@@ -1102,7 +1269,7 @@ mod tests {
     }
 
     #[test]
-    fn mid_value_probe_has_hard_size_cap_and_cex_block() {
+    fn mid_value_probe_has_hard_size_cap_and_blocks_strong_cex_continuation() {
         let mut j = JEndgameConfig::default();
         j.mid_value_enabled = true;
         j.bank_sizing_enabled = true;
@@ -1117,7 +1284,7 @@ mod tests {
             &JWindowState::default(),
             &win_state_zero(),
             &prices,
-            0.10,
+            -0.10,
             150,
             &MidCrossSnapshot::default(),
             &CexMicroSnapshot::default(),
@@ -1136,7 +1303,7 @@ mod tests {
                 &JWindowState::default(),
                 &win_state_zero(),
                 &prices,
-                0.10,
+                -0.10,
                 150,
                 &MidCrossSnapshot::default(),
                 &cex_against,
@@ -1144,6 +1311,77 @@ mod tests {
             )
             .is_none(),
             "UP value probe must not fire against strong CEX selling"
+        );
+    }
+
+    #[test]
+    fn scout_winner_buys_current_winner_around_thirty_seconds() {
+        let mut j = JEndgameConfig::default();
+        j.scout_winner_enabled = true;
+        j.bank_sizing_enabled = true;
+        j.scout_clip_pct = 2.0;
+        j.scout_clip_min_fix = 1.0;
+        j.scout_clip_max_fix = 50.0;
+        let mut cfg = full_cfg(j);
+        cfg.session.starting_bank = 1_000.0;
+        let prices = mid_value_prices(0.58, 0.43);
+
+        let plan = plan_scout_winner(
+            &cfg,
+            &JWindowState::default(),
+            &win_state_zero(),
+            "UP",
+            &prices,
+            270,
+            1_000.0,
+        )
+        .expect("scout winner");
+
+        assert_eq!(plan.tier, EndgameTier::ScoutWinner);
+        assert_eq!(plan.side.as_deref(), Some("UP"));
+        assert!((plan.max_pay - 0.60).abs() < 1e-9);
+        assert!((plan.clip_usd - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn scout_pair_lock_buys_opposite_only_when_worst_case_is_positive() {
+        let mut j = JEndgameConfig::default();
+        j.scout_pair_enabled = true;
+        j.bank_sizing_enabled = true;
+        j.scout_clip_pct = 2.0;
+        j.scout_clip_min_fix = 1.0;
+        j.scout_clip_max_fix = 50.0;
+        j.scout_pair_max_ask = 0.25;
+        j.scout_pair_min_edge = 0.02;
+        j.scout_pair_min_floor_usd = 0.02;
+        let mut cfg = full_cfg(j);
+        cfg.session.starting_bank = 1_000.0;
+
+        let mut state = JWindowState {
+            scout_winner_spent_usd: 2.0,
+            scout_winner_clips: 1,
+            scout_winner_side: Some("UP".to_string()),
+            ..Default::default()
+        };
+        let mut win_state = win_state_zero();
+        win_state.spent = 2.0;
+        win_state.up_shares = 2.0 / 0.60;
+        let prices = mid_value_prices(0.80, 0.25);
+
+        let plan = plan_scout_pair_lock(&cfg, &state, &win_state, &prices, 180, 1_000.0)
+            .expect("profitable pair lock");
+
+        assert_eq!(plan.tier, EndgameTier::ScoutPairLock);
+        assert_eq!(plan.side.as_deref(), Some("DOWN"));
+        assert!((plan.max_pay - 0.25).abs() < 1e-9);
+        assert!((plan.clip_usd - 1.0).abs() < 1e-9);
+
+        state.scout_winner_spent_usd = 1.0;
+        win_state.spent = 1.0;
+        win_state.up_shares = 1.0 / 0.60;
+        assert!(
+            plan_scout_pair_lock(&cfg, &state, &win_state, &prices, 180, 1_000.0).is_none(),
+            "minimum $1 pair buy must not fire when it makes worst-case PnL negative"
         );
     }
 

@@ -398,6 +398,36 @@ pub struct JEndgameConfig {
     #[serde(default = "j_default_fresh_cross_freeze_secs")]
     pub fresh_cross_freeze_secs: i64,
     #[serde(default)]
+    pub scout_winner_enabled: bool,
+    #[serde(default = "j_default_scout_winner_start_secs_to_end")]
+    pub scout_winner_start_secs_to_end: i64,
+    #[serde(default = "j_default_scout_winner_end_secs_to_end")]
+    pub scout_winner_end_secs_to_end: i64,
+    #[serde(default = "j_default_scout_winner_max_ask")]
+    pub scout_winner_max_ask: f64,
+    #[serde(default = "j_default_scout_clip_usd")]
+    pub scout_clip_usd: f64,
+    #[serde(default = "j_default_scout_clip_pct")]
+    pub scout_clip_pct: f64,
+    #[serde(default = "j_default_scout_clip_min_fix")]
+    pub scout_clip_min_fix: f64,
+    #[serde(default = "j_default_scout_clip_max_fix")]
+    pub scout_clip_max_fix: f64,
+    #[serde(default = "j_default_scout_winner_max_clips")]
+    pub scout_winner_max_clips: u16,
+    #[serde(default)]
+    pub scout_pair_enabled: bool,
+    #[serde(default = "j_default_scout_pair_max_ask")]
+    pub scout_pair_max_ask: f64,
+    #[serde(default = "j_default_scout_pair_min_edge")]
+    pub scout_pair_min_edge: f64,
+    #[serde(default = "j_default_scout_pair_min_floor_usd")]
+    pub scout_pair_min_floor_usd: f64,
+    #[serde(default = "j_default_scout_pair_min_secs_to_end")]
+    pub scout_pair_min_secs_to_end: i64,
+    #[serde(default = "j_default_scout_pair_max_clips")]
+    pub scout_pair_max_clips: u16,
+    #[serde(default)]
     pub mid_value_enabled: bool,
     #[serde(default = "j_default_mid_value_start_secs_to_end")]
     pub mid_value_start_secs_to_end: i64,
@@ -782,6 +812,45 @@ fn j_default_tail_cap_ask97_usd() -> f64 {
 fn j_default_fresh_cross_freeze_secs() -> i64 {
     8
 }
+fn j_default_scout_winner_start_secs_to_end() -> i64 {
+    275
+}
+fn j_default_scout_winner_end_secs_to_end() -> i64 {
+    255
+}
+fn j_default_scout_winner_max_ask() -> f64 {
+    0.60
+}
+fn j_default_scout_clip_usd() -> f64 {
+    1.0
+}
+fn j_default_scout_clip_pct() -> f64 {
+    2.0
+}
+fn j_default_scout_clip_min_fix() -> f64 {
+    1.0
+}
+fn j_default_scout_clip_max_fix() -> f64 {
+    50.0
+}
+fn j_default_scout_winner_max_clips() -> u16 {
+    1
+}
+fn j_default_scout_pair_max_ask() -> f64 {
+    0.25
+}
+fn j_default_scout_pair_min_edge() -> f64 {
+    0.02
+}
+fn j_default_scout_pair_min_floor_usd() -> f64 {
+    0.02
+}
+fn j_default_scout_pair_min_secs_to_end() -> i64 {
+    45
+}
+fn j_default_scout_pair_max_clips() -> u16 {
+    1
+}
 fn j_default_mid_value_start_secs_to_end() -> i64 {
     180
 }
@@ -1076,6 +1145,21 @@ impl Default for JEndgameConfig {
             tail_cap_ask94_usd: j_default_tail_cap_ask94_usd(),
             tail_cap_ask97_usd: j_default_tail_cap_ask97_usd(),
             fresh_cross_freeze_secs: j_default_fresh_cross_freeze_secs(),
+            scout_winner_enabled: j_default_false(),
+            scout_winner_start_secs_to_end: j_default_scout_winner_start_secs_to_end(),
+            scout_winner_end_secs_to_end: j_default_scout_winner_end_secs_to_end(),
+            scout_winner_max_ask: j_default_scout_winner_max_ask(),
+            scout_clip_usd: j_default_scout_clip_usd(),
+            scout_clip_pct: j_default_scout_clip_pct(),
+            scout_clip_min_fix: j_default_scout_clip_min_fix(),
+            scout_clip_max_fix: j_default_scout_clip_max_fix(),
+            scout_winner_max_clips: j_default_scout_winner_max_clips(),
+            scout_pair_enabled: j_default_false(),
+            scout_pair_max_ask: j_default_scout_pair_max_ask(),
+            scout_pair_min_edge: j_default_scout_pair_min_edge(),
+            scout_pair_min_floor_usd: j_default_scout_pair_min_floor_usd(),
+            scout_pair_min_secs_to_end: j_default_scout_pair_min_secs_to_end(),
+            scout_pair_max_clips: j_default_scout_pair_max_clips(),
             mid_value_enabled: j_default_false(),
             mid_value_start_secs_to_end: j_default_mid_value_start_secs_to_end(),
             mid_value_end_secs_to_end: j_default_mid_value_end_secs_to_end(),
@@ -1241,6 +1325,16 @@ impl JEndgameConfig {
         } else {
             self.probe_clip_usd.max(1e-9)
         }
+    }
+
+    pub fn effective_scout_clip_usd(&self, session: &SessionConfig) -> f64 {
+        self.sized_usd(
+            session,
+            self.scout_clip_usd,
+            self.scout_clip_pct,
+            self.scout_clip_min_fix,
+            self.scout_clip_max_fix,
+        )
     }
 
     pub fn effective_mid_value_clip_usd(&self, session: &SessionConfig) -> f64 {
