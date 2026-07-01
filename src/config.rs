@@ -1264,6 +1264,17 @@ impl JEndgameConfig {
         )
     }
 
+    pub fn effective_target_profit_usd(&self, session: &SessionConfig) -> f64 {
+        if !self.bank_sizing_enabled {
+            return self.target_profit_usd.max(0.0);
+        }
+        let bank = session.starting_bank.max(0.0);
+        if bank <= 0.0 {
+            return 0.0;
+        }
+        (bank * 0.01).clamp(0.25, 10.0)
+    }
+
     pub fn effective_flip_tier_usd(&self, session: &SessionConfig) -> f64 {
         self.sized_usd(
             session,
@@ -1327,7 +1338,7 @@ mod tests {
             "clip_usd={}",
             cfg.j_endgame.clip_usd
         );
-        assert!((cfg.session.starting_bank - 10.0).abs() < 1e-9);
+        assert!((cfg.session.starting_bank - 100.0).abs() < 1e-9);
         assert!((cfg.session.min_window_budget - 0.0).abs() < 1e-9);
         assert!((cfg.session.max_window_budget - 0.0).abs() < 1e-9);
         assert!((cfg.session.window_budget_pct - 100.0).abs() < 1e-9);
@@ -1335,19 +1346,26 @@ mod tests {
         assert!((cfg.j_endgame.max_usd_per_window - 80.0).abs() < 1e-9);
         assert!((cfg.j_endgame.max_rescue_usd - 75.0).abs() < 1e-9);
         assert!(cfg.j_endgame.bank_sizing_enabled);
-        assert!((cfg.j_endgame.effective_max_usd_per_window(&cfg.session) - 3.0).abs() < 1e-9);
-        assert!((cfg.j_endgame.effective_max_rescue_usd(&cfg.session) - 3.0).abs() < 1e-9);
-        assert!((cfg.j_endgame.effective_first_clip_usd(&cfg.session) - 1.0).abs() < 1e-9);
-        assert!((cfg.j_endgame.effective_max_clip_usd(&cfg.session) - 1.0).abs() < 1e-9);
+        assert!((cfg.j_endgame.effective_max_usd_per_window(&cfg.session) - 100.0).abs() < 1e-9);
+        assert!((cfg.j_endgame.effective_max_rescue_usd(&cfg.session) - 93.75).abs() < 1e-9);
+        assert!((cfg.j_endgame.effective_first_clip_usd(&cfg.session) - 10.0).abs() < 1e-9);
+        assert!((cfg.j_endgame.effective_max_clip_usd(&cfg.session) - 43.75).abs() < 1e-9);
+        assert!((cfg.j_endgame.effective_target_profit_usd(&cfg.session) - 1.0).abs() < 1e-9);
         assert!(
             (cfg.j_endgame
                 .effective_discount_reload_clip_usd(&cfg.session)
-                - 1.0)
+                - 12.5)
                 .abs()
                 < 1e-9
         );
-        assert_eq!(cfg.execution.buy_market_order_type, LiveMarketOrderType::Fok);
-        assert_eq!(cfg.execution.sell_market_order_type, LiveMarketOrderType::Fok);
+        assert_eq!(
+            cfg.execution.buy_market_order_type,
+            LiveMarketOrderType::Fok
+        );
+        assert_eq!(
+            cfg.execution.sell_market_order_type,
+            LiveMarketOrderType::Fok
+        );
         assert!(cfg.j_endgame.taker_mode);
         assert!((cfg.j_endgame.conf_enter - 0.58).abs() < 1e-9);
         assert!((cfg.j_endgame.max_clip_usd - 35.0).abs() < 1e-9);
@@ -1360,5 +1378,13 @@ mod tests {
         assert!((cfg.j_endgame.insurance_clip_usd - 1.0).abs() < 1e-9);
         assert!((cfg.j_endgame.probe_clip_usd - 1.0).abs() < 1e-9);
         assert!(!cfg.j_endgame.impulse_enabled);
+
+        let mut small = cfg.session.clone();
+        small.starting_bank = 10.0;
+        assert!((cfg.j_endgame.effective_target_profit_usd(&small) - 0.25).abs() < 1e-9);
+
+        let mut large = cfg.session.clone();
+        large.starting_bank = 5_000.0;
+        assert!((cfg.j_endgame.effective_target_profit_usd(&large) - 10.0).abs() < 1e-9);
     }
 }

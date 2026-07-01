@@ -11,6 +11,8 @@ mod asset_price;
 mod cex_micro;
 mod client;
 mod config;
+mod daemon;
+mod dashboard;
 mod h_stats;
 mod j_controller;
 mod j_fees;
@@ -21,16 +23,23 @@ mod llm;
 mod mid_cross_tracker;
 mod orderbook;
 mod redeem_hold;
+mod server;
 mod strategy;
 mod trade_tape;
 mod trader;
 mod volatility;
+mod window_chart;
 mod window_stats;
 
 use asset_price::{format_asset_price, format_atr, ptb_implausible};
 use cex_micro::CexMicroManager;
 use client::{get_now_ms, MarketEvent, MarketWindow, PricesState};
 use config::{Config, ExecutionMode, LiveMarketOrderType};
+use daemon::{parse_server_bind, ServerMeta, CHILD_FLAG, DEFAULT_BIND};
+use dashboard::{
+    execution_mode_label, window_to_snapshot, DashboardSnapshot, SnapshotCexMicro,
+    SnapshotExecution, SnapshotMeta, SnapshotSessionStats, SnapshotStrategyJ, SnapshotWindow,
+};
 use live_audit::LiveAudit;
 use live_executor::{
     apply_live_result_to_portfolio, format_live_terminal_event, LiveAccountStatus,
@@ -42,18 +51,21 @@ use redeem_hold::{
     evaluate_redeem_hold, itm_gap_z, side_is_itm, RedeemHoldInput, REDEEM_HOLD_MIN_VALID_ATR,
 };
 use strategy::{
-    CexMicroSnapshot, EntryMode, EntrySignal, LlmForecast, OrderOperation, OrderSignal, OrderType,
-    SpotSignalSnapshot, StrategyEngine, TradeTapeSnapshot, LEGACY_CHEAPER_SIDE_RATIO,
+    strategy_j::EndgameTier, CexMicroSnapshot, EntryMode, EntrySignal, LlmForecast, OrderOperation,
+    OrderSignal, OrderType, SpotSignalSnapshot, StrategyEngine, TradeTapeSnapshot,
+    LEGACY_CHEAPER_SIDE_RATIO,
 };
 use trade_tape::TradeTapeTracker;
 use trader::{Portfolio, TradeRecord, WindowCloseMeta, WindowState};
 use volatility::VolatilityManager;
+use window_chart::WindowChartTracker;
 use window_stats::{WindowCloseRecord, WindowStatsAggregator};
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 struct AppState {
     asset: String,
@@ -72,6 +84,7 @@ struct AppState {
     spot_price: Option<f64>,
     volatility_mgr: Arc<VolatilityManager>,
     shutdown_pending: bool,
+    shutdown_requested_at_ms: Option<i64>,
     run_log_dir: String,
     spot_series: SpotSeries,
     llm_forecaster: Option<Arc<LlmForecaster>>,
@@ -92,6 +105,7 @@ struct AppState {
     live_session: Option<Arc<LiveExecutorSession>>,
     live_account: LiveAccountStatus,
     live_audit: Option<LiveAudit>,
+    window_chart: WindowChartTracker,
 }
 
 /// Polymarket platform health, polled once per window start from the public
@@ -344,10 +358,41 @@ async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 && (args[1] == "--help" || args[1] == "-h") {
         println!("GEM_RUST — Event-Driven Polymarket Volatility Harvester in Rust\n");
-        println!("Usage:\n  cargo run -- <asset> <interval> [--paper|--live] [--dry-run]\n");
-        println!("Examples:\n  cargo run -- BTC 5m\n  cargo run -- BTC 5m --paper\n  cargo run -- BTC 5m --live --dry-run");
+        println!("Usage:");
+        println!("  cargo run -- <asset> <interval> [--paper|--live] [--dry-run]");
+        println!("  cargo run -- <asset> <interval> --server [--server-bind 127.0.0.1:8787]");
+        println!("  cargo run -- --server --status");
+        println!("  cargo run -- --server --stop");
+        println!("  cargo run -- --server --stop --force   # kill immediately");
+        println!("\nExamples:");
+        println!("  cargo run -- BTC 5m");
+        println!("  cargo run -- BTC 5m --live --server");
+        println!("  cargo run -- BTC 5m --live --server --server-bind 127.0.0.1:8787");
+        println!("\n--server: forks to background, prints pid, safe to close SSH.");
+        println!("View dashboard: ssh -L 8787:127.0.0.1:8787 user@vps → http://127.0.0.1:8787");
         return Ok(());
     }
+
+    let server_mode = args.iter().any(|a| a == "--server");
+    let daemon_child = args.iter().any(|a| a == CHILD_FLAG);
+    let stop_requested = args.iter().any(|a| a == "--stop");
+    let status_requested = args.iter().any(|a| a == "--status");
+    let server_bind = parse_server_bind(&args);
+
+    let force_stop = args.iter().any(|a| a == "--force");
+    if stop_requested {
+        daemon::stop_server(force_stop)?;
+        return Ok(());
+    }
+    if status_requested {
+        daemon::print_server_status().await?;
+        return Ok(());
+    }
+    if server_mode && !daemon_child {
+        daemon::launch_background_server(&args, &server_bind).await?;
+        return Ok(());
+    }
+    let effective_server = daemon_child;
 
     let mut execution_mode_override: Option<ExecutionMode> = None;
     let mut dry_run_override: Option<bool> = None;
@@ -364,6 +409,7 @@ async fn main() -> anyhow::Result<()> {
                 dry_run_override = Some(true);
                 dry_run_requested = true;
             }
+            "--server" | "--stop" | "--status" | "--server-bind" | "--force" | CHILD_FLAG => {}
             _ => {}
         }
     }
@@ -374,7 +420,7 @@ async fn main() -> anyhow::Result<()> {
     let positional: Vec<String> = args
         .iter()
         .skip(1)
-        .filter(|arg| !arg.starts_with("--"))
+        .filter(|arg| !arg.starts_with("--") && **arg != server_bind && *arg != CHILD_FLAG)
         .cloned()
         .collect();
 
@@ -587,6 +633,7 @@ async fn main() -> anyhow::Result<()> {
         spot_price: None,
         volatility_mgr: Arc::clone(&volatility_mgr),
         shutdown_pending: false,
+        shutdown_requested_at_ms: None,
         run_log_dir,
         spot_series: SpotSeries::new(180, 12.0),
         llm_forecaster,
@@ -606,6 +653,7 @@ async fn main() -> anyhow::Result<()> {
         live_session: live_session.clone(),
         live_account: LiveAccountStatus::default(),
         live_audit,
+        window_chart: WindowChartTracker::new(1200),
     };
 
     if app_state.config.execution.mode == ExecutionMode::Live {
@@ -650,6 +698,37 @@ async fn main() -> anyhow::Result<()> {
     // Initial Market Discovery
     discover_initial_markets(&mut app_state, &event_tx).await;
 
+    let (snapshot_tx, _) = watch::channel(Arc::new(DashboardSnapshot::bootstrap()));
+    if effective_server {
+        let bind: SocketAddr = server_bind
+            .parse()
+            .unwrap_or_else(|_| DEFAULT_BIND.parse().expect("default bind"));
+        let meta = ServerMeta {
+            pid: std::process::id(),
+            bind: server_bind.clone(),
+            asset: asset.clone(),
+            interval: interval.clone(),
+            execution_mode: execution_mode_label(config.execution.mode).to_string(),
+            dry_run: config.execution.dry_run,
+            strategy: config.strategy.clone(),
+            started_at_ms: get_now_ms(),
+            run_log_dir: app_state.run_log_dir.clone(),
+        };
+        if let Err(error) = daemon::write_server_files(&meta) {
+            eprintln!("[SERVER] Failed to write pid/meta: {error}");
+        }
+        let snap_tx = snapshot_tx.clone();
+        tokio::spawn(async move {
+            server::run(bind, snap_tx).await;
+        });
+        spawn_shutdown_signals(event_tx.clone());
+        eprintln!(
+            "[SERVER] background worker pid {} | dashboard http://{}",
+            std::process::id(),
+            server_bind
+        );
+    }
+
     // ─── 3. Event Loop & Tickers ───────────────────────────────────────────
     let mut render_interval = tokio::time::interval(Duration::from_millis(250));
     let mut monitor_interval = tokio::time::interval(Duration::from_millis(1000));
@@ -657,18 +736,30 @@ async fn main() -> anyhow::Result<()> {
     loop {
         if app_state.shutdown_pending {
             let mut can_exit = false;
+            let force_exit = app_state
+                .shutdown_requested_at_ms
+                .map(|t| get_now_ms().saturating_sub(t) >= 20_000)
+                .unwrap_or(false);
             {
                 let port = app_state.portfolio.lock().unwrap();
                 let has_active = port
                     .windows
                     .values()
                     .any(|w| w.status == "LIVE" || w.status == "ENTERED_PRE_START");
-                if !has_active {
+                if !has_active || force_exit {
                     can_exit = true;
                 }
             }
+            if force_exit && can_exit {
+                eprintln!("[SERVER] Forced exit after shutdown timeout (open windows abandoned)");
+            }
             if can_exit {
-                render_dashboard(&app_state);
+                if effective_server {
+                    let snap = Arc::new(build_dashboard_snapshot(&app_state));
+                    let _ = snapshot_tx.send(snap);
+                } else {
+                    render_dashboard(&app_state);
+                }
                 app_state.window_stats.flush_to_csv(&app_state.run_log_dir);
                 if app_state.config.strategy == "cheap_hold_h" {
                     let p = app_state.portfolio.lock().unwrap();
@@ -695,14 +786,33 @@ async fn main() -> anyhow::Result<()> {
                 println!("\n=================================================================================");
                 println!("  \x1b[38;5;114mSESSION DONE!\x1b[0m - All active positions concluded.");
                 println!("=================================================================================\n");
+                if effective_server {
+                    daemon::cleanup_server_files();
+                }
                 return Ok(());
             }
         }
 
         tokio::select! {
-            // A. Render Terminal Dashboard
+            // A. Dashboard (terminal or HTTP snapshot)
             _ = render_interval.tick() => {
-                render_dashboard(&app_state);
+                if let Some(win) = app_state.current_window.as_ref() {
+                    app_state.window_chart.record(
+                        win.window_number,
+                        win.prices.up.ask,
+                        win.prices.down.ask,
+                        win.prices.up.bid,
+                        win.prices.down.bid,
+                        app_state.spot_price,
+                        get_now_ms(),
+                    );
+                }
+                if effective_server {
+                    let snap = Arc::new(build_dashboard_snapshot(&app_state));
+                    let _ = snapshot_tx.send(snap);
+                } else {
+                    render_dashboard(&app_state);
+                }
             }
 
             // B. Monitor Time Boundaries and Promotion
@@ -1963,6 +2073,7 @@ async fn process_event(
         MarketEvent::ShutdownRequested => {
             if !app.shutdown_pending {
                 app.shutdown_pending = true;
+                app.shutdown_requested_at_ms = Some(get_now_ms());
                 app.system_logs.push(
                     "[SYSTEM] SOFT SHUTDOWN INITIATED - NEXT window buys are now disabled!"
                         .to_string(),
@@ -2486,29 +2597,375 @@ fn format_live_account_line(app: &AppState) -> String {
     line
 }
 
+fn cex_micro_to_snapshot(cex: &CexMicroSnapshot) -> SnapshotCexMicro {
+    SnapshotCexMicro {
+        velocity_3s: cex.trade_velocity_3s,
+        imbalance_3s: cex.buy_sell_imbalance_3s,
+        lead_bps: cex.lead_vs_chainlink_bps,
+    }
+}
+
+fn endgame_tier_snapshot(
+    plan: Option<&strategy::strategy_j::TierPlan>,
+    flip_armed: bool,
+    j_endgame: &config::JEndgameConfig,
+) -> (String, String, bool) {
+    if flip_armed {
+        return (
+            "flip_hedge".to_string(),
+            "Flip hedge armed".to_string(),
+            true,
+        );
+    }
+    let Some(p) = plan else {
+        return (
+            "waiting".to_string(),
+            "Waiting for setup".to_string(),
+            false,
+        );
+    };
+    match p.tier {
+        EndgameTier::Insurance => (
+            "insurance".to_string(),
+            format!(
+                "≤{:.0}¢ · ${:.0} clip",
+                j_endgame.insurance_max_ask * 100.0,
+                j_endgame.insurance_clip_usd
+            ),
+            false,
+        ),
+        EndgameTier::Rescue => (
+            "rescue".to_string(),
+            "Rescue solve → target".to_string(),
+            false,
+        ),
+        EndgameTier::FlipHedge => ("flip_hedge".to_string(), "Flip hedge".to_string(), true),
+        EndgameTier::Impulse => (
+            "impulse".to_string(),
+            format!("≤{:.0}¢ + tape", j_endgame.impulse_max_ask * 100.0),
+            false,
+        ),
+        EndgameTier::Cheap => (
+            "cheap".to_string(),
+            format!(
+                "≤{:.0}¢ gap≥{:.1}",
+                j_endgame.cheap_max_ask * 100.0,
+                j_endgame.cheap_min_gap_z
+            ),
+            false,
+        ),
+        EndgameTier::Late => (
+            "late".to_string(),
+            format!(
+                "≤{:.0}¢ · last {}s",
+                j_endgame.taker_max_ask * 100.0,
+                j_endgame.late_max_secs
+            ),
+            false,
+        ),
+        _ => (
+            "waiting".to_string(),
+            "Waiting for setup".to_string(),
+            false,
+        ),
+    }
+}
+
+fn build_strategy_j_snapshot(
+    app: &AppState,
+    win: &WindowState,
+    mid_cross: Option<&MidCrossSnapshot>,
+    cex_micro: &CexMicroSnapshot,
+    tape: Option<&TradeTapeSnapshot>,
+    available_cash: f64,
+) -> Option<SnapshotStrategyJ> {
+    if app.config.strategy != "j_endgame" || win.window_number == 0 {
+        return None;
+    }
+    let spot = app.spot_price?;
+    let ptb = win.market.price_to_beat?;
+    let j_endgame = &app.config.j_endgame;
+    let strat_engine = app.strategy.lock().unwrap();
+    let strat = strat_engine.get_strategy_state(win.window_number)?;
+    let clips = strat.e_tranches_done;
+    let entry_active = strat.h_entry_done;
+    let now = get_now_ms();
+    let secs_to_end = chrono::DateTime::parse_from_rfc3339(&win.market.end_time)
+        .map(|end| ((end.timestamp_millis() - now) / 1000).max(0))
+        .unwrap_or(600);
+    let winner = if spot > ptb {
+        "UP"
+    } else if spot < ptb {
+        "DOWN"
+    } else {
+        "TIE"
+    };
+    let winner_ask = if winner == "UP" {
+        win.prices.up.ask
+    } else if winner == "DOWN" {
+        win.prices.down.ask
+    } else {
+        0.0
+    };
+    let expected = redeem_hold::expected_move_usd(
+        app.volatility_mgr
+            .get_current_atr()
+            .max(REDEEM_HOLD_MIN_VALID_ATR),
+        secs_to_end.max(1),
+    );
+    let gap_z = if expected > 0.0 {
+        (spot - ptb) / expected
+    } else {
+        0.0
+    };
+    let elapsed = strategy::strategy_j::window_elapsed_pct(&win.market, secs_to_end);
+    let phase = j_controller::detect_phase(
+        elapsed,
+        secs_to_end,
+        j_endgame,
+        mid_cross.unwrap_or(&MidCrossSnapshot::default()),
+    );
+    let fee_bps = j_endgame
+        .fee_rate_bps
+        .unwrap_or(j_fees::DEFAULT_CRYPTO_FEE_RATE_BPS);
+    let redeem_pnl_proj = j_controller::projected_redeem_pnl(win, winner, fee_bps);
+    let plan = mid_cross
+        .map(|mc| {
+            let chop_blocked = strat_engine.j_directional_blocked(win.window_number);
+            let allow = strategy::strategy_j::directional_entry_allowed_external(
+                j_endgame,
+                chop_blocked,
+                0.0,
+                app.volatility_mgr.get_current_atr().max(1.0),
+                spot,
+                ptb,
+            );
+            let confidence = if winner == "TIE" {
+                0.0
+            } else {
+                j_controller::endgame_confidence(
+                    j_endgame,
+                    winner,
+                    gap_z,
+                    &SpotSignalSnapshot::default(),
+                    mc,
+                    cex_micro,
+                    tape.unwrap_or(&TradeTapeSnapshot::default()),
+                )
+            };
+            j_controller::plan_j_window(
+                &app.config,
+                &strategy::strategy_j::JWindowState::default(),
+                win,
+                &win.prices,
+                spot,
+                ptb,
+                secs_to_end,
+                elapsed,
+                app.volatility_mgr.get_current_atr().max(1.0),
+                0.0,
+                mc,
+                allow,
+                confidence,
+                available_cash,
+            )
+        })
+        .flatten();
+    let flip_armed = mid_cross
+        .map(|mc| {
+            strategy::strategy_j::flip_hedge_armed_display(
+                j_endgame,
+                strat.h_entry_side.as_deref(),
+                winner,
+                spot,
+                ptb,
+                gap_z,
+                mc,
+            )
+        })
+        .unwrap_or(false);
+    let (tier, tier_note, flip_from_tier) =
+        endgame_tier_snapshot(plan.as_ref(), flip_armed, j_endgame);
+    let flip_hedge_armed = flip_armed || flip_from_tier;
+
+    let (tape_hot, tape_usd, tape_buys, ask_depth_usd) = if let Some(tape) = tape {
+        let (tape_usd, tape_buys) = trade_tape::TradeTapeTracker::winner_stats(tape, winner);
+        let tape_hot = strategy::strategy_j::tape_hot(tape, winner, j_endgame);
+        let depth = orderbook::ask_depth_usd(
+            &if winner == "UP" {
+                &win.prices.up.book.asks
+            } else {
+                &win.prices.down.book.asks
+            },
+            j_endgame.taker_max_ask,
+        );
+        (tape_hot, tape_usd, tape_buys, depth)
+    } else {
+        (false, 0.0, 0, 0.0)
+    };
+
+    Some(SnapshotStrategyJ {
+        clips_done: clips as u32,
+        clips_max: if j_endgame.max_clips_per_window == 0 {
+            None
+        } else {
+            Some(j_endgame.max_clips_per_window as u32)
+        },
+        entry_active,
+        phase: phase.label().to_string(),
+        target_profit_usd: j_endgame.effective_target_profit_usd(&app.config.session),
+        redeem_pnl_proj,
+        winner: winner.to_string(),
+        winner_ask,
+        gap_z,
+        tier,
+        tier_note,
+        flip_hedge_armed,
+        tape_hot,
+        tape_usd,
+        tape_buys,
+        tape_need_usd: j_endgame.min_tape_usd,
+        tape_need_buys: j_endgame.min_tape_buys,
+        ask_depth_usd,
+        ask_depth_max_cents: j_endgame.taker_max_ask * 100.0,
+    })
+}
+
+fn enrich_current_window_snapshot(
+    app: &AppState,
+    mut snap: SnapshotWindow,
+    win: &WindowState,
+) -> SnapshotWindow {
+    if win.role != "CURRENT" {
+        return snap;
+    }
+    let cex = app.cex_micro_mgr.snapshot(app.spot_price);
+    snap.cex_micro = Some(cex_micro_to_snapshot(&cex));
+    let now = get_now_ms();
+    let mid_cross = app.mid_cross_tracker.snapshot(win.window_number);
+    let tape = app
+        .trade_tape
+        .snapshot(win.window_number, now, app.config.j_endgame.tape_window_ms);
+    let available_cash = app.portfolio.lock().unwrap().available_cash;
+    snap.strategy_j = build_strategy_j_snapshot(
+        app,
+        win,
+        Some(&mid_cross),
+        &cex,
+        Some(&tape),
+        available_cash,
+    );
+    snap
+}
+
+fn build_dashboard_snapshot(app: &AppState) -> DashboardSnapshot {
+    let terminal_lines = collect_dashboard_lines(app);
+    let p = app.portfolio.lock().unwrap().get_portfolio_snapshot();
+    let (current_window, next_window) = {
+        let port = app.portfolio.lock().unwrap();
+        (
+            resolve_display_window(&port, app.current_window.as_ref(), "CURRENT"),
+            resolve_display_window(&port, app.next_window.as_ref(), "NEXT"),
+        )
+    };
+    let now = get_now_ms();
+    let llm_enabled = app.config.llm.enabled && app.llm_forecaster.is_some();
+    DashboardSnapshot {
+        meta: SnapshotMeta {
+            asset: app.asset.clone(),
+            interval: app.interval.clone(),
+            strategy: app.config.strategy.clone(),
+            started_at_ms: app.started_at,
+            runtime_ms: now.saturating_sub(app.started_at),
+            shutdown_pending: app.shutdown_pending,
+            spot_price: app.spot_price,
+            atr: app.volatility_mgr.get_current_atr(),
+            llm_enabled,
+            llm_correct: app.llm_correct,
+            llm_wrong: app.llm_wrong,
+            maintenance_label: app.maintenance.label.clone(),
+            maintenance_ok: app.maintenance.ok,
+        },
+        execution: SnapshotExecution {
+            mode: execution_mode_label(app.config.execution.mode).to_string(),
+            dry_run: app.config.execution.dry_run,
+        },
+        live_account: if app.config.execution.mode == ExecutionMode::Live {
+            Some((&app.live_account).into())
+        } else {
+            None
+        },
+        portfolio: p,
+        current_window: current_window.as_ref().map(|w| {
+            let snap = window_to_snapshot(w, app.spot_price, now);
+            enrich_current_window_snapshot(app, snap, w)
+        }),
+        next_window: next_window
+            .as_ref()
+            .map(|w| window_to_snapshot(w, app.spot_price, now)),
+        system_logs: app.system_logs.clone(),
+        session_stats: SnapshotSessionStats {
+            summary_line: app.window_stats.session_summary_line(&app.config.strategy),
+        },
+        run_log_dir: app.run_log_dir.clone(),
+        updated_at_ms: now,
+        terminal_lines,
+        chart: app.window_chart.snapshot(),
+    }
+}
+
+fn spawn_shutdown_signals(event_tx: mpsc::UnboundedSender<MarketEvent>) {
+    let tx_int = event_tx.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            eprintln!("[SERVER] SIGINT — graceful shutdown initiated");
+            let _ = tx_int.send(MarketEvent::ShutdownRequested);
+        }
+    });
+    #[cfg(unix)]
+    {
+        let tx_term = event_tx;
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
+                if sigterm.recv().await.is_some() {
+                    eprintln!("[SERVER] SIGTERM — graceful shutdown initiated");
+                    let _ = tx_term.send(MarketEvent::ShutdownRequested);
+                }
+            }
+        });
+    }
+}
+
 fn render_dashboard(app: &AppState) {
+    let lines = collect_dashboard_lines(app);
+    print!("\x1B[2J\x1B[H");
+    for line in lines {
+        println!("{line}");
+    }
+}
+
+fn collect_dashboard_lines(app: &AppState) -> Vec<String> {
+    let mut lines = Vec::new();
     let p = app.portfolio.lock().unwrap().get_portfolio_snapshot();
 
-    // Clear screen and move cursor to top-left
-    print!("\x1B[2J\x1B[H");
-
-    println!(
+    lines.push(format!(
         "{}",
         paint(
             "=================================================================================",
             "dim"
         )
-    );
+    ));
     let strategy_title = format!(
         "STRATEGY: {}",
         app.config.strategy.to_uppercase().replace("_", " ")
     );
-    println!(
+    lines.push(format!(
         "  {}     {}     {}",
         paint(&strategy_title, "bold"),
         paint(&format!("Asset: {}", app.asset), "cyan"),
         paint(&format!("Interval: {}", app.interval), "cyan")
-    );
+    ));
     let llm_total = app.llm_correct + app.llm_wrong;
     let llm_accuracy = if llm_total > 0 {
         (app.llm_correct as f64 / llm_total as f64) * 100.0
@@ -2516,7 +2973,7 @@ fn render_dashboard(app: &AppState) {
         0.0
     };
     let llm_enabled = app.config.llm.enabled && app.llm_forecaster.is_some();
-    println!(
+    lines.push(format!(
         "  LLM-forecast: {} | Model: {} | Location: {} | Right {} | Wrong {} | Acc {:.1}%",
         paint(
             if llm_enabled { "enabled" } else { "disabled" },
@@ -2527,20 +2984,20 @@ fn render_dashboard(app: &AppState) {
         paint(&app.llm_correct.to_string(), "green"),
         paint(&app.llm_wrong.to_string(), "red"),
         llm_accuracy
-    );
+    ));
     if app.shutdown_pending {
-        println!(
+        lines.push(format!(
             "  {}",
             paint("SHUTDOWN PENDING | NEXT window buys are disabled.", "red")
-        );
+        ));
     }
-    println!(
+    lines.push(format!(
         "{}",
         paint(
             "=================================================================================",
             "dim"
         )
-    );
+    ));
 
     let runtime = format_runtime(get_now_ms() - app.started_at);
     let settled_windows = p.wins + p.losses;
@@ -2562,13 +3019,13 @@ fn render_dashboard(app: &AppState) {
         "Warming up...".to_string()
     };
 
-    println!(
+    lines.push(format!(
         "  Started: {} | Runtime: {} | {} ATR(1m): {}",
         paint(&format_utc(app.started_at), "cyan"),
         paint(&runtime, "bold"),
         paint(&app.asset, "cyan"),
         paint(&atr_str, "yellow")
-    );
+    ));
 
     let spot_header = match app.spot_price {
         Some(px) if px > 0.0 => paint(
@@ -2577,25 +3034,25 @@ fn render_dashboard(app: &AppState) {
         ),
         _ => paint("Chainlink Spot: NO DATA (WS reconnecting...)", "red"),
     };
-    println!("  {}", spot_header);
+    lines.push(format!("  {}", spot_header));
 
-    println!(
+    lines.push(format!(
         "  Windows: Total {} | Traded {} | Closed {} | Open Pos {} | No Trade {}",
         paint(&p.total_windows.to_string(), "bold"),
         paint(&p.traded_windows.to_string(), "cyan"),
         paint(&p.closed_windows.to_string(), "green"),
         paint(&p.open_traded_windows.to_string(), "yellow"),
         paint(&p.no_trade_windows.to_string(), "yellow")
-    );
-    println!(
+    ));
+    lines.push(format!(
         "  Results (closed only): Wins {} ({:.1}%) | Losses {} ({:.1}%)",
         paint(&p.wins.to_string(), "green"),
         win_pct,
         paint(&p.losses.to_string(), "red"),
         loss_pct
-    );
+    ));
     if app.config.strategy == "cheap_hold_h" {
-        println!(
+        lines.push(format!(
             "  {}",
             paint(
                 &h_stats::format_h_session_line(
@@ -2606,7 +3063,7 @@ fn render_dashboard(app: &AppState) {
                 ),
                 "cyan",
             )
-        );
+        ));
     }
 
     let pnl_sign = if p.overall_realized_pnl >= 0.0 {
@@ -2624,7 +3081,7 @@ fn render_dashboard(app: &AppState) {
     } else {
         "Starting bank"
     };
-    println!(
+    lines.push(format!(
         "  {}: ${:.2} | Cash: ${:.2} | Equity: ${:.2} | Realized PnL: {}",
         bank_label,
         p.starting_bank,
@@ -2634,15 +3091,15 @@ fn render_dashboard(app: &AppState) {
             &format!("{}{:.2}", pnl_sign, p.overall_realized_pnl),
             pnl_color
         )
-    );
-    println!("  {}", format_live_account_line(app));
-    println!(
+    ));
+    lines.push(format!("  {}", format_live_account_line(app)));
+    lines.push(format!(
         "{}",
         paint(
             "=================================================================================",
             "dim"
         )
-    );
+    ));
 
     // Live window state lives in AppState; portfolio `role` becomes PAST after
     // close — reading only port.windows by role leaves the dashboard blank.
@@ -2687,10 +3144,10 @@ fn render_dashboard(app: &AppState) {
         p.available_cash,
         &app.maintenance,
     );
-    println!(
+    lines.push(format!(
         "  {}",
         app.window_stats.session_summary_line(&app.config.strategy)
-    );
+    ));
 
     let right_lines = render_window_block(
         &next_window,
@@ -2709,27 +3166,27 @@ fn render_dashboard(app: &AppState) {
 
     // Render blocks vertically
     for line in left_lines {
-        println!("  {}", line);
+        lines.push(format!("  {}", line));
     }
-    println!(
+    lines.push(format!(
         "{}",
         paint(
             "─────────────────────────────────────────────────────────────────────────────────",
             "dim"
         )
-    );
+    ));
     for line in right_lines {
-        println!("  {}", line);
+        lines.push(format!("  {}", line));
     }
 
-    println!(
+    lines.push(format!(
         "{}",
         paint(
             "=================================================================================",
             "dim"
         )
-    );
-    println!("  {}", paint("SYSTEM EVENT LOG:", "cyan"));
+    ));
+    lines.push(format!("  {}", paint("SYSTEM EVENT LOG:", "cyan")));
     let max_logs = 8;
     let start_idx = app.system_logs.len().saturating_sub(max_logs);
     for log in &app.system_logs[start_idx..] {
@@ -2742,17 +3199,17 @@ fn render_dashboard(app: &AppState) {
         } else {
             "dim"
         };
-        println!("  • {}", paint(log, tone));
+        lines.push(format!("  • {}", paint(log, tone)));
     }
-    println!(
+    lines.push(format!(
         "{}",
         paint(
             "=================================================================================",
             "dim"
         )
-    );
+    ));
+    lines
 }
-
 fn render_window_block(
     win_opt: &Option<WindowState>,
     label: &str,
@@ -3234,7 +3691,7 @@ fn render_window_block(
                     lines.push(format!(
                         "J phase: {} | target +${:.2} | redeem PnL proj {:+.2}",
                         paint(phase.label(), "cyan"),
-                        j_endgame.target_profit_usd,
+                        j_endgame.effective_target_profit_usd(&config.session),
                         proj_pnl,
                     ));
                     let plan = mid_cross

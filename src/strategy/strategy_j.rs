@@ -554,35 +554,6 @@ fn discount_reload_velocity_blocks(
     shallow_gap && strong_adverse_velocity
 }
 
-fn post_target_primary_add_blocks(
-    cfg: &crate::config::JEndgameConfig,
-    state: &JWindowState,
-    tier: EndgameTier,
-    side: &str,
-    ask: f64,
-    gz: f64,
-    spot_signal: SpotSignalSnapshot,
-    projected_pnl: f64,
-) -> bool {
-    if !matches!(tier, EndgameTier::Rescue | EndgameTier::FinalSeal) {
-        return false;
-    }
-    if projected_pnl + 1e-9 < cfg.target_profit_usd {
-        return false;
-    }
-    if !state.has_primary_exposure() || state.primary_side.as_deref() != Some(side) {
-        return false;
-    }
-    let non_cheap_ask = cfg.discount_reload_max_ask.max(0.80);
-    if ask + 1e-9 < non_cheap_ask {
-        return false;
-    }
-    let side_gap_z = gz * side_direction(side);
-    let min_confirm_velocity = (cfg.mom_full_vel_usd_per_sec * 0.05).max(0.10);
-    side_gap_z < cfg.full_size_gap_z
-        && aligned_velocity_usd_per_sec(side, spot_signal) < min_confirm_velocity
-}
-
 fn tail_add_danger_secs(cfg: &crate::config::JEndgameConfig) -> i64 {
     (cfg.rescue_zone_secs / 2)
         .max(cfg.final_seal_secs)
@@ -1069,16 +1040,6 @@ impl TradeStrategy for JEndgameStrategy {
             .unwrap_or(false);
         if sell_blocks_primary_buy
             || discount_reload_velocity_blocks(jcfg, plan.tier, side, gz, _spot_signal)
-            || post_target_primary_add_blocks(
-                jcfg,
-                state,
-                plan.tier,
-                side,
-                winner_ask,
-                gz,
-                _spot_signal,
-                projected_pnl,
-            )
             || choppy_primary_add_velocity_blocks(
                 jcfg,
                 state,
@@ -1178,7 +1139,8 @@ impl TradeStrategy for JEndgameStrategy {
             EndgameTier::DiscountReload => "discount_reload",
             EndgameTier::FinalSeal => "final_seal",
         };
-        let mode = "limit";
+        let order_type = j_buy_order_type(jcfg);
+        let mode = order_type.as_str();
 
         if let Some(sell) = sell_rescue {
             signals.push(sell);
@@ -1190,7 +1152,7 @@ impl TradeStrategy for JEndgameStrategy {
             }
             signals.push(OrderSignal::buy(
                 side,
-                j_buy_order_type(jcfg),
+                order_type,
                 usd,
                 max_pay,
                 format!(
@@ -2167,60 +2129,6 @@ mod tests {
                 smoothed_velocity_usd_per_sec: Some(-1.12),
                 ..Default::default()
             },
-        ));
-    }
-
-    #[test]
-    fn post_target_primary_add_requires_stronger_confirmation() {
-        let mut cfg = test_config();
-        cfg.j_endgame.target_profit_usd = 1.0;
-        cfg.j_endgame.full_size_gap_z = 1.8;
-        cfg.j_endgame.mom_full_vel_usd_per_sec = 2.0;
-        cfg.j_endgame.discount_reload_max_ask = 0.74;
-        let state = JWindowState {
-            rescue_spent_usd: 6.0,
-            primary_side: Some("DOWN".to_string()),
-            ..Default::default()
-        };
-
-        assert!(post_target_primary_add_blocks(
-            &cfg.j_endgame,
-            &state,
-            EndgameTier::FinalSeal,
-            "DOWN",
-            0.84,
-            -1.55,
-            SpotSignalSnapshot {
-                smoothed_velocity_usd_per_sec: Some(-0.06),
-                ..Default::default()
-            },
-            1.29,
-        ));
-        assert!(!post_target_primary_add_blocks(
-            &cfg.j_endgame,
-            &state,
-            EndgameTier::FinalSeal,
-            "DOWN",
-            0.84,
-            -1.88,
-            SpotSignalSnapshot {
-                smoothed_velocity_usd_per_sec: Some(-0.06),
-                ..Default::default()
-            },
-            1.05,
-        ));
-        assert!(!post_target_primary_add_blocks(
-            &cfg.j_endgame,
-            &state,
-            EndgameTier::FinalSeal,
-            "DOWN",
-            0.78,
-            -1.50,
-            SpotSignalSnapshot {
-                smoothed_velocity_usd_per_sec: Some(-0.06),
-                ..Default::default()
-            },
-            1.05,
         ));
     }
 

@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GEM Dashboard</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #0d1117;
+      color: #c9d1d9;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    header {
+      padding: 10px 16px;
+      border-bottom: 1px solid #30363d;
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    header .title { color: #58a6ff; font-weight: 700; }
+    header .pill {
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #21262d;
+      border: 1px solid #30363d;
+      font-size: 12px;
+    }
+    header .pill.live { color: #3fb950; border-color: #238636; }
+    header .pill.stop { color: #f85149; border-color: #da3633; }
+    header .pill.off { color: #8b949e; }
+    #status { margin-left: auto; color: #8b949e; font-size: 12px; }
+    pre {
+      margin: 0;
+      padding: 12px 16px 24px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .ansi-bright { font-weight: 700; }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="title">GEM Dashboard</span>
+    <span id="mode" class="pill off">connecting…</span>
+    <span id="shutdown" class="pill off" style="display:none">shutdown pending</span>
+    <span id="status">SSE …</span>
+  </header>
+  <pre id="screen">Waiting for bot snapshot…</pre>
+  <script>
+    const screen = document.getElementById('screen');
+    const status = document.getElementById('status');
+    const modeEl = document.getElementById('mode');
+    const shutdownEl = document.getElementById('shutdown');
+
+    function stripAnsi(s) {
+      return s.replace(/\x1b\[[0-9;]*m/g, '');
+    }
+
+    function applySnapshot(snap) {
+      const lines = snap.terminal_lines || [];
+      screen.textContent = lines.map(stripAnsi).join('\n');
+      const ex = snap.execution || {};
+      const live = ex.mode === 'live';
+      modeEl.textContent = live
+        ? (ex.dry_run ? 'LIVE dry-run' : 'LIVE')
+        : 'PAPER';
+      modeEl.className = 'pill ' + (live ? 'live' : 'off');
+      const pending = snap.meta && snap.meta.shutdown_pending;
+      shutdownEl.style.display = pending ? 'inline-block' : 'none';
+      if (snap.updated_at_ms) {
+        status.textContent = 'updated ' + new Date(snap.updated_at_ms).toLocaleTimeString();
+      }
+    }
+
+    const es = new EventSource('/api/events');
+    es.onmessage = (ev) => {
+      try {
+        applySnapshot(JSON.parse(ev.data));
+      } catch (e) {
+        status.textContent = 'parse error';
+      }
+    };
+    es.onerror = () => {
+      status.textContent = 'SSE disconnected — retrying…';
+    };
+
+    fetch('/api/state').then(r => r.json()).then(applySnapshot).catch(() => {});
+  </script>
+</body>
+</html>

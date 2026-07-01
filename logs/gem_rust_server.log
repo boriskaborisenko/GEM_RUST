@@ -1,0 +1,593 @@
+[LIVE] PROFILE: DRY-RUN | deposit-wallet POLY_1271 | BUY market FOK | SELL market FOK | dryRun=true
+[LIVE] CLOB auth ok | owner/signer=0xcf0ec9c7289f3584ca2509a0957f1d6b17fc3a85 | deposit=0xc106F01fd2b4182bd4B05694F25f557E16De6763
+[LIVE] owner matches POLY_RELAYER_ADDRESS — expected for deposit-wallet accounts
+Synchronizing clock with Polymarket server...
+Clock synchronized! Offset: -8ms
+Инициализация ATR для BTC (BTCUSDT)...
+[LLM] Disabled | config llm.enabled=false
+[LIVE] Strategy bank synced from CLOB collateral: $8.50
+[LIVE] owner/signer=0xcf0ec9c7289f3584ca2509a0957f1d6b17fc3a85 | deposit=0xc106F01fd2b4182bd4B05694F25f557E16De6763
+[LIVE] CLOB ready | balance=$8.50 | allowances=3 | dry_run=true
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTC] Подписка на kline.1.BTCUSDT
+[SERVER] background worker pid 50258 | dashboard http://127.0.0.1:8787
+[SERVER] Dashboard at http://127.0.0.1:8787 (read-only, stop via terminal)
+[SERVER] SIGTERM — graceful shutdown initiated
+[LIVE] PROFILE: DRY-RUN | deposit-wallet POLY_1271 | BUY market FOK | SELL market FOK | dryRun=true
+[LIVE] CLOB auth ok | owner/signer=0xcf0ec9c7289f3584ca2509a0957f1d6b17fc3a85 | deposit=0xc106F01fd2b4182bd4B05694F25f557E16De6763
+[LIVE] owner matches POLY_RELAYER_ADDRESS — expected for deposit-wallet accounts
+Synchronizing clock with Polymarket server...
+Clock synchronized! Offset: -376ms
+Инициализация ATR для BTC (BTCUSDT)...
+[LLM] Disabled | config llm.enabled=false
+[LIVE] Strategy bank synced from CLOB collateral: $8.50
+[LIVE] owner/signer=0xcf0ec9c7289f3584ca2509a0957f1d6b17fc3a85 | deposit=0xc106F01fd2b4182bd4B05694F25f557E16De6763
+[LIVE] CLOB ready | balance=$8.50 | allowances=3 | dry_run=true
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTC] Подписка на kline.1.BTCUSDT
+[SERVER] background worker pid 96865 | dashboard http://127.0.0.1:8787
+[SERVER] Dashboard at http://127.0.0.1:8787 (read-only, stop via terminal)
+[LIVE] PROFILE: DRY-RUN | deposit-wallet POLY_1271 | BUY market FOK | SELL market FOK | dryRun=true
+[LIVE] CLOB auth ok | owner/signer=0xcf0ec9c7289f3584ca2509a0957f1d6b17fc3a85 | deposit=0xc106F01fd2b4182bd4B05694F25f557E16De6763
+[LIVE] owner matches POLY_RELAYER_ADDRESS — expected for deposit-wallet accounts
+Synchronizing clock with Polymarket server...
+Clock synchronized! Offset: -319ms
+Инициализация ATR для BTC (BTCUSDT)...
+[LLM] Disabled | config llm.enabled=false
+[LIVE] Strategy bank synced from CLOB collateral: $8.50
+[LIVE] owner/signer=0xcf0ec9c7289f3584ca2509a0957f1d6b17fc3a85 | deposit=0xc106F01fd2b4182bd4B05694F25f557E16De6763
+[LIVE] CLOB ready | balance=$8.50 | allowances=3 | dry_run=true
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTC] Подписка на kline.1.BTCUSDT
+[SERVER] background worker pid 4176 | dashboard http://127.0.0.1:8787
+[SERVER] Dashboard at http://127.0.0.1:8787 (read-only, stop via terminal)
+[LIVE] PROFILE: DRY-RUN | deposit-wallet POLY_1271 | BUY market FOK | SELL market FOK | dryRun=true
+[LIVE] CLOB auth ok | owner/signer=0xcf0ec9c7289f3584ca2509a0957f1d6b17fc3a85 | deposit=0xc106F01fd2b4182bd4B05694F25f557E16De6763
+[LIVE] owner matches POLY_RELAYER_ADDRESS — expected for deposit-wallet accounts
+Synchronizing clock with Polymarket server...
+Clock synchronized! Offset: -603ms
+Инициализация ATR для BTC (BTCUSDT)...
+[LLM] Disabled | config llm.enabled=false
+[LIVE] Strategy bank synced from CLOB collateral: $8.50
+[LIVE] owner/signer=0xcf0ec9c7289f3584ca2509a0957f1d6b17fc3a85 | deposit=0xc106F01fd2b4182bd4B05694F25f557E16De6763
+[LIVE] CLOB ready | balance=$8.50 | allowances=3 | dry_run=true
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTC] Подписка на kline.1.BTCUSDT
+[SERVER] background worker pid 38823 | dashboard http://127.0.0.1:8787
+[SERVER] Dashboard at http://127.0.0.1:8787 (read-only, stop via terminal)
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9700 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#4 BUY DOWN $1.00 @ 0.9800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+
+>>>
+>>>
+>>> [LIVE DRY-RUN REJECT] W#8 BUY DOWN $1.00 @ 0.8800 — live_dry_run_sim_rejected: bad_price
+>>>
+>>>
+Synchronizing clock with Polymarket server...
+Clock synchronized! Offset: -632ms
+Инициализация ATR для BTC (BTCUSDT)...
+[LLM] Disabled | config llm.enabled=false
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTC] Подписка на kline.1.BTCUSDT
+[SERVER] background worker pid 70122 | dashboard http://127.0.0.1:8787
+[SERVER] Dashboard at http://127.0.0.1:8787 (read-only, stop via terminal)
+Synchronizing clock with Polymarket server...
+Clock synchronized! Offset: -168ms
+Инициализация ATR для BTC (BTCUSDT)...
+[LLM] Disabled | config llm.enabled=false
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTC] Подписка на kline.1.BTCUSDT
+[SERVER] background worker pid 74749 | dashboard http://127.0.0.1:8787
+[SERVER] Dashboard at http://127.0.0.1:8787 (read-only, stop via terminal)
+Synchronizing clock with Polymarket server...
+Clock synchronized! Offset: -940ms
+Инициализация ATR для BTC (BTCUSDT)...
+[LLM] Disabled | config llm.enabled=false
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTC] Подписка на kline.1.BTCUSDT
+[SERVER] background worker pid 17436 | dashboard http://127.0.0.1:8787
+[SERVER] Dashboard at http://127.0.0.1:8787 (read-only, stop via terminal)
+Synchronizing clock with Polymarket server...
+Clock synchronized! Offset: -11ms
+Инициализация ATR для BTC (BTCUSDT)...
+[LLM] Disabled | config llm.enabled=false
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTC] Подписка на kline.1.BTCUSDT
+[SERVER] background worker pid 59688 | dashboard http://127.0.0.1:8787
+[SERVER] Dashboard at http://127.0.0.1:8787 (read-only, stop via terminal)
+Synchronizing clock with Polymarket server...
+Clock synchronized! Offset: -845ms
+Инициализация ATR для BTC (BTCUSDT)...
+[LLM] Disabled | config llm.enabled=false
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTC] Подписка на kline.1.BTCUSDT
+[SERVER] background worker pid 1429 | dashboard http://127.0.0.1:8787
+[SERVER] Dashboard at http://127.0.0.1:8787 (read-only, stop via terminal)
+Synchronizing clock with Polymarket server...
+Clock synchronized! Offset: -885ms
+Инициализация ATR для BTC (BTCUSDT)...
+[LLM] Disabled | config llm.enabled=false
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTC] Подписка на kline.1.BTCUSDT
+[SERVER] background worker pid 46021 | dashboard http://127.0.0.1:8787
+[SERVER] Dashboard at http://127.0.0.1:8787 (read-only, stop via terminal)
+Synchronizing clock with Polymarket server...
+Clock synchronized! Offset: -544ms
+Инициализация ATR для BTC (BTCUSDT)...
+[LLM] Disabled | config llm.enabled=false
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTC] Подписка на kline.1.BTCUSDT
+[SERVER] background worker pid 60511 | dashboard http://127.0.0.1:8787
+[SERVER] Dashboard at http://127.0.0.1:8787 (read-only, stop via terminal)
+[CEX Micro] WS error: IO error: Connection reset by peer (os error 54)
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTCUSDT] Сбой WebSocket: IO error: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof — reconnect
+[ATR BTC] WebSocket disconnected — REST refresh + reconnect
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[ATR BTC] Подписка на kline.1.BTCUSDT
+Synchronizing clock with Polymarket server...
+Clock synchronized! Offset: -158ms
+Инициализация ATR для BTC (BTCUSDT)...
+[LLM] Disabled | config llm.enabled=false
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTC] Подписка на kline.1.BTCUSDT
+[SERVER] background worker pid 7502 | dashboard http://127.0.0.1:8787
+[SERVER] Dashboard at http://127.0.0.1:8787 (read-only, stop via terminal)
+Synchronizing clock with Polymarket server...
+Clock synchronized! Offset: -632ms
+Инициализация ATR для BTC (BTCUSDT)...
+[LLM] Disabled | config llm.enabled=false
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTC] Подписка на kline.1.BTCUSDT
+[SERVER] background worker pid 43500 | dashboard http://127.0.0.1:8787
+[SERVER] Dashboard at http://127.0.0.1:8787 (read-only, stop via terminal)

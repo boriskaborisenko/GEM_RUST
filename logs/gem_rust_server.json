@@ -1,0 +1,11 @@
+{
+  "pid": 43500,
+  "bind": "127.0.0.1:8787",
+  "asset": "BTC",
+  "interval": "5m",
+  "execution_mode": "paper",
+  "dry_run": false,
+  "strategy": "j_endgame",
+  "started_at_ms": 1782894103918,
+  "run_log_dir": "logs/runs/20260701_082143_btc_5m_j_endgame"
+}

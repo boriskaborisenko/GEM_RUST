@@ -65,7 +65,7 @@ pub struct WindowCloseMeta {
     pub would_redeem_hold: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PortfolioSnapshot {
     pub starting_bank: f64,
     pub available_cash: f64,
@@ -75,6 +75,7 @@ pub struct PortfolioSnapshot {
     pub traded_windows: u32,
     pub open_traded_windows: u32,
     pub no_trade_windows: u32,
+    pub open_waiting_windows: u32,
     pub entered_windows: u32,
     pub closed_windows: u32,
     pub wins: u32,
@@ -167,10 +168,11 @@ impl Portfolio {
         win.spent > 1e-9 || win.trades.iter().any(|t| t.trade_type == "BUY")
     }
 
-    fn dashboard_window_counts(&self) -> (u32, u32, u32, u32) {
+    fn dashboard_window_counts(&self) -> (u32, u32, u32, u32, u32) {
         let mut traded = 0;
         let mut open_traded = 0;
         let mut no_trade = 0;
+        let mut open_waiting = 0;
 
         for win in self.windows.values() {
             if win.window_number == 0 {
@@ -183,16 +185,23 @@ impl Portfolio {
                 }
             } else if Self::is_closed_or_skipped(&win.status) {
                 no_trade += 1;
+            } else if win.role == "CURRENT" {
+                open_waiting += 1;
             }
         }
 
-        let total = traded + no_trade;
-        (total, traded, open_traded, no_trade)
+        let total = traded + no_trade + open_waiting;
+        (total, traded, open_traded, no_trade, open_waiting)
     }
 
     pub fn get_portfolio_snapshot(&self) -> PortfolioSnapshot {
-        let (total_windows, traded_windows, open_traded_windows, no_trade_windows) =
-            self.dashboard_window_counts();
+        let (
+            total_windows,
+            traded_windows,
+            open_traded_windows,
+            no_trade_windows,
+            open_waiting_windows,
+        ) = self.dashboard_window_counts();
         PortfolioSnapshot {
             starting_bank: self.starting_bank,
             available_cash: self.available_cash,
@@ -202,6 +211,7 @@ impl Portfolio {
             traded_windows,
             open_traded_windows,
             no_trade_windows,
+            open_waiting_windows,
             entered_windows: self.entered_windows,
             closed_windows: self.closed_windows,
             wins: self.wins,
@@ -891,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_ignores_warmup_current_and_next_without_trades() {
+    fn dashboard_counts_current_window_before_first_trade() {
         let mut portfolio =
             Portfolio::new_with_log_dir(10.0, "/tmp/gem_rust_dashboard_startup_test".into());
 
@@ -948,9 +958,10 @@ mod tests {
         );
 
         let snapshot = portfolio.get_portfolio_snapshot();
-        assert_eq!(snapshot.total_windows, 0);
+        assert_eq!(snapshot.total_windows, 1);
         assert_eq!(snapshot.traded_windows, 0);
         assert_eq!(snapshot.open_traded_windows, 0);
         assert_eq!(snapshot.no_trade_windows, 0);
+        assert_eq!(snapshot.open_waiting_windows, 1);
     }
 }

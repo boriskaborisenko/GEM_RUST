@@ -296,8 +296,9 @@ fn effective_conf_enter(cfg: &JEndgameConfig, ask: f64, gz: f64) -> f64 {
 }
 
 /// USD to deploy on `winner` at `ask` so redeem PnL reaches `target_profit`.
-/// At ask=0.99 the edge is ~1% so recovering a -$2 hole needs ~$300 — this
-/// makes the planner size accordingly (then budget caps apply).
+/// This is the old J behavior that made discounted prices useful: when the
+/// contract drops from a rich entry into a good edge, the planner can add enough
+/// size to make the whole window worth holding.
 fn usd_to_close_profit_gap(
     win_state: &WindowState,
     winner: &str,
@@ -322,6 +323,14 @@ fn usd_to_close_profit_gap(
 
 fn has_deployed_exposure(win_state: &WindowState) -> bool {
     win_state.spent > 1e-9 || win_state.up_shares > 1e-9 || win_state.down_shares > 1e-9
+}
+
+fn has_same_side_primary_exposure(
+    state: &JWindowState,
+    win_state: &WindowState,
+    winner: &str,
+) -> bool {
+    state.primary_side.as_deref() == Some(winner) || shares_for_side(winner, win_state) > 1e-9
 }
 
 fn shares_for_side(side: &str, win_state: &WindowState) -> f64 {
@@ -413,6 +422,36 @@ pub fn chop_adjusted_primary_exposure_cap_usd(
     }
 }
 
+fn value_adjusted_primary_exposure_cap_usd(
+    config: &Config,
+    ask: f64,
+    mid_cross: &MidCrossSnapshot,
+    base_cap: f64,
+) -> f64 {
+    if ask > 0.0 && ask <= config.j_endgame.cheap_max_ask {
+        base_cap
+    } else {
+        chop_adjusted_primary_exposure_cap_usd(config, mid_cross, base_cap)
+    }
+}
+
+fn expensive_early_tail_cap_usd(
+    config: &Config,
+    ask: f64,
+    gz: f64,
+    elapsed_pct: f64,
+) -> Option<f64> {
+    let cfg = &config.j_endgame;
+    if ask < 0.93 || elapsed_pct >= 70.0 || gz.abs() >= cfg.expensive_min_gap_z {
+        return None;
+    }
+    let first_clip = cfg
+        .effective_first_clip_usd(&config.session)
+        .max(cfg.effective_probe_clip_usd(&config.session))
+        .max(1.0);
+    Some((first_clip * 0.25).max(cfg.effective_probe_clip_usd(&config.session).max(1.0)))
+}
+
 /// Per-tick clip cap: probe on first buy, then ramp with gap_z, time, and ask cheapness.
 fn effective_max_clip_usd(
     config: &Config,
@@ -442,9 +481,8 @@ fn effective_max_clip_usd(
 
 /// Target-exposure endgame: given composite confidence, compute how much USD we
 /// WANT on the winner and buy only the positive delta vs what's already deployed.
-/// Target is the max of (a) confidence-scaled budget and (b) USD needed to reach
-/// `target_profit_usd` at the current ask — so buying @0.99 gets sized for the
-/// 1% edge instead of deploying a useless $6 clip.
+/// Target is the max of confidence-scaled budget and the old J profit-gap solve,
+/// so discounted prices can trigger meaningful add-ons instead of being ignored.
 pub fn plan_endgame_composite(
     config: &Config,
     state: &JWindowState,
@@ -500,11 +538,15 @@ pub fn plan_endgame_composite_with_chop(
     let max_rescue = cfg.effective_max_rescue_usd(&config.session);
     let probe_clip = cfg.effective_probe_clip_usd(&config.session);
     let min_increment = cfg.effective_min_increment_usd(&config.session);
-    let exposure_cap = chop_adjusted_primary_exposure_cap_usd(
+    let exposure_cap = value_adjusted_primary_exposure_cap_usd(
         config,
+        ask,
         mid_cross,
         tail_cut_exposure_cap_usd(config, ask).min(max_rescue),
     );
+    let exposure_cap = expensive_early_tail_cap_usd(config, ask, gz, elapsed_pct)
+        .map(|early_cap| exposure_cap.min(early_cap))
+        .unwrap_or(exposure_cap);
     if exposure_cap <= 1e-9 || state.rescue_spent_usd + 1e-9 >= exposure_cap {
         return None;
     }
@@ -517,8 +559,16 @@ pub fn plan_endgame_composite_with_chop(
     }
     let conf_target = (eff * max_rescue).min(exposure_cap);
     let remaining = rescue_budget(config, state, win_state, available_cash);
-    let profit_increment = if has_deployed_exposure(win_state) {
-        usd_to_close_profit_gap(win_state, winner, ask, cfg.target_profit_usd, fee_bps)
+    let profit_increment = if has_deployed_exposure(win_state)
+        && has_same_side_primary_exposure(state, win_state, winner)
+    {
+        usd_to_close_profit_gap(
+            win_state,
+            winner,
+            ask,
+            cfg.effective_target_profit_usd(&config.session),
+            fee_bps,
+        )
     } else {
         0.0
     };
@@ -610,8 +660,9 @@ pub fn plan_discount_reload_with_chop(
     }
 
     let probe_clip = cfg.effective_probe_clip_usd(&config.session);
-    let tail_left = chop_adjusted_primary_exposure_cap_usd(
+    let tail_left = value_adjusted_primary_exposure_cap_usd(
         config,
+        ask,
         mid_cross,
         tail_cut_exposure_cap_usd(config, ask),
     ) - state.rescue_spent_usd;
@@ -1016,6 +1067,43 @@ mod tests {
     }
 
     #[test]
+    fn expensive_early_tail_starts_small_then_waits_for_confirmation() {
+        let j = {
+            let mut c = JEndgameConfig::default();
+            c.conf_enter = 0.5;
+            c.expensive_min_gap_z = 1.25;
+            c.final_seal_max_ask = 0.99;
+            c.taker_max_ask = 0.99;
+            c.max_rescue_usd = 100.0;
+            c.max_usd_per_window = 100.0;
+            c.probe_clip_usd = 1.0;
+            c.first_clip_usd = 12.5;
+            c.max_clip_usd = 25.0;
+            c.min_increment_usd = 5.0;
+            c.tail_cap_ask97_usd = 30.0;
+            c
+        };
+        let cfg = full_cfg(j);
+        let win = win_state_zero();
+        let mut state = JWindowState::default();
+
+        let p1 = plan_endgame_composite(&cfg, &state, &win, "DOWN", 0.93, -1.0, 0.56, 61.0, 500.0)
+            .expect("early expensive probe should still enter");
+        assert!((p1.clip_usd - 3.125).abs() < 1e-9, "clip={}", p1.clip_usd);
+        state.rescue_spent_usd += p1.clip_usd;
+
+        assert!(
+            plan_endgame_composite(&cfg, &state, &win, "DOWN", 0.94, -1.03, 0.58, 62.0, 500.0)
+                .is_none(),
+            "second early expensive buy should wait for confirmation"
+        );
+
+        let p2 = plan_endgame_composite(&cfg, &state, &win, "DOWN", 0.94, -1.35, 0.72, 63.0, 500.0)
+            .expect("stronger gap confirms follow-up");
+        assert!(p2.clip_usd >= 5.0, "clip={}", p2.clip_usd);
+    }
+
+    #[test]
     fn tail_cut_blocks_fresh_entry_above_97c() {
         let j = {
             let mut c = JEndgameConfig::default();
@@ -1227,6 +1315,54 @@ mod tests {
     }
 
     #[test]
+    fn value_price_follow_up_ignores_chop_cap_and_uses_profit_gap() {
+        let j = {
+            let mut c = JEndgameConfig::default();
+            c.conf_enter = 0.5;
+            c.target_profit_usd = 1.0;
+            c.max_rescue_usd = 75.0;
+            c.max_usd_per_window = 80.0;
+            c.probe_clip_usd = 1.0;
+            c.first_clip_usd = 8.0;
+            c.max_clip_usd = 25.0;
+            c.min_increment_usd = 1.0;
+            c.tail_cap_ask70_usd = 75.0;
+            c.cheap_max_ask = 0.88;
+            c.max_crosses_directional = 6;
+            c.max_sig_crosses_directional = 3;
+            c.final_seal_max_ask = 0.99;
+            c.taker_max_ask = 0.99;
+            c.fee_rate_bps = Some(0.0);
+            c
+        };
+        let cfg = full_cfg(j);
+        let mut win = win_state_zero();
+        win.spent = 10.0;
+        win.up_shares = 10.0 / 0.95;
+        let state = JWindowState {
+            rescue_spent_usd: 10.0,
+            primary_side: Some("UP".to_string()),
+            clips_filled: 1,
+            ..Default::default()
+        };
+        let choppy = MidCrossSnapshot {
+            cross_count: 12,
+            significant_cross_count: 6,
+            ..Default::default()
+        };
+
+        let plan = plan_endgame_composite_with_chop(
+            &cfg, &state, &win, "UP", 0.70, 1.45, 0.8, 82.0, 500.0, &choppy,
+        )
+        .expect("value follow-up should survive chop cap");
+        assert!(
+            plan.clip_usd > 1.0,
+            "value follow-up should add more than probe, clip={}",
+            plan.clip_usd
+        );
+    }
+
+    #[test]
     fn discount_reload_does_not_average_losing_primary() {
         let cfg = full_cfg(JEndgameConfig::default());
         let mut win = win_state_zero();
@@ -1317,12 +1453,11 @@ mod tests {
     }
 
     #[test]
-    fn composite_aborts_impossible_profit_gap_at_high_ask() {
-        // Reproduce log economics: $2 insurance lost, need target +$1 at ask 0.99.
+    fn composite_sizes_from_confidence_after_insurance_loss() {
+        // After insurance loss, composite still scales from confidence — no $1 profit floor.
         let j = {
             let mut c = JEndgameConfig::default();
             c.conf_enter = 0.5;
-            c.target_profit_usd = 1.0;
             c.max_rescue_usd = 75.0;
             c.max_usd_per_window = 80.0;
             c.probe_clip_usd = 1.0;
@@ -1341,11 +1476,9 @@ mod tests {
             insurance_clips: 1,
             ..Default::default()
         };
-        // Need roughly $300 to go from -2 to +1 at 0.99. With a $75 rescue cap,
-        // this is a controlled no-trade instead of chasing an unreachable target.
-        assert!(
-            plan_endgame_composite(&cfg, &state, &win, "UP", 0.99, 2.0, 0.8, 65.0, 500.0).is_none()
-        );
+        let plan = plan_endgame_composite(&cfg, &state, &win, "UP", 0.96, 2.0, 0.8, 65.0, 500.0)
+            .expect("confidence-sized add after insurance loss");
+        assert!(plan.clip_usd > 0.0);
     }
 
     #[test]
