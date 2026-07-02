@@ -639,3 +639,64 @@ Clock synchronized! Offset: -961ms
 [CEX Micro] Subscribed to publicTrade.BTCUSDT
 [ATR BTCUSDT] Подключение к WebSocket Bybit...
 [ATR BTC] Подписка на kline.1.BTCUSDT
+Synchronizing clock with Polymarket server...
+Clock synchronized! Offset: -255ms
+Инициализация ATR для BTC (BTCUSDT)...
+[LLM] Disabled | config llm.enabled=false
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[SERVER] background worker pid 41732 | dashboard http://127.0.0.1:8787
+[SERVER] Dashboard at http://127.0.0.1:8787 (read-only, stop via terminal)
+[ATR BTC] Подписка на kline.1.BTCUSDT
+[CEX Micro] WS error: IO error: Connection reset by peer (os error 54)
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[ATR BTC] stale > 120s — forcing REST refresh
+[CEX Micro] WS error: IO error: Operation timed out (os error 60)
+[ATR BTCUSDT] Сбой WebSocket: IO error: Operation timed out (os error 60) — reconnect
+[ATR BTC] WebSocket disconnected — REST refresh + reconnect
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTC] Подписка на kline.1.BTCUSDT

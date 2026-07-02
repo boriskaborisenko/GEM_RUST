@@ -288,6 +288,14 @@ cd ~/bots/gem-btc-5m
 ./target/release/gem_rust --server --stop
 git pull
 cargo build --release
+./target/release/gem_rust BTC 5m --paper --server --server-bind 0.0.0.0:8787
+```
+
+```bash
+cd ~/bots/gem-btc-5m
+./target/release/gem_rust --server --stop
+git pull
+cargo build --release
 ./target/release/gem_rust BTC 5m --live --server --server-bind 0.0.0.0:8787
 ```
 
