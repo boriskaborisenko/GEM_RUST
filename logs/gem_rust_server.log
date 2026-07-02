@@ -618,3 +618,24 @@ Clock synchronized! Offset: -61ms
 [ATR BTC] Подписка на kline.1.BTCUSDT
 [SERVER] background worker pid 92343 | dashboard http://127.0.0.1:8787
 [SERVER] Dashboard at http://127.0.0.1:8787 (read-only, stop via terminal)
+Synchronizing clock with Polymarket server...
+Clock synchronized! Offset: -961ms
+Инициализация ATR для BTC (BTCUSDT)...
+[LLM] Disabled | config llm.enabled=false
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[SERVER] background worker pid 69562 | dashboard http://127.0.0.1:8787
+[SERVER] Dashboard at http://127.0.0.1:8787 (read-only, stop via terminal)
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTC] Подписка на kline.1.BTCUSDT
+[ATR BTCUSDT] Сбой WebSocket: IO error: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof — reconnect
+[ATR BTC] WebSocket disconnected — REST refresh + reconnect
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[ATR BTC] Подписка на kline.1.BTCUSDT
+[CEX Micro] WS error: IO error: Connection reset by peer (os error 54)
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[CEX Micro] WS error: IO error: Connection reset by peer (os error 54)
+[ATR BTCUSDT] Сбой WebSocket: IO error: Connection reset by peer (os error 54) — reconnect
+[ATR BTC] WebSocket disconnected — REST refresh + reconnect
+[CEX Micro] Subscribed to publicTrade.BTCUSDT
+[ATR BTCUSDT] Подключение к WebSocket Bybit...
+[ATR BTC] Подписка на kline.1.BTCUSDT

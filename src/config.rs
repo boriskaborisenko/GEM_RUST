@@ -1507,7 +1507,7 @@ mod tests {
     fn j_endgame_reads_camel_case_from_config_json() {
         let cfg = Config::load("config.json").expect("config.json");
         assert!(
-            (cfg.j_endgame.clip_usd - 10.0).abs() < 1e-9,
+            (cfg.j_endgame.clip_usd - 1.6).abs() < 1e-9,
             "clip_usd={}",
             cfg.j_endgame.clip_usd
         );
@@ -1519,15 +1519,15 @@ mod tests {
         assert!((cfg.j_endgame.max_usd_per_window - 80.0).abs() < 1e-9);
         assert!((cfg.j_endgame.max_rescue_usd - 75.0).abs() < 1e-9);
         assert!(cfg.j_endgame.bank_sizing_enabled);
-        assert!((cfg.j_endgame.effective_max_usd_per_window(&cfg.session) - 100.0).abs() < 1e-9);
-        assert!((cfg.j_endgame.effective_max_rescue_usd(&cfg.session) - 93.75).abs() < 1e-9);
-        assert!((cfg.j_endgame.effective_first_clip_usd(&cfg.session) - 10.0).abs() < 1e-9);
-        assert!((cfg.j_endgame.effective_max_clip_usd(&cfg.session) - 43.75).abs() < 1e-9);
+        assert!((cfg.j_endgame.effective_max_usd_per_window(&cfg.session) - 16.0).abs() < 1e-9);
+        assert!((cfg.j_endgame.effective_max_rescue_usd(&cfg.session) - 15.0).abs() < 1e-9);
+        assert!((cfg.j_endgame.effective_first_clip_usd(&cfg.session) - 1.6).abs() < 1e-9);
+        assert!((cfg.j_endgame.effective_max_clip_usd(&cfg.session) - 7.0).abs() < 1e-9);
         assert!((cfg.j_endgame.effective_target_profit_usd(&cfg.session) - 1.0).abs() < 1e-9);
         assert!(
             (cfg.j_endgame
                 .effective_discount_reload_clip_usd(&cfg.session)
-                - 12.5)
+                - 2.0)
                 .abs()
                 < 1e-9
         );
@@ -1544,6 +1544,7 @@ mod tests {
         assert!((cfg.j_endgame.max_clip_usd - 35.0).abs() < 1e-9);
         assert!((cfg.j_endgame.insurance_max_ask - 0.18).abs() < 1e-9);
         assert!((cfg.j_endgame.final_seal_max_ask - 0.99).abs() < 1e-9);
+        assert!((cfg.j_endgame.final_seal_min_gap_z - 0.8).abs() < 1e-9);
         assert!((cfg.j_endgame.min_ptb_dist_pct - 0.05).abs() < 1e-9);
         assert!((cfg.j_endgame.cheap_tier_usd - 9.0).abs() < 1e-9);
         assert!((cfg.j_endgame.late_tier_usd - 12.0).abs() < 1e-9);
@@ -1551,6 +1552,9 @@ mod tests {
         assert!((cfg.j_endgame.insurance_clip_usd - 1.0).abs() < 1e-9);
         assert!((cfg.j_endgame.probe_clip_usd - 1.0).abs() < 1e-9);
         assert!(!cfg.j_endgame.impulse_enabled);
+        assert!(!cfg.j_endgame.scout_winner_enabled);
+        assert!(!cfg.j_endgame.scout_pair_enabled);
+        assert!(!cfg.j_endgame.mid_value_enabled);
 
         let mut small = cfg.session.clone();
         small.starting_bank = 10.0;

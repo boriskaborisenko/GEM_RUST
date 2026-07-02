@@ -664,23 +664,6 @@ fn value_adjusted_primary_exposure_cap_usd(
     }
 }
 
-fn expensive_early_tail_cap_usd(
-    config: &Config,
-    ask: f64,
-    gz: f64,
-    elapsed_pct: f64,
-) -> Option<f64> {
-    let cfg = &config.j_endgame;
-    if ask < 0.93 || elapsed_pct >= 70.0 || gz.abs() >= cfg.expensive_min_gap_z {
-        return None;
-    }
-    let first_clip = cfg
-        .effective_first_clip_usd(&config.session)
-        .max(cfg.effective_probe_clip_usd(&config.session))
-        .max(1.0);
-    Some((first_clip * 0.25).max(cfg.effective_probe_clip_usd(&config.session).max(1.0)))
-}
-
 /// Per-tick clip cap: probe on first buy, then ramp with gap_z, time, and ask cheapness.
 fn effective_max_clip_usd(
     config: &Config,
@@ -773,10 +756,10 @@ pub fn plan_endgame_composite_with_chop(
         mid_cross,
         tail_cut_exposure_cap_usd(config, ask).min(max_rescue),
     );
-    let exposure_cap = expensive_early_tail_cap_usd(config, ask, gz, elapsed_pct)
-        .map(|early_cap| exposure_cap.min(early_cap))
-        .unwrap_or(exposure_cap);
     if exposure_cap <= 1e-9 || state.rescue_spent_usd + 1e-9 >= exposure_cap {
+        return None;
+    }
+    if state.rescue_spent_usd > 1e-9 && ask > cfg.expensive_ask_threshold {
         return None;
     }
     let mut eff = ramp(confidence, enter, 1.0);
@@ -991,9 +974,9 @@ pub fn plan_j_window(
     secs_to_end: i64,
     elapsed_pct: f64,
     current_atr: f64,
-    min_atr: f64,
+    _min_atr: f64,
     mid_cross: &MidCrossSnapshot,
-    cex: &CexMicroSnapshot,
+    _cex: &CexMicroSnapshot,
     allow_directional: bool,
     confidence: f64,
     available_cash: f64,
@@ -1008,64 +991,13 @@ pub fn plan_j_window(
     }
     let phase = detect_phase(elapsed_pct, secs_to_end, cfg, mid_cross);
 
-    // Early window: only insurance optionality is allowed; mid window may take
-    // one cheap value probe if PTB/gap/book/CEX are not against it.
-    if let JWindowPhase::Warmup = phase {
-        return None;
-    }
-    if let JWindowPhase::Insurance = phase {
-        return plan_insurance(
-            cfg,
-            state,
-            elapsed_pct,
-            spot,
-            ptb,
-            prices,
-            mid_cross,
-            min_atr,
-            current_atr,
-        );
-    }
-    if let Some(plan) = plan_scout_pair_lock(
-        config,
-        state,
-        win_state,
-        prices,
-        secs_to_end,
-        available_cash,
+    // Endgame-only J: no scout, pair-lock, mid-value, or insurance buys before
+    // the endgame phase.
+    if matches!(
+        phase,
+        JWindowPhase::Warmup | JWindowPhase::Insurance | JWindowPhase::MidWindow
     ) {
-        return Some(plan);
-    }
-    if let JWindowPhase::MidWindow = phase {
-        if let Some(plan) = plan_scout_winner(
-            config,
-            state,
-            win_state,
-            current_winner,
-            prices,
-            secs_to_end,
-            available_cash,
-        ) {
-            return Some(plan);
-        }
-        if min_atr > 0.0 && current_atr < min_atr {
-            return None;
-        }
-        let dist = ptb_dist_pct(spot, ptb);
-        if cfg.min_ptb_dist_pct > 0.0 && dist.is_finite() && dist < cfg.min_ptb_dist_pct {
-            return None;
-        }
-        return plan_mid_value_probe(
-            config,
-            state,
-            win_state,
-            prices,
-            gz,
-            secs_to_end,
-            mid_cross,
-            cex,
-            available_cash,
-        );
+        return None;
     }
 
     // Endgame zone: flip-hedge first (defends a reversal), then discount reload
@@ -1386,6 +1318,44 @@ mod tests {
     }
 
     #[test]
+    fn window_planner_ignores_legacy_scout_mid_before_endgame() {
+        let mut j = JEndgameConfig::default();
+        j.scout_winner_enabled = true;
+        j.scout_pair_enabled = true;
+        j.mid_value_enabled = true;
+        j.insurance_enabled = true;
+        let cfg = full_cfg(j);
+        let prices = mid_value_prices(0.58, 0.43);
+        let mid = MidCrossSnapshot {
+            armed: true,
+            ..Default::default()
+        };
+
+        let plan = plan_j_window(
+            &cfg,
+            &JWindowState::default(),
+            &win_state_zero(),
+            &prices,
+            60_010.0,
+            60_000.0,
+            270,
+            10.0,
+            30.0,
+            0.0,
+            &mid,
+            &CexMicroSnapshot::default(),
+            true,
+            1.0,
+            1_000.0,
+        );
+
+        assert!(
+            plan.is_none(),
+            "J planner must stay endgame-only before endgame_secs"
+        );
+    }
+
+    #[test]
     fn confidence_zero_below_gap_floor() {
         let mut c = JEndgameConfig::default();
         c.final_seal_min_gap_z = 0.8;
@@ -1504,7 +1474,7 @@ mod tests {
     }
 
     #[test]
-    fn expensive_early_tail_starts_small_then_waits_for_confirmation() {
+    fn expensive_tail_allows_first_clip_but_blocks_repeats_until_value() {
         let j = {
             let mut c = JEndgameConfig::default();
             c.conf_enter = 0.5;
@@ -1524,19 +1494,19 @@ mod tests {
         let win = win_state_zero();
         let mut state = JWindowState::default();
 
-        let p1 = plan_endgame_composite(&cfg, &state, &win, "DOWN", 0.93, -1.0, 0.56, 61.0, 500.0)
-            .expect("early expensive probe should still enter");
-        assert!((p1.clip_usd - 3.125).abs() < 1e-9, "clip={}", p1.clip_usd);
+        let p1 = plan_endgame_composite(&cfg, &state, &win, "DOWN", 0.96, -1.35, 0.72, 61.0, 500.0)
+            .expect("expensive first probe should still enter with strong gap");
+        assert!((p1.clip_usd - 12.5).abs() < 1e-9, "clip={}", p1.clip_usd);
         state.rescue_spent_usd += p1.clip_usd;
 
         assert!(
-            plan_endgame_composite(&cfg, &state, &win, "DOWN", 0.94, -1.03, 0.58, 62.0, 500.0)
+            plan_endgame_composite(&cfg, &state, &win, "DOWN", 0.96, -1.80, 0.95, 62.0, 500.0)
                 .is_none(),
-            "second early expensive buy should wait for confirmation"
+            "second expensive buy should wait for a real price discount"
         );
 
-        let p2 = plan_endgame_composite(&cfg, &state, &win, "DOWN", 0.94, -1.35, 0.72, 63.0, 500.0)
-            .expect("stronger gap confirms follow-up");
+        let p2 = plan_endgame_composite(&cfg, &state, &win, "DOWN", 0.88, -1.35, 0.72, 63.0, 500.0)
+            .expect("value price confirms follow-up");
         assert!(p2.clip_usd >= 5.0, "clip={}", p2.clip_usd);
     }
 
@@ -1749,6 +1719,41 @@ mod tests {
         assert_eq!(plan.tier, EndgameTier::DiscountReload);
         assert_eq!(plan.side.as_deref(), Some("UP"));
         assert!((plan.clip_usd - 4.0).abs() < 1e-9, "clip={}", plan.clip_usd);
+    }
+
+    #[test]
+    fn discount_reload_uses_price_drop_even_when_composite_confidence_is_low() {
+        let j = {
+            let mut c = JEndgameConfig::default();
+            c.conf_enter = 0.58;
+            c.full_size_gap_z = 1.8;
+            c.discount_reload_enabled = true;
+            c.discount_reload_max_ask = 0.74;
+            c.discount_reload_min_drop = 0.12;
+            c.discount_reload_min_gap_z = 1.10;
+            c.discount_reload_clip_usd = 2.0;
+            c.discount_reload_max_usd = 6.0;
+            c.discount_reload_max_clips = 2;
+            c
+        };
+        let cfg = full_cfg(j);
+        let mut win = win_state_zero();
+        win.spent = 8.0;
+        win.up_shares = 8.0 / 0.98;
+        let state = JWindowState {
+            rescue_spent_usd: 8.0,
+            primary_side: Some("UP".to_string()),
+            clips_filled: 1,
+            ..Default::default()
+        };
+
+        let shallow = plan_discount_reload(&cfg, &state, &win, "UP", 0.74, 1.20, 500.0)
+            .expect("price-drop reload should not depend on composite confidence");
+        assert_eq!(shallow.tier, EndgameTier::DiscountReload);
+        assert!(
+            plan_discount_reload(&cfg, &state, &win, "UP", 0.33, 3.20, 500.0).is_some(),
+            "deep value reload may survive a low confidence score"
+        );
     }
 
     #[test]
