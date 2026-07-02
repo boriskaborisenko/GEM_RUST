@@ -1,6 +1,9 @@
 /target
 llm.json
 /logs/runs/
+/logs/gem_rust_server.json
+/logs/gem_rust_server.log
+/logs/gem_rust_server.pid
 .env
 .env.*
 !.env.example
