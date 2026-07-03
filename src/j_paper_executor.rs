@@ -87,17 +87,24 @@ fn execute_j_paper_buy(
         return JPaperExecution::rejected(JPaperReject::NoExecutableAsk);
     }
 
-    match sig.order_type {
-        OrderType::Market => {}
+    let execution_price = match sig.order_type {
+        OrderType::Market => best_ask,
         OrderType::Limit => {
             if best_ask > sig.price + EPS {
                 return JPaperExecution::rejected(JPaperReject::NoExecutableAsk);
             }
+            best_ask
         }
-    }
+    };
 
     if port
-        .execute_buy(window_number, &sig.side, sig.amount, sig.price, &sig.reason)
+        .execute_buy(
+            window_number,
+            &sig.side,
+            sig.amount,
+            execution_price,
+            &sig.reason,
+        )
         .is_some()
     {
         JPaperExecution::filled()
@@ -265,6 +272,32 @@ mod tests {
 
         assert!(res.executed);
         assert!(port.windows.get(&1).unwrap().up_shares > 3.63);
+        assert!((port.available_cash - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn j_limit_buy_fills_at_best_ask_below_limit() {
+        let p = prices(0.49, 0.50, 0.49, 0.50);
+        let mut port = portfolio_with_window(10.0, p.clone());
+        let sig = OrderSignal::buy("UP", OrderType::Limit, 2.0, 0.88, "j_test_limit_buy");
+
+        let res = execute_j_paper_signal(&mut port, 1, &p, &sig);
+
+        assert!(res.executed);
+        assert!((port.windows.get(&1).unwrap().up_shares - 4.0).abs() < 1e-9);
+        assert!((port.available_cash - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn j_market_buy_uses_current_ask_not_signal_price() {
+        let p = prices(0.61, 0.62, 0.37, 0.38);
+        let mut port = portfolio_with_window(10.0, p.clone());
+        let sig = OrderSignal::buy("UP", OrderType::Market, 2.0, 0.88, "j_test_market_buy");
+
+        let res = execute_j_paper_signal(&mut port, 1, &p, &sig);
+
+        assert!(res.executed);
+        assert!((port.windows.get(&1).unwrap().up_shares - (2.0 / 0.62)).abs() < 1e-9);
         assert!((port.available_cash - 8.0).abs() < 1e-9);
     }
 
