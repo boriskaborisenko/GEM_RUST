@@ -58,6 +58,21 @@ echo "$VPS_IP"
 gcloud compute addresses list
 ```
 
+## 2.1 Mac: SWEDEN static IP
+```bash
+gcloud compute addresses create gem-rust-sweden-ip \
+  --region=europe-north2
+```
+Показать IP:
+
+```bash
+VPS_IP=$(gcloud compute addresses describe gem-rust-sweden-ip \
+  --region=europe-north2 \
+  --format='get(address)')
+
+echo "$VPS_IP"
+gcloud compute addresses list
+```
 ---
 
 ## 3. Mac: создать VPS
@@ -74,12 +89,26 @@ gcloud compute instances create gem-rust-vps \
   --tags=gem-rust
 ```
 
+
+## 3.1 Mac: vps SWEDEN
+```bash
+gcloud compute instances create gem-rust-vps-se \
+  --zone=europe-north2-b \
+  --machine-type=e2-medium \
+  --image-family=debian-12 \
+  --image-project=debian-cloud \
+  --boot-disk-size=30GB \
+  --boot-disk-type=pd-ssd \
+  --address=gem-rust-sweden-ip \
+  --tags=gem-rust-sweden
+  ```
+
 Открыть порт `8787` для bot API:
 
 ```bash
 gcloud compute firewall-rules create gem-rust-8787 \
   --allow=tcp:8787 \
-  --target-tags=gem-rust \
+  --target-tags=gem-rust-sweden \
   --direction=INGRESS \
   --priority=1000
 ```
@@ -96,6 +125,11 @@ gcloud compute instances list
 
 ```bash
 gcloud compute ssh gem-rust-vps --zone=europe-west1-b
+```
+
+## 4.1 Mac: connect SWEDEN VPS
+```bash
+gcloud compute ssh gem-rust-vps-se --zone=europe-north2-b
 ```
 
 Дальше команды выполняются внутри VPS.

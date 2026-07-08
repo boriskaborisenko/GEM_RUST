@@ -9,7 +9,8 @@ use polymarket_client_sdk_v2::clob::types::request::{
     BalanceAllowanceRequest, UpdateBalanceAllowanceRequest,
 };
 use polymarket_client_sdk_v2::clob::types::{
-    Amount, AssetType, OrderStatusType, OrderType as ClobOrderType, Side as ClobSide, SignatureType,
+    Amount, AssetType, OrderPayload, OrderStatusType, OrderType as ClobOrderType,
+    Side as ClobSide, SignatureType, SignableOrder,
 };
 use polymarket_client_sdk_v2::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk_v2::types::{Address, Decimal, U256};
@@ -247,18 +248,28 @@ impl LiveExecutorSession {
         let client = self.client.lock().await;
 
         for attempt in 1..=max_attempts {
-            let response_result = match intent.operation {
+            let response_result: Result<_> = match intent.operation {
                 OrderOperation::Buy => {
-                    client
-                        .market_order()
-                        .token_id(token_id)
-                        .side(ClobSide::Buy)
-                        .amount(Amount::usdc(decimal_usd(
+                    async {
+                        let mut order = client
+                            .market_order()
+                            .token_id(token_id)
+                            .side(ClobSide::Buy)
+                            .amount(Amount::usdc(decimal_usd(
+                                intent.amount_usd.unwrap_or(signal.amount),
+                            )?)?)
+                            .order_type(cfg.buy_market_order_type.into())
+                            .build()
+                            .await?;
+                        force_market_buy_raw_amounts(
+                            &mut order,
                             intent.amount_usd.unwrap_or(signal.amount),
-                        )?)?)
-                        .order_type(cfg.buy_market_order_type.into())
-                        .build_sign_and_post(&self.signer)
-                        .await
+                            intent.shares,
+                        )?;
+                        let signed = client.sign(&self.signer, order).await?;
+                        Ok(client.post_order(signed).await?)
+                    }
+                    .await
                 }
                 OrderOperation::Sell => {
                     client
@@ -269,6 +280,7 @@ impl LiveExecutorSession {
                         .order_type(cfg.sell_market_order_type.into())
                         .build_sign_and_post(&self.signer)
                         .await
+                        .map_err(Into::into)
                 }
             };
 
@@ -406,7 +418,7 @@ pub fn build_live_order_intent(
                     min_usd
                 ));
             }
-            let shares = amount_usd / signal.price;
+            let shares = floor_2(amount_usd / signal.price);
             let estimated_notional_usd = amount_usd;
             if estimated_notional_usd + 1e-9 < min_usd {
                 return Err(anyhow!(
@@ -892,6 +904,44 @@ fn parse_token_id(value: &str) -> Result<U256> {
         .with_context(|| format!("failed to parse token id {value}"))
 }
 
+fn force_market_buy_raw_amounts(
+    order: &mut SignableOrder,
+    amount_usd: f64,
+    shares: f64,
+) -> Result<()> {
+    let maker_amount = raw_6_units(decimal_usd(amount_usd)?, "market buy USD")?;
+    let taker_amount = raw_6_units(decimal_shares(shares)?, "market buy shares")?;
+
+    match &mut order.payload {
+        OrderPayload::V1(payload) => {
+            payload.order.makerAmount = maker_amount;
+            payload.order.takerAmount = taker_amount;
+        }
+        OrderPayload::V2(payload) => {
+            payload.order.makerAmount = maker_amount;
+            payload.order.takerAmount = taker_amount;
+        }
+        _ => return Err(anyhow!("unsupported CLOB order payload version for market buy")),
+    }
+
+    Ok(())
+}
+
+fn raw_6_units(value: Decimal, label: &str) -> Result<U256> {
+    let text = value.to_string();
+    let parsed = text
+        .parse::<f64>()
+        .with_context(|| format!("failed to parse {label} Decimal {text}"))?;
+    if parsed <= 0.0 || !parsed.is_finite() {
+        return Err(anyhow!("{label} must be positive and finite: {text}"));
+    }
+    let raw = (parsed * 1_000_000.0).round();
+    if raw <= 0.0 || raw > u128::MAX as f64 {
+        return Err(anyhow!("{label} raw units out of range: {text}"));
+    }
+    Ok(U256::from(raw as u128))
+}
+
 fn decimal_usd(value: f64) -> Result<Decimal> {
     Decimal::from_str(&format!("{:.2}", floor_2(value)))
         .with_context(|| format!("failed to convert USD amount {value} to Decimal"))
@@ -1008,7 +1058,7 @@ mod tests {
         assert_eq!(intent.clob_order_type, "fok");
         assert_eq!(intent.token_id, "11");
         assert_eq!(intent.amount_usd, Some(3.0));
-        assert!(intent.shares > 3.19 && intent.shares < 3.20);
+        assert_eq!(intent.shares, 3.19);
     }
 
     #[test]
@@ -1025,10 +1075,18 @@ mod tests {
 
         assert_eq!(intent.amount_usd, Some(1.64));
         assert_eq!(intent.estimated_notional_usd, 1.64);
-        assert!((intent.shares - (1.64 / 0.99)).abs() < 1e-9);
+        assert_eq!(intent.shares, 1.65);
         assert_eq!(
             decimal_usd(intent.amount_usd.unwrap()).unwrap().to_string(),
             "1.64"
+        );
+        assert_eq!(
+            raw_6_units(decimal_usd(intent.amount_usd.unwrap()).unwrap(), "usd").unwrap(),
+            U256::from(1_640_000_u64)
+        );
+        assert_eq!(
+            raw_6_units(decimal_shares(intent.shares).unwrap(), "shares").unwrap(),
+            U256::from(1_650_000_u64)
         );
     }
 
