@@ -35,8 +35,8 @@ const GAMMA_API: &str = "https://gamma-api.polymarket.com";
 const CLOB_REST: &str = "https://clob.polymarket.com";
 const CLOB_WS: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const CHAINLINK_WS: &str = "wss://ws-live-data.polymarket.com";
-const CHAINLINK_FRESH_TICK_TIMEOUT_MS: i64 = 20_000;
-const CHAINLINK_MAX_EVENT_AGE_MS: i64 = 20_000;
+const CHAINLINK_FRESH_TICK_TIMEOUT_MS: i64 = 5_000;
+const CHAINLINK_MAX_EVENT_AGE_MS: i64 = 5_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenInfo {

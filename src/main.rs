@@ -67,7 +67,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
-const MAX_SPOT_AGE_MS: i64 = 20_000;
+const MAX_SPOT_AGE_MS: i64 = 5_000;
 const SPOT_STALE_LOG_INTERVAL_MS: i64 = 10_000;
 
 struct AppState {
@@ -330,8 +330,14 @@ fn spot_age_ms(app: &AppState, now_ms: i64) -> Option<i64> {
 }
 
 fn fresh_spot_price(app: &AppState, now_ms: i64) -> Option<f64> {
+    fresh_spot_sample(app, now_ms).map(|(px, _)| px)
+}
+
+fn fresh_spot_sample(app: &AppState, now_ms: i64) -> Option<(f64, i64)> {
     match (app.spot_price, spot_age_ms(app, now_ms)) {
-        (Some(px), Some(age_ms)) if px > 0.0 && age_ms <= MAX_SPOT_AGE_MS => Some(px),
+        (Some(px), Some(age_ms)) if px > 0.0 && age_ms <= MAX_SPOT_AGE_MS => {
+            app.spot_event_at_ms.map(|event_ms| (px, event_ms))
+        }
         _ => None,
     }
 }
@@ -2081,11 +2087,13 @@ async fn promote_next_to_current(
 
     // Window may already be live when promoted — capture PTB immediately if spot is available.
     let now_ms = get_now_ms();
-    if let Some(spot) = fresh_spot_price(app, now_ms) {
+    if let Some((spot, spot_event_ms)) = fresh_spot_sample(app, now_ms) {
         if let Some(curr) = app.current_window.as_ref() {
             let wn = curr.window_number;
             let locked = app.ptb_locked_windows.contains(&wn);
-            if let Some((ptb, msg)) = evaluate_ptb_capture(locked, &curr.market, spot, now_ms) {
+            if let Some((ptb, msg)) =
+                evaluate_ptb_capture(locked, &curr.market, spot, spot_event_ms)
+            {
                 app.system_logs.push(msg);
                 app.ptb_locked_windows.insert(wn);
                 if let Some(curr) = app.current_window.as_mut() {
