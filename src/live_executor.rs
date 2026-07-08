@@ -9,8 +9,8 @@ use polymarket_client_sdk_v2::clob::types::request::{
     BalanceAllowanceRequest, UpdateBalanceAllowanceRequest,
 };
 use polymarket_client_sdk_v2::clob::types::{
-    Amount, AssetType, OrderPayload, OrderStatusType, OrderType as ClobOrderType,
-    Side as ClobSide, SignatureType, SignableOrder,
+    Amount, AssetType, OrderPayload, OrderStatusType, OrderType as ClobOrderType, Side as ClobSide,
+    SignableOrder, SignatureType,
 };
 use polymarket_client_sdk_v2::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk_v2::types::{Address, Decimal, U256};
@@ -271,17 +271,15 @@ impl LiveExecutorSession {
                     }
                     .await
                 }
-                OrderOperation::Sell => {
-                    client
-                        .market_order()
-                        .token_id(token_id)
-                        .side(ClobSide::Sell)
-                        .amount(Amount::shares(decimal_shares(intent.shares)?)?)
-                        .order_type(cfg.sell_market_order_type.into())
-                        .build_sign_and_post(&self.signer)
-                        .await
-                        .map_err(Into::into)
-                }
+                OrderOperation::Sell => client
+                    .market_order()
+                    .token_id(token_id)
+                    .side(ClobSide::Sell)
+                    .amount(Amount::shares(decimal_shares(intent.shares)?)?)
+                    .order_type(cfg.sell_market_order_type.into())
+                    .build_sign_and_post(&self.signer)
+                    .await
+                    .map_err(Into::into),
             };
 
             let response = match response_result {
@@ -921,7 +919,11 @@ fn force_market_buy_raw_amounts(
             payload.order.makerAmount = maker_amount;
             payload.order.takerAmount = taker_amount;
         }
-        _ => return Err(anyhow!("unsupported CLOB order payload version for market buy")),
+        _ => {
+            return Err(anyhow!(
+                "unsupported CLOB order payload version for market buy"
+            ))
+        }
     }
 
     Ok(())

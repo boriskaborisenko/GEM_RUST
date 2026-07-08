@@ -35,6 +35,8 @@ const GAMMA_API: &str = "https://gamma-api.polymarket.com";
 const CLOB_REST: &str = "https://clob.polymarket.com";
 const CLOB_WS: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const CHAINLINK_WS: &str = "wss://ws-live-data.polymarket.com";
+const CHAINLINK_FRESH_TICK_TIMEOUT_MS: i64 = 20_000;
+const CHAINLINK_MAX_EVENT_AGE_MS: i64 = 20_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenInfo {
@@ -150,6 +152,14 @@ pub fn set_time_offset(offset: i64) {
 pub fn get_now_ms() -> i64 {
     let local = chrono::Utc::now().timestamp_millis();
     unsafe { local + TIME_OFFSET_MS }
+}
+
+fn normalize_chainlink_timestamp_ms(timestamp: i64) -> i64 {
+    if timestamp > 0 && timestamp < 10_000_000_000 {
+        timestamp * 1000
+    } else {
+        timestamp
+    }
 }
 
 /**
@@ -561,10 +571,23 @@ pub fn subscribe_chainlink(
             let tx_ping = tx.clone();
 
             let mut ping_interval = tokio::time::interval(Duration::from_secs(5));
+            let mut stale_interval = tokio::time::interval(Duration::from_secs(2));
+            let mut last_fresh_tick_ms = get_now_ms();
+            let mut last_payload_timestamp_ms: Option<i64> = None;
             loop {
                 tokio::select! {
                     _ = ping_interval.tick() => {
                         if let Err(_) = ws_ping.send(Message::Text("PING".into())).await {
+                            break;
+                        }
+                    }
+                    _ = stale_interval.tick() => {
+                        let age_ms = get_now_ms().saturating_sub(last_fresh_tick_ms);
+                        if age_ms > CHAINLINK_FRESH_TICK_TIMEOUT_MS {
+                            tx_ping.send(MarketEvent::Log(format!(
+                                "Chainlink Spot WS stale for {}s. Reconnecting...",
+                                age_ms / 1000
+                            ))).unwrap_or_default();
                             break;
                         }
                     }
@@ -586,11 +609,23 @@ pub fn subscribe_chainlink(
                                                         _ => 0.0,
                                                     };
                                                     let timestamp = inner.get("timestamp").and_then(|v| v.as_i64()).unwrap_or_else(|| get_now_ms());
+                                                    let timestamp_ms = normalize_chainlink_timestamp_ms(timestamp);
+                                                    let now_ms = get_now_ms();
+                                                    if let Some(prev) = last_payload_timestamp_ms {
+                                                        if timestamp_ms <= prev {
+                                                            continue;
+                                                        }
+                                                    }
+                                                    if now_ms.saturating_sub(timestamp_ms) > CHAINLINK_MAX_EVENT_AGE_MS {
+                                                        continue;
+                                                    }
                                                     if price > 0.0 {
+                                                        last_payload_timestamp_ms = Some(timestamp_ms);
+                                                        last_fresh_tick_ms = now_ms;
                                                         tx_ping.send(MarketEvent::SpotTick {
                                                             asset: asset_ping.clone(),
                                                             price,
-                                                            timestamp,
+                                                            timestamp: timestamp_ms,
                                                         }).unwrap_or_default();
                                                     }
                                                 }

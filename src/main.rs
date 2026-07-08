@@ -67,6 +67,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
+const MAX_SPOT_AGE_MS: i64 = 20_000;
+const SPOT_STALE_LOG_INTERVAL_MS: i64 = 10_000;
+
 struct AppState {
     asset: String,
     interval: String,
@@ -82,6 +85,9 @@ struct AppState {
     system_logs: Vec<String>,
     started_at: i64,
     spot_price: Option<f64>,
+    spot_event_at_ms: Option<i64>,
+    spot_received_at_ms: Option<i64>,
+    last_spot_stale_log_ms: i64,
     volatility_mgr: Arc<VolatilityManager>,
     shutdown_pending: bool,
     shutdown_requested_at_ms: Option<i64>,
@@ -317,6 +323,40 @@ fn normalize_event_timestamp_ms(timestamp: i64) -> i64 {
     } else {
         timestamp
     }
+}
+
+fn spot_age_ms(app: &AppState, now_ms: i64) -> Option<i64> {
+    app.spot_received_at_ms.map(|t| now_ms.saturating_sub(t))
+}
+
+fn fresh_spot_price(app: &AppState, now_ms: i64) -> Option<f64> {
+    match (app.spot_price, spot_age_ms(app, now_ms)) {
+        (Some(px), Some(age_ms)) if px > 0.0 && age_ms <= MAX_SPOT_AGE_MS => Some(px),
+        _ => None,
+    }
+}
+
+fn spot_signal_snapshot(app: &AppState, now_ms: i64) -> SpotSignalSnapshot {
+    if fresh_spot_price(app, now_ms).is_some() {
+        app.spot_series.snapshot()
+    } else {
+        SpotSignalSnapshot::default()
+    }
+}
+
+fn log_spot_stale(app: &mut AppState, context: &str, now_ms: i64) {
+    if now_ms.saturating_sub(app.last_spot_stale_log_ms) < SPOT_STALE_LOG_INTERVAL_MS {
+        return;
+    }
+    app.last_spot_stale_log_ms = now_ms;
+    let age = spot_age_ms(app, now_ms)
+        .map(|ms| format!("{}s", ms / 1000))
+        .unwrap_or_else(|| "none".to_string());
+    app.system_logs.push(format!(
+        "[SPOT STALE] {} — Chainlink spot age {}, trading gated",
+        context, age
+    ));
+    trim_system_logs(&mut app.system_logs);
 }
 
 fn allocate_entry_usd(
@@ -631,6 +671,9 @@ async fn main() -> anyhow::Result<()> {
         system_logs: vec![llm_startup_log],
         started_at: get_now_ms(),
         spot_price: None,
+        spot_event_at_ms: None,
+        spot_received_at_ms: None,
+        last_spot_stale_log_ms: 0,
         volatility_mgr: Arc::clone(&volatility_mgr),
         shutdown_pending: false,
         shutdown_requested_at_ms: None,
@@ -796,6 +839,8 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             // A. Dashboard (terminal or HTTP snapshot)
             _ = render_interval.tick() => {
+                let now_ms = get_now_ms();
+                let chart_spot = fresh_spot_price(&app_state, now_ms);
                 if let Some(win) = app_state.current_window.as_ref() {
                     app_state.window_chart.record(
                         win.window_number,
@@ -803,8 +848,8 @@ async fn main() -> anyhow::Result<()> {
                         win.prices.down.ask,
                         win.prices.up.bid,
                         win.prices.down.bid,
-                        app_state.spot_price,
-                        get_now_ms(),
+                        chart_spot,
+                        now_ms,
                     );
                 }
                 if effective_server {
@@ -964,6 +1009,9 @@ async fn get_or_request_llm_forecast(
     }
 
     app.llm_forecast_attempted.insert(next.window_number);
+    let now_ms = get_now_ms();
+    let spot_price = fresh_spot_price(app, now_ms);
+    let spot_signal = spot_signal_snapshot(app, now_ms);
     let Some(forecaster) = app.llm_forecaster.clone() else {
         append_llm_forecast_event(
             &app.run_log_dir,
@@ -973,9 +1021,9 @@ async fn get_or_request_llm_forecast(
             "disabled",
             current_atr,
             secs_to_start,
-            app.spot_price,
+            spot_price,
             prices,
-            app.spot_series.snapshot(),
+            spot_signal,
             None,
             None,
         );
@@ -986,12 +1034,12 @@ async fn get_or_request_llm_forecast(
         asset: app.asset.clone(),
         interval: app.interval.clone(),
         current_time_utc: chrono::Utc::now().to_rfc3339(),
-        current_spot: app.spot_price,
+        current_spot: spot_price,
         current_atr,
         prices: prices.clone(),
         market: next.market.clone(),
         secs_to_start,
-        spot_signal: app.spot_series.snapshot(),
+        spot_signal,
         recent_context: build_llm_recent_context(app, 10),
     };
 
@@ -1009,9 +1057,9 @@ async fn get_or_request_llm_forecast(
                 "ok",
                 current_atr,
                 secs_to_start,
-                app.spot_price,
+                spot_price,
                 prices,
-                app.spot_series.snapshot(),
+                spot_signal,
                 None,
                 None,
             );
@@ -1033,9 +1081,9 @@ async fn get_or_request_llm_forecast(
                 &err_text,
                 current_atr,
                 secs_to_start,
-                app.spot_price,
+                spot_price,
                 prices,
-                app.spot_series.snapshot(),
+                spot_signal,
                 None,
                 None,
             );
@@ -1055,9 +1103,9 @@ async fn get_or_request_llm_forecast(
                 err_text,
                 current_atr,
                 secs_to_start,
-                app.spot_price,
+                spot_price,
                 prices,
-                app.spot_series.snapshot(),
+                spot_signal,
                 None,
                 None,
             );
@@ -1096,6 +1144,12 @@ async fn run_j_endgame_live_tick(
     if secs_to_end <= 0 {
         return;
     }
+    let now_ms = get_now_ms();
+    let Some(spot_price_value) = fresh_spot_price(app, now_ms) else {
+        log_spot_stale(app, "J tick skipped", now_ms);
+        return;
+    };
+    let spot_price = Some(spot_price_value);
 
     let paper_cash = {
         let port = app.portfolio.lock().unwrap();
@@ -1107,9 +1161,9 @@ async fn run_j_endgame_live_tick(
         .get_or_create_window_state(window_number, "CURRENT", market)
         .clone();
     let current_atr = app.volatility_mgr.get_current_atr();
-    let spot_signal = app.spot_series.snapshot();
+    let spot_signal = spot_signal_snapshot(app, now_ms);
     let mid_cross_snap = app.mid_cross_tracker.snapshot(window_number);
-    let cex_micro_snap = app.cex_micro_mgr.snapshot(app.spot_price);
+    let cex_micro_snap = app.cex_micro_mgr.snapshot(spot_price);
     let tape_snap = app.trade_tape.snapshot(
         window_number,
         timestamp,
@@ -1120,7 +1174,7 @@ async fn run_j_endgame_live_tick(
     let signals = strat.process_live_tick(
         &app.config,
         prices,
-        app.spot_price,
+        spot_price,
         market,
         &win_state,
         secs_to_end,
@@ -1143,7 +1197,7 @@ async fn run_j_endgame_live_tick(
         &win_state,
         signals,
         current_atr,
-        app.spot_price,
+        spot_price,
         secs_to_end,
         spot_signal,
         &mid_cross_snap,
@@ -1431,7 +1485,7 @@ fn record_llm_result(
         0,
         spot_price,
         prices,
-        app.spot_series.snapshot(),
+        spot_signal_snapshot(app, get_now_ms()),
         Some(winner),
         Some(correct),
     );
@@ -1713,17 +1767,20 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
                             secs_to_start,
                         )
                         .await;
-                        let cex_micro_snap = app.cex_micro_mgr.snapshot(app.spot_price);
+                        let now_ms = get_now_ms();
+                        let spot_price = fresh_spot_price(app, now_ms);
+                        let spot_signal = spot_signal_snapshot(app, now_ms);
+                        let cex_micro_snap = app.cex_micro_mgr.snapshot(spot_price);
                         let mut strat = app.strategy.lock().unwrap();
                         if let Some(entry) = strat.check_pre_start_entry(
                             &app.config,
                             &prices,
                             &next.market,
-                            app.spot_price,
+                            spot_price,
                             next.window_number,
                             secs_to_start,
                             current_atr,
-                            app.spot_series.snapshot(),
+                            spot_signal,
                             llm_forecast,
                             &cex_micro_snap,
                         ) {
@@ -2001,7 +2058,7 @@ async fn promote_next_to_current(
         },
         &next_win.status,
         app.volatility_mgr.get_current_atr(),
-        app.spot_price,
+        fresh_spot_price(app, get_now_ms()),
         &next_win.prices,
     );
 
@@ -2023,12 +2080,12 @@ async fn promote_next_to_current(
     sync_live_bank_from_clob(app, false, false).await;
 
     // Window may already be live when promoted — capture PTB immediately if spot is available.
-    if let Some(spot) = app.spot_price {
+    let now_ms = get_now_ms();
+    if let Some(spot) = fresh_spot_price(app, now_ms) {
         if let Some(curr) = app.current_window.as_ref() {
             let wn = curr.window_number;
             let locked = app.ptb_locked_windows.contains(&wn);
-            if let Some((ptb, msg)) = evaluate_ptb_capture(locked, &curr.market, spot, get_now_ms())
-            {
+            if let Some((ptb, msg)) = evaluate_ptb_capture(locked, &curr.market, spot, now_ms) {
                 app.system_logs.push(msg);
                 app.ptb_locked_windows.insert(wn);
                 if let Some(curr) = app.current_window.as_mut() {
@@ -2086,7 +2143,23 @@ async fn process_event(
             timestamp,
         } => {
             let timestamp_ms = normalize_event_timestamp_ms(timestamp);
+            let now_ms = get_now_ms();
+            if let Some(prev_ms) = app.spot_event_at_ms {
+                if timestamp_ms <= prev_ms {
+                    return;
+                }
+            }
+            if now_ms.saturating_sub(timestamp_ms) > MAX_SPOT_AGE_MS {
+                log_spot_stale(app, "old Chainlink payload ignored", now_ms);
+                return;
+            }
+            if timestamp_ms.saturating_sub(now_ms) > MAX_SPOT_AGE_MS {
+                log_spot_stale(app, "future Chainlink payload ignored", now_ms);
+                return;
+            }
             app.spot_price = Some(price);
+            app.spot_event_at_ms = Some(timestamp_ms);
+            app.spot_received_at_ms = Some(now_ms);
             app.spot_series.observe(timestamp_ms, price);
 
             if let Some(curr) = app.current_window.as_ref() {
@@ -2153,7 +2226,9 @@ async fn process_event(
                 if let Ok(end) = chrono::DateTime::parse_from_rfc3339(&market.end_time) {
                     let secs_to_end = (end.timestamp_millis() - timestamp) / 1000;
                     let current_atr = app.volatility_mgr.get_current_atr();
-                    let spot_signal = app.spot_series.snapshot();
+                    let now_ms = get_now_ms();
+                    let spot_price = fresh_spot_price(app, now_ms);
+                    let spot_signal = spot_signal_snapshot(app, now_ms);
 
                     if let Some(mid_event) = app.mid_cross_tracker.observe_tick(
                         window_number,
@@ -2161,7 +2236,7 @@ async fn process_event(
                         &prices,
                         secs_to_end,
                         current_atr,
-                        app.spot_price,
+                        spot_price,
                         spot_signal,
                         timestamp,
                     ) {
@@ -2170,7 +2245,7 @@ async fn process_event(
                             window_number,
                             &market.slug,
                             &mid_event,
-                            app.spot_price,
+                            spot_price,
                             &win_state.market,
                             spot_signal,
                         );
@@ -2213,7 +2288,7 @@ async fn process_event(
                     }
 
                     let mid_cross_snap = app.mid_cross_tracker.snapshot(window_number);
-                    let cex_micro_snap = app.cex_micro_mgr.snapshot(app.spot_price);
+                    let cex_micro_snap = app.cex_micro_mgr.snapshot(spot_price);
                     let tape_snap = app.trade_tape.snapshot(
                         window_number,
                         timestamp,
@@ -2230,7 +2305,7 @@ async fn process_event(
                         strat.process_live_tick(
                             &app.config,
                             &prices,
-                            app.spot_price,
+                            spot_price,
                             &win_state.market,
                             &win_state,
                             secs_to_end,
@@ -2258,7 +2333,7 @@ async fn process_event(
                             &win_state,
                             signals,
                             current_atr,
-                            app.spot_price,
+                            spot_price,
                             secs_to_end,
                             spot_signal,
                             &mid_cross_snap,
@@ -2682,14 +2757,14 @@ fn build_strategy_j_snapshot(
     if app.config.strategy != "j_endgame" || win.window_number == 0 {
         return None;
     }
-    let spot = app.spot_price?;
+    let now = get_now_ms();
+    let spot = fresh_spot_price(app, now)?;
     let ptb = win.market.price_to_beat?;
     let j_endgame = &app.config.j_endgame;
     let strat_engine = app.strategy.lock().unwrap();
     let strat = strat_engine.get_strategy_state(win.window_number)?;
     let clips = strat.e_tranches_done;
     let entry_active = strat.h_entry_done;
-    let now = get_now_ms();
     let secs_to_end = chrono::DateTime::parse_from_rfc3339(&win.market.end_time)
         .map(|end| ((end.timestamp_millis() - now) / 1000).max(0))
         .unwrap_or(600);
@@ -2840,9 +2915,10 @@ fn enrich_current_window_snapshot(
     if win.role != "CURRENT" {
         return snap;
     }
-    let cex = app.cex_micro_mgr.snapshot(app.spot_price);
-    snap.cex_micro = Some(cex_micro_to_snapshot(&cex));
     let now = get_now_ms();
+    let spot_price = fresh_spot_price(app, now);
+    let cex = app.cex_micro_mgr.snapshot(spot_price);
+    snap.cex_micro = Some(cex_micro_to_snapshot(&cex));
     let mid_cross = app.mid_cross_tracker.snapshot(win.window_number);
     let tape = app
         .trade_tape
@@ -2860,6 +2936,8 @@ fn enrich_current_window_snapshot(
 }
 
 fn build_dashboard_snapshot(app: &AppState) -> DashboardSnapshot {
+    let now = get_now_ms();
+    let spot_price = fresh_spot_price(app, now);
     let terminal_lines = collect_dashboard_lines(app);
     let p = app.portfolio.lock().unwrap().get_portfolio_snapshot();
     let (current_window, next_window) = {
@@ -2869,7 +2947,6 @@ fn build_dashboard_snapshot(app: &AppState) -> DashboardSnapshot {
             resolve_display_window(&port, app.next_window.as_ref(), "NEXT"),
         )
     };
-    let now = get_now_ms();
     let llm_enabled = app.config.llm.enabled && app.llm_forecaster.is_some();
     DashboardSnapshot {
         meta: SnapshotMeta {
@@ -2879,7 +2956,7 @@ fn build_dashboard_snapshot(app: &AppState) -> DashboardSnapshot {
             started_at_ms: app.started_at,
             runtime_ms: now.saturating_sub(app.started_at),
             shutdown_pending: app.shutdown_pending,
-            spot_price: app.spot_price,
+            spot_price,
             atr: app.volatility_mgr.get_current_atr(),
             llm_enabled,
             llm_correct: app.llm_correct,
@@ -2898,12 +2975,12 @@ fn build_dashboard_snapshot(app: &AppState) -> DashboardSnapshot {
         },
         portfolio: p,
         current_window: current_window.as_ref().map(|w| {
-            let snap = window_to_snapshot(w, app.spot_price, now);
+            let snap = window_to_snapshot(w, spot_price, now);
             enrich_current_window_snapshot(app, snap, w)
         }),
         next_window: next_window
             .as_ref()
-            .map(|w| window_to_snapshot(w, app.spot_price, now)),
+            .map(|w| window_to_snapshot(w, spot_price, now)),
         system_logs: app.system_logs.clone(),
         session_stats: SnapshotSessionStats {
             summary_line: app.window_stats.session_summary_line(&app.config.strategy),
@@ -3000,7 +3077,8 @@ fn collect_dashboard_lines(app: &AppState) -> Vec<String> {
         )
     ));
 
-    let runtime = format_runtime(get_now_ms() - app.started_at);
+    let now_ms = get_now_ms();
+    let runtime = format_runtime(now_ms - app.started_at);
     let settled_windows = p.wins + p.losses;
     let win_pct = if settled_windows > 0 {
         (p.wins as f64 / settled_windows as f64) * 100.0
@@ -3028,12 +3106,20 @@ fn collect_dashboard_lines(app: &AppState) -> Vec<String> {
         paint(&atr_str, "yellow")
     ));
 
-    let spot_header = match app.spot_price {
+    let spot_header = match fresh_spot_price(app, now_ms) {
         Some(px) if px > 0.0 => paint(
             &format!("Chainlink Spot: {}", format_asset_price(&app.asset, px)),
             "cyan",
         ),
-        _ => paint("Chainlink Spot: NO DATA (WS reconnecting...)", "red"),
+        _ => {
+            let age = spot_age_ms(app, now_ms)
+                .map(|ms| format!("{}s old", ms / 1000))
+                .unwrap_or_else(|| "no ticks".to_string());
+            paint(
+                &format!("Chainlink Spot: NO FRESH DATA ({age}, WS reconnecting...)"),
+                "red",
+            )
+        }
     };
     lines.push(format!("  {}", spot_header));
 
@@ -3122,8 +3208,9 @@ fn collect_dashboard_lines(app: &AppState) -> Vec<String> {
     let current_mid_cross = current_window
         .as_ref()
         .map(|win| app.mid_cross_tracker.snapshot(win.window_number));
-    let cex_micro_snap = app.cex_micro_mgr.snapshot(app.spot_price);
     let now_ms = get_now_ms();
+    let spot_price = fresh_spot_price(app, now_ms);
+    let cex_micro_snap = app.cex_micro_mgr.snapshot(spot_price);
     let current_tape = current_window.as_ref().map(|win| {
         app.trade_tape.snapshot(
             win.window_number,
@@ -3134,7 +3221,7 @@ fn collect_dashboard_lines(app: &AppState) -> Vec<String> {
     let left_lines = render_window_block(
         &current_window,
         "CURRENT",
-        app.spot_price,
+        spot_price,
         app.volatility_mgr.get_current_atr(),
         app.strategy.clone(),
         current_llm,
@@ -3153,7 +3240,7 @@ fn collect_dashboard_lines(app: &AppState) -> Vec<String> {
     let right_lines = render_window_block(
         &next_window,
         "NEXT",
-        app.spot_price,
+        spot_price,
         app.volatility_mgr.get_current_atr(),
         app.strategy.clone(),
         next_llm,
@@ -4655,14 +4742,19 @@ fn window_duration_sec(market: &MarketWindow) -> f64 {
     }
 }
 
-fn build_window_close_meta(app: &AppState, win: &WindowState, secs_to_end: i64) -> WindowCloseMeta {
+fn build_window_close_meta(
+    app: &AppState,
+    win: &WindowState,
+    secs_to_end: i64,
+    spot_price: Option<f64>,
+) -> WindowCloseMeta {
     let duration_sec = window_duration_sec(&win.market);
     let elapsed_sec = (duration_sec - secs_to_end as f64).clamp(0.0, duration_sec);
     let time_pct_at_close = (elapsed_sec / duration_sec) * 100.0;
     let final_atr = app.volatility_mgr.get_current_atr();
     let mid_snap = app.mid_cross_tracker.snapshot(win.window_number);
 
-    let final_gap_z = match (app.spot_price, win.market.price_to_beat) {
+    let final_gap_z = match (spot_price, win.market.price_to_beat) {
         (Some(spot), Some(ptb)) if ptb > 0.0 => {
             let expected = redeem_hold::expected_move_usd(
                 final_atr.max(REDEEM_HOLD_MIN_VALID_ATR),
@@ -4685,7 +4777,7 @@ fn build_window_close_meta(app: &AppState, win: &WindowState, secs_to_end: i64) 
         .unwrap_or_default();
 
     let mut would_redeem_hold = false;
-    if let (Some(spot), Some(ptb)) = (app.spot_price, win.market.price_to_beat) {
+    if let (Some(spot), Some(ptb)) = (spot_price, win.market.price_to_beat) {
         for side in ["UP", "DOWN"] {
             let shares = if side == "UP" {
                 win.up_shares
@@ -4752,8 +4844,13 @@ fn close_window_tracked(
     status: &str,
     secs_to_end: i64,
 ) -> WindowState {
-    let meta = build_window_close_meta(app, win, secs_to_end);
-    let winner = match (app.spot_price, win.market.price_to_beat) {
+    let now_ms = get_now_ms();
+    let spot_price = fresh_spot_price(app, now_ms);
+    if spot_price.is_none() {
+        log_spot_stale(app, "window close without fresh spot", now_ms);
+    }
+    let meta = build_window_close_meta(app, win, secs_to_end, spot_price);
+    let winner = match (spot_price, win.market.price_to_beat) {
         (Some(spot), Some(ptb)) if ptb > 0.0 && spot > ptb => "UP".to_string(),
         (Some(_), Some(ptb)) if ptb > 0.0 => "DOWN".to_string(),
         _ => String::new(),
@@ -4761,12 +4858,7 @@ fn close_window_tracked(
     let pnl;
     {
         let mut port = app.portfolio.lock().unwrap();
-        port.close_window(
-            win.window_number,
-            status,
-            app.spot_price,
-            Some(meta.clone()),
-        );
+        port.close_window(win.window_number, status, spot_price, Some(meta.clone()));
         pnl = port
             .windows
             .get(&win.window_number)
@@ -4812,13 +4904,7 @@ fn close_window_tracked(
         utc_hour: meta.utc_hour,
     });
 
-    record_llm_result(
-        app,
-        win.window_number,
-        &win.market,
-        app.spot_price,
-        &win.prices,
-    );
+    record_llm_result(app, win.window_number, &win.market, spot_price, &win.prices);
     finalize_mid_cross_for_window(app, win.window_number, &win.market.slug);
 
     app.portfolio
