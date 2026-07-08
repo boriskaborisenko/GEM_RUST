@@ -397,16 +397,17 @@ pub fn build_live_order_intent(
     let token_id = token_id_for_side(market, &signal.side)?;
     let (amount_usd, shares, estimated_notional_usd) = match operation {
         OrderOperation::Buy => {
-            if signal.amount + 1e-9 < cfg.min_order_usd.max(1.0) {
+            let min_usd = cfg.min_order_usd.max(1.0);
+            let amount_usd = floor_2(signal.amount);
+            if amount_usd + 1e-9 < min_usd {
                 return Err(anyhow!(
                     "live buy below min notional: {:.4} < {:.4}",
-                    signal.amount,
-                    cfg.min_order_usd.max(1.0)
+                    amount_usd,
+                    min_usd
                 ));
             }
-            let min_usd = cfg.min_order_usd.max(1.0);
-            let shares = signal.amount / signal.price;
-            let estimated_notional_usd = shares * signal.price;
+            let shares = amount_usd / signal.price;
+            let estimated_notional_usd = amount_usd;
             if estimated_notional_usd + 1e-9 < min_usd {
                 return Err(anyhow!(
                     "live buy notional {:.4} below min {:.4} at price {:.4}",
@@ -415,10 +416,11 @@ pub fn build_live_order_intent(
                     signal.price
                 ));
             }
-            (Some(signal.amount), shares, estimated_notional_usd)
+            (Some(amount_usd), shares, estimated_notional_usd)
         }
         OrderOperation::Sell => {
-            let notional = signal.amount * signal.price;
+            let shares = floor_2(signal.amount);
+            let notional = shares * signal.price;
             if notional + 1e-9 < cfg.min_order_usd.max(1.0) {
                 return Err(anyhow!(
                     "live sell below min notional: {:.4} < {:.4}",
@@ -426,7 +428,7 @@ pub fn build_live_order_intent(
                     cfg.min_order_usd.max(1.0)
                 ));
             }
-            (None, floor_2(signal.amount), notional)
+            (None, shares, notional)
         }
     };
 
@@ -519,6 +521,10 @@ pub fn format_live_terminal_event(
 fn short_live_reject_reason(reason: &str) -> String {
     if reason.contains("FOK orders are fully filled") {
         return "FOK kill — full size not available at CLOB book".to_string();
+    }
+    if reason.contains("invalid amounts") && reason.contains("max accuracy") {
+        return "CLOB amount precision: BUY USD must be cents; shares must match lot size"
+            .to_string();
     }
     if reason.contains("signer address has to be the address of the API KEY") {
         return "CLOB auth: API key / owner mismatch".to_string();
@@ -887,7 +893,7 @@ fn parse_token_id(value: &str) -> Result<U256> {
 }
 
 fn decimal_usd(value: f64) -> Result<Decimal> {
-    Decimal::from_str(&format!("{:.6}", value))
+    Decimal::from_str(&format!("{:.2}", floor_2(value)))
         .with_context(|| format!("failed to convert USD amount {value} to Decimal"))
 }
 
@@ -1006,6 +1012,27 @@ mod tests {
     }
 
     #[test]
+    fn market_buy_intent_floors_usd_to_cents_for_clob() {
+        let cfg = ExecutionConfig::default();
+        let sig = OrderSignal::buy(
+            "DOWN",
+            OrderType::Market,
+            1.641786864,
+            0.99,
+            "j_test_precision",
+        );
+        let intent = build_live_order_intent(&cfg, &market(), &sig).unwrap();
+
+        assert_eq!(intent.amount_usd, Some(1.64));
+        assert_eq!(intent.estimated_notional_usd, 1.64);
+        assert!((intent.shares - (1.64 / 0.99)).abs() < 1e-9);
+        assert_eq!(
+            decimal_usd(intent.amount_usd.unwrap()).unwrap().to_string(),
+            "1.64"
+        );
+    }
+
+    #[test]
     fn live_buy_forces_market_fok_even_if_signal_says_limit() {
         let cfg = ExecutionConfig::default();
         let sig = OrderSignal::buy("DOWN", OrderType::Limit, 1.0, 0.99, "j_test");
@@ -1024,7 +1051,7 @@ mod tests {
         let intent = build_live_order_intent(&cfg, &market(), &sig).unwrap();
         assert_eq!(intent.operation, OrderOperation::Sell);
         assert_eq!(intent.shares, 2.34);
-        assert!(intent.estimated_notional_usd > 1.17);
+        assert!((intent.estimated_notional_usd - 1.17).abs() < 1e-9);
     }
 
     #[test]
@@ -1106,5 +1133,19 @@ mod tests {
         let msg = format_live_terminal_event(1, &sig, &result).unwrap();
         assert!(msg.contains("[LIVE REJECT]"));
         assert!(msg.contains("FOK kill"));
+    }
+
+    #[test]
+    fn live_reject_terminal_event_shortens_amount_precision() {
+        let sig = OrderSignal::buy("DOWN", OrderType::Market, 1.641786864, 0.99, "j_test");
+        let result = LiveExecutionResult {
+            reject_reason:
+                "invalid amounts, the market buy orders maker amount supports a max accuracy of 2 decimals"
+                    .to_string(),
+            ..LiveExecutionResult::default()
+        };
+        let msg = format_live_terminal_event(1, &sig, &result).unwrap();
+        assert!(msg.contains("[LIVE REJECT]"));
+        assert!(msg.contains("CLOB amount precision"));
     }
 }

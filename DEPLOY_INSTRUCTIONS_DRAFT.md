@@ -298,6 +298,13 @@ git pull
 cargo build --release
 ./target/release/gem_rust BTC 5m --live --server --server-bind 0.0.0.0:8787
 ```
+## HELP IF TRACKED server.logs
+
+```bash
+cd ~/bots/gem-btc-5m
+git checkout -- logs/gem_rust_server.log
+git pull
+```
 
 ---
 
