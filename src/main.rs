@@ -141,7 +141,7 @@ impl Default for MaintenanceStatus {
         Self {
             ok: true,
             checked: false,
-            label: "OK".to_string(),
+            label: "CHECK PENDING".to_string(),
         }
     }
 }
@@ -756,6 +756,18 @@ async fn main() -> anyhow::Result<()> {
 
     // Initial Market Discovery
     discover_initial_markets(&mut app_state, &event_tx).await;
+    let startup_status = fetch_polymarket_maintenance().await;
+    if startup_status.blocks_trading() {
+        app_state.system_logs.push(format!(
+            "[STATUS] Polymarket {} — trading paused until status recovers",
+            startup_status.label
+        ));
+    } else if !startup_status.checked {
+        app_state.system_logs.push(
+            "[STATUS] Polymarket status check failed at startup — trading allowed".to_string(),
+        );
+    }
+    app_state.maintenance = startup_status;
 
     let (snapshot_tx, _) = watch::channel(Arc::new(DashboardSnapshot::bootstrap()));
     if effective_server {
@@ -3117,6 +3129,7 @@ fn build_dashboard_snapshot(app: &AppState) -> DashboardSnapshot {
             llm_wrong: app.llm_wrong,
             maintenance_label: app.maintenance.label.clone(),
             maintenance_ok: app.maintenance.ok,
+            maintenance_checked: app.maintenance.checked,
         },
         execution: SnapshotExecution {
             mode: execution_mode_label(app.config.execution.mode).to_string(),

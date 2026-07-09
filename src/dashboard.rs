@@ -39,6 +39,7 @@ pub struct SnapshotMeta {
     pub llm_wrong: u32,
     pub maintenance_label: String,
     pub maintenance_ok: bool,
+    pub maintenance_checked: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -278,8 +279,9 @@ impl DashboardSnapshot {
                 llm_enabled: false,
                 llm_correct: 0,
                 llm_wrong: 0,
-                maintenance_label: "OK".to_string(),
+                maintenance_label: "CHECK PENDING".to_string(),
                 maintenance_ok: true,
+                maintenance_checked: false,
             },
             execution: SnapshotExecution {
                 mode: "paper".to_string(),
