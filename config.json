@@ -34,6 +34,11 @@
   "sellStrategy": {
     "exitBid": 0.65
   },
+  "xLast": {
+    "entrySecs": 10,
+    "clipUsd": 30.0,
+    "maxAsk": 0.99
+  },
   "asymmetricLadder": {
     "strongSteps": [0.62, 0.72],
     "weakSteps": [0.70, 0.85],

@@ -8,6 +8,7 @@ pub mod strategy_dx;
 pub mod strategy_e;
 pub mod strategy_h;
 pub mod strategy_j;
+pub mod strategy_x_last;
 
 pub use crate::cex_micro::CexMicroSnapshot;
 pub use crate::mid_cross_tracker::MidCrossSnapshot;
@@ -215,6 +216,7 @@ impl StrategyEngine {
             "dynamic_grid_e" => Box::new(strategy_e::ConvictionRouterStrategy::new()),
             "cheap_hold_h" => Box::new(strategy_h::CheapHoldStrategy::new()),
             "j_endgame" => Box::new(strategy_j::JEndgameStrategy::new()),
+            "x_last" => Box::new(strategy_x_last::XLastStrategy::new()),
             _ => Box::new(strategy_a::SimpleBothStrategy::new()),
         };
         Self {

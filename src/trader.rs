@@ -20,7 +20,7 @@ pub struct TradeRecord {
 pub struct WindowState {
     pub window_number: usize,
     pub role: String,
-    pub status: String, // "WAITING_ENTRY", "ENTERED_PRE_START", "LIVE", "CLOSED_TARGET", "CLOSED_TIME", "SKIPPED"
+    pub status: String, // "WAITING_ENTRY", "ENTERED_PRE_START", "LIVE", "PENDING_SETTLEMENT", "CLOSED_TARGET", "CLOSED_TIME", "SKIPPED"
     pub market: MarketWindow,
     pub spent: f64,
     pub cash_returned: f64,
@@ -577,7 +577,7 @@ impl Portfolio {
         if let Some((market, up_shares, down_shares)) = win_market {
             if let (Some(spot), Some(ptb)) = (spot_price, market.price_to_beat) {
                 if ptb > 0.0 {
-                    let up_won = spot > ptb;
+                    let up_won = spot >= ptb;
 
                     // Редемп выигрышной стороны строго по 1.00$
                     if up_won {
@@ -693,7 +693,7 @@ impl Portfolio {
                 let meta = meta.unwrap_or_default();
 
                 let winner = match (spot_price, win.market.price_to_beat) {
-                    (Some(spot), Some(ptb)) if ptb > 0.0 && spot > ptb => "UP",
+                    (Some(spot), Some(ptb)) if ptb > 0.0 && spot >= ptb => "UP",
                     (Some(_), Some(ptb)) if ptb > 0.0 => "DOWN",
                     _ => "",
                 };
@@ -963,5 +963,44 @@ mod tests {
         assert_eq!(snapshot.open_traded_windows, 0);
         assert_eq!(snapshot.no_trade_windows, 0);
         assert_eq!(snapshot.open_waiting_windows, 1);
+    }
+
+    #[test]
+    fn close_window_uses_settlement_price_and_up_wins_ties() {
+        let mut portfolio =
+            Portfolio::new_with_log_dir(100.0, "/tmp/gem_rust_settlement_tie_test".into());
+        let market = sample_market(1);
+        portfolio.get_or_create_window_state(1, "CURRENT", &market);
+
+        portfolio.execute_buy(1, "UP", 30.0, 0.97, "test_up");
+        portfolio.close_window(1, "CLOSED_TIME", Some(60_000.0), None);
+
+        let win = portfolio.windows.get(&1).unwrap();
+        assert_eq!(win.status, "CLOSED_TIME");
+        assert_eq!(portfolio.wins, 1);
+        assert_eq!(portfolio.losses, 0);
+        assert_eq!(win.up_shares, 0.0);
+        assert!(
+            portfolio.available_cash > 100.0,
+            "UP must redeem on exact PTB tie per Polymarket rules"
+        );
+    }
+
+    #[test]
+    fn close_window_expires_up_when_settlement_below_ptb() {
+        let mut portfolio =
+            Portfolio::new_with_log_dir(100.0, "/tmp/gem_rust_settlement_down_test".into());
+        let market = sample_market(2);
+        portfolio.get_or_create_window_state(2, "CURRENT", &market);
+
+        portfolio.execute_buy(2, "UP", 30.0, 0.97, "test_up");
+        portfolio.close_window(2, "CLOSED_TIME", Some(59_990.0), None);
+
+        let win = portfolio.windows.get(&2).unwrap();
+        assert_eq!(win.status, "CLOSED_TIME");
+        assert_eq!(portfolio.wins, 0);
+        assert_eq!(portfolio.losses, 1);
+        assert_eq!(win.up_shares, 0.0);
+        assert!((portfolio.available_cash - 70.0).abs() < 1e-9);
     }
 }

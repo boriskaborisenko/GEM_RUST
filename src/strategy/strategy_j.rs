@@ -1483,7 +1483,7 @@ mod tests {
     use super::*;
     use crate::client::ContractPrices;
     use crate::config::{
-        Config, JEndgameConfig, PreStartConfig, SellStrategyConfig, SessionConfig,
+        Config, JEndgameConfig, PreStartConfig, SellStrategyConfig, SessionConfig, XLastConfig,
     };
     use crate::orderbook::BookLevel;
 
@@ -1513,6 +1513,7 @@ mod tests {
             force_close_at_end: false,
             execution: Default::default(),
             j_endgame: JEndgameConfig::default(),
+            x_last: XLastConfig::default(),
         }
     }
 

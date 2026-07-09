@@ -69,6 +69,14 @@ use tokio::sync::{mpsc, watch};
 
 const MAX_SPOT_AGE_MS: i64 = 5_000;
 const SPOT_STALE_LOG_INTERVAL_MS: i64 = 10_000;
+const STATUS_PENDING_SETTLEMENT: &str = "PENDING_SETTLEMENT";
+
+#[derive(Debug, Clone)]
+struct PendingSettlement {
+    window: WindowState,
+    status: String,
+    queued_at_ms: i64,
+}
 
 struct AppState {
     asset: String,
@@ -112,6 +120,7 @@ struct AppState {
     live_account: LiveAccountStatus,
     live_audit: Option<LiveAudit>,
     window_chart: WindowChartTracker,
+    pending_settlements: VecDeque<PendingSettlement>,
 }
 
 /// Polymarket platform health, polled once per window start from the public
@@ -703,6 +712,7 @@ async fn main() -> anyhow::Result<()> {
         live_account: LiveAccountStatus::default(),
         live_audit,
         window_chart: WindowChartTracker::new(1200),
+        pending_settlements: VecDeque::new(),
     };
 
     if app_state.config.execution.mode == ExecutionMode::Live {
@@ -794,7 +804,8 @@ async fn main() -> anyhow::Result<()> {
                 let has_active = port
                     .windows
                     .values()
-                    .any(|w| w.status == "LIVE" || w.status == "ENTERED_PRE_START");
+                    .any(|w| w.status == "LIVE" || w.status == "ENTERED_PRE_START")
+                    || !app_state.pending_settlements.is_empty();
                 if !has_active || force_exit {
                     can_exit = true;
                 }
@@ -900,7 +911,8 @@ async fn discover_initial_markets(
         let mut port = app.portfolio.lock().unwrap();
         let warmup_window = app.config.strategy == "dynamic_grid_e"
             || app.config.strategy == "cheap_hold_h"
-            || app.config.strategy == "j_endgame";
+            || app.config.strategy == "j_endgame"
+            || app.config.strategy == "x_last";
         let promoted = {
             let win_state = port.get_or_create_window_state(0, "CURRENT", &active);
             if warmup_window {
@@ -1284,7 +1296,9 @@ async fn execute_strategy_signals(
     system_logs: &mut Vec<String>,
 ) {
     for sig in signals {
-        let (executed, reject_reason): (bool, String) = if sig.reason.starts_with("j_") {
+        let (executed, reject_reason): (bool, String) = if sig.reason.starts_with("j_")
+            || sig.reason.starts_with("x_")
+        {
             match config.execution.mode {
                 ExecutionMode::Paper => {
                     let execution =
@@ -1463,7 +1477,7 @@ fn record_llm_result(
         return;
     };
     let winner = match (spot_price, market.price_to_beat) {
-        (Some(spot), Some(ptb)) if ptb > 0.0 && spot > ptb => "UP",
+        (Some(spot), Some(ptb)) if ptb > 0.0 && spot >= ptb => "UP",
         (Some(_), Some(ptb)) if ptb > 0.0 => "DOWN",
         _ => return,
     };
@@ -1932,13 +1946,14 @@ async fn monitor_time(app: &mut AppState, event_tx: &mpsc::UnboundedSender<Marke
                 let secs_to_end = (end.timestamp_millis() - now) / 1000;
 
                 if secs_to_end < -10 {
-                    // Safety force close past the end
+                    // Safety queue past-end windows for the same next-PTB
+                    // settlement path used by normal promotion.
                     app.system_logs.push(format!(
-                        "[SAFETY CLOSE] Window #{} past end time ({}s). Force closing.",
+                        "[SAFETY CLOSE] Window #{} past end time ({}s). Waiting for next-PTB settlement.",
                         current.window_number, secs_to_end
                     ));
-                    let updated = close_window_tracked(app, &current, "CLOSED_TIME", secs_to_end);
-                    app.current_window = Some(updated);
+                    let _updated = queue_window_for_settlement(app, &current, "CLOSED_TIME");
+                    app.current_window = None;
                 }
             }
         }
@@ -1995,6 +2010,114 @@ fn evaluate_ptb_capture(
     Some((spot, msg))
 }
 
+fn market_start_ms(market: &MarketWindow) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(&market.start_time)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
+}
+
+fn market_end_ms(market: &MarketWindow) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(&market.end_time)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
+}
+
+fn pending_matches_next(
+    pending: &PendingSettlement,
+    next_window_number: usize,
+    next_market: &MarketWindow,
+) -> bool {
+    let number_matches = pending.window.window_number + 1 == next_window_number;
+    let time_matches = match (
+        market_end_ms(&pending.window.market),
+        market_start_ms(next_market),
+    ) {
+        (Some(prev_end), Some(next_start)) => (prev_end - next_start).abs() <= 1_000,
+        _ => false,
+    };
+
+    pending.window.market.asset == next_market.asset
+        && pending.window.market.interval == next_market.interval
+        && (number_matches || time_matches)
+}
+
+fn queue_window_for_settlement(
+    app: &mut AppState,
+    win: &WindowState,
+    final_status: &str,
+) -> WindowState {
+    if app
+        .pending_settlements
+        .iter()
+        .any(|pending| pending.window.window_number == win.window_number)
+    {
+        return win.clone();
+    }
+
+    let queued = {
+        let mut port = app.portfolio.lock().unwrap();
+        let stored = port.get_or_create_window_state(win.window_number, "", &win.market);
+        stored.status = STATUS_PENDING_SETTLEMENT.to_string();
+        stored.role = "PAST".to_string();
+        let queued = stored.clone();
+        port.recalculate_equity();
+        queued
+    };
+
+    app.pending_settlements.push_back(PendingSettlement {
+        window: queued.clone(),
+        status: final_status.to_string(),
+        queued_at_ms: get_now_ms(),
+    });
+    app.system_logs.push(format!(
+        "[SETTLEMENT] Window #{} queued; waiting for next-window PTB",
+        win.window_number
+    ));
+    trim_system_logs(&mut app.system_logs);
+
+    queued
+}
+
+fn try_settle_pending_windows(
+    app: &mut AppState,
+    next_window_number: usize,
+    next_market: &MarketWindow,
+    next_ptb: f64,
+    source: &str,
+) {
+    if next_ptb <= 0.0 || !next_ptb.is_finite() || app.pending_settlements.is_empty() {
+        return;
+    }
+
+    let mut remaining = VecDeque::new();
+    let mut pending = std::mem::take(&mut app.pending_settlements);
+    while let Some(item) = pending.pop_front() {
+        if pending_matches_next(&item, next_window_number, next_market) {
+            let age_ms = get_now_ms().saturating_sub(item.queued_at_ms);
+            app.system_logs.push(format!(
+                "[SETTLEMENT] Window #{} close from Window #{} PTB {} ({}, waited {}s)",
+                item.window.window_number,
+                next_window_number,
+                format_asset_price(&next_market.asset, next_ptb),
+                source,
+                age_ms / 1000
+            ));
+            trim_system_logs(&mut app.system_logs);
+            let _ = close_window_tracked_with_spot(
+                app,
+                &item.window,
+                &item.status,
+                0,
+                Some(next_ptb),
+                source,
+            );
+        } else {
+            remaining.push_back(item);
+        }
+    }
+    app.pending_settlements = remaining;
+}
+
 /**
  * Promote NEXT window to CURRENT (LIVE) window.
  */
@@ -2007,17 +2130,16 @@ async fn promote_next_to_current(
         None => return,
     };
 
-    // Close old CURRENT window if still open
+    // Queue old CURRENT window for settlement. The official close price for
+    // contiguous Up/Down crypto windows is the next window's PTB, not the last
+    // spot tick we happened to receive before promotion.
     if let Some(curr) = app.current_window.clone() {
         if curr.status == "LIVE" || curr.status == "SKIPPED" {
             app.system_logs.push(format!(
-                "[Lifecycle] Force closing overlapping CURRENT Window #{}",
+                "[Lifecycle] Queue overlapping CURRENT Window #{} for next-PTB settlement",
                 curr.window_number
             ));
-            let secs_to_end = chrono::DateTime::parse_from_rfc3339(&curr.market.end_time)
-                .map(|end| (end.timestamp_millis() - get_now_ms()) / 1000)
-                .unwrap_or(0);
-            let _updated = close_window_tracked(app, &curr, "CLOSED_TIME", secs_to_end);
+            queue_window_for_settlement(app, &curr, "CLOSED_TIME");
         }
     }
 
@@ -2038,8 +2160,10 @@ async fn promote_next_to_current(
         }
     }
 
-    // j_endgame trades in-window (endgame), not via pre-start entry — promote as LIVE.
-    let is_entered = next_win.status == "ENTERED_PRE_START" || app.config.strategy == "j_endgame";
+    // In-window strategies do not enter via pre-start; promote them as LIVE.
+    let is_entered = next_win.status == "ENTERED_PRE_START"
+        || app.config.strategy == "j_endgame"
+        || app.config.strategy == "x_last";
     if is_entered {
         port.entered_windows += 1;
         app.system_logs.push(format!(
@@ -2068,19 +2192,32 @@ async fn promote_next_to_current(
         &next_win.prices,
     );
 
-    let promoted =
-        port.get_or_create_window_state(next_win.window_number, "CURRENT", &next_win.market);
-    if is_entered {
-        promoted.status = "LIVE".to_string();
-    } else {
-        promoted.status = "SKIPPED".to_string();
-    }
+    let promoted = {
+        let promoted =
+            port.get_or_create_window_state(next_win.window_number, "CURRENT", &next_win.market);
+        if is_entered {
+            promoted.status = "LIVE".to_string();
+        } else {
+            promoted.status = "SKIPPED".to_string();
+        }
+        promoted.clone()
+    };
 
     app.current_window = Some(promoted.clone());
     app.next_window = None;
     app.next_window_number += 1;
     let promoted_window_number = promoted.window_number;
     drop(port);
+
+    if let Some(ptb) = promoted.market.price_to_beat {
+        try_settle_pending_windows(
+            app,
+            promoted.window_number,
+            &promoted.market,
+            ptb,
+            "next_market_ptb",
+        );
+    }
 
     refresh_live_account(app, Some(promoted_window_number)).await;
     sync_live_bank_from_clob(app, false, false).await;
@@ -2102,6 +2239,10 @@ async fn promote_next_to_current(
                 let mut port = app.portfolio.lock().unwrap();
                 if let Some(win) = port.windows.get_mut(&wn) {
                     win.market.price_to_beat = Some(ptb);
+                }
+                drop(port);
+                if let Some(curr) = app.current_window.as_ref().cloned() {
+                    try_settle_pending_windows(app, wn, &curr.market, ptb, "next_ptb_capture");
                 }
             }
         }
@@ -2184,6 +2325,10 @@ async fn process_event(
                     let mut port = app.portfolio.lock().unwrap();
                     if let Some(win) = port.windows.get_mut(&wn) {
                         win.market.price_to_beat = Some(ptb);
+                    }
+                    drop(port);
+                    if let Some(curr) = app.current_window.as_ref().cloned() {
+                        try_settle_pending_windows(app, wn, &curr.market, ptb, "next_ptb_capture");
                     }
                 }
             }
@@ -2327,7 +2472,8 @@ async fn process_event(
 
                     if !((app.config.strategy == "dynamic_grid_e"
                         || app.config.strategy == "cheap_hold_h"
-                        || app.config.strategy == "j_endgame")
+                        || app.config.strategy == "j_endgame"
+                        || app.config.strategy == "x_last")
                         && window_number == 0)
                     {
                         execute_strategy_signals(
@@ -4857,9 +5003,20 @@ fn close_window_tracked(
     if spot_price.is_none() {
         log_spot_stale(app, "window close without fresh spot", now_ms);
     }
+    close_window_tracked_with_spot(app, win, status, secs_to_end, spot_price, "fresh_spot")
+}
+
+fn close_window_tracked_with_spot(
+    app: &mut AppState,
+    win: &WindowState,
+    status: &str,
+    secs_to_end: i64,
+    spot_price: Option<f64>,
+    settlement_source: &str,
+) -> WindowState {
     let meta = build_window_close_meta(app, win, secs_to_end, spot_price);
     let winner = match (spot_price, win.market.price_to_beat) {
-        (Some(spot), Some(ptb)) if ptb > 0.0 && spot > ptb => "UP".to_string(),
+        (Some(spot), Some(ptb)) if ptb > 0.0 && spot >= ptb => "UP".to_string(),
         (Some(_), Some(ptb)) if ptb > 0.0 => "DOWN".to_string(),
         _ => String::new(),
     };
@@ -4872,6 +5029,24 @@ fn close_window_tracked(
             .get(&win.window_number)
             .map(|w| w.cash_returned - w.spent)
             .unwrap_or(0.0);
+    }
+
+    if !winner.is_empty() {
+        app.system_logs.push(format!(
+            "[SETTLEMENT] #{} {} via {} | close={} ptb={} | pnl {:+.2}",
+            win.window_number,
+            winner,
+            settlement_source,
+            spot_price
+                .map(|p| format_asset_price(&win.market.asset, p))
+                .unwrap_or_else(|| "n/a".to_string()),
+            win.market
+                .price_to_beat
+                .map(|p| format_asset_price(&win.market.asset, p))
+                .unwrap_or_else(|| "n/a".to_string()),
+            pnl
+        ));
+        trim_system_logs(&mut app.system_logs);
     }
 
     if meta.strategy_name == "cheap_hold_h" && win.spent > 0.0 {

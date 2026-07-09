@@ -1256,6 +1256,39 @@ impl Default for JEndgameConfig {
     }
 }
 
+fn x_last_default_entry_secs() -> i64 {
+    10
+}
+
+fn x_last_default_clip_usd() -> f64 {
+    30.0
+}
+
+fn x_last_default_max_ask() -> f64 {
+    0.99
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct XLastConfig {
+    #[serde(default = "x_last_default_entry_secs")]
+    pub entry_secs: i64,
+    #[serde(default = "x_last_default_clip_usd")]
+    pub clip_usd: f64,
+    #[serde(default = "x_last_default_max_ask")]
+    pub max_ask: f64,
+}
+
+impl Default for XLastConfig {
+    fn default() -> Self {
+        Self {
+            entry_secs: x_last_default_entry_secs(),
+            clip_usd: x_last_default_clip_usd(),
+            max_ask: x_last_default_max_ask(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub strategy: String,
@@ -1282,6 +1315,8 @@ pub struct Config {
     pub execution: ExecutionConfig,
     #[serde(rename = "jEndgame", default)]
     pub j_endgame: JEndgameConfig,
+    #[serde(rename = "xLast", default)]
+    pub x_last: XLastConfig,
 }
 
 impl Config {
@@ -1515,6 +1550,9 @@ mod tests {
         assert!((cfg.session.min_window_budget - 0.0).abs() < 1e-9);
         assert!((cfg.session.max_window_budget - 0.0).abs() < 1e-9);
         assert!((cfg.session.window_budget_pct - 100.0).abs() < 1e-9);
+        assert_eq!(cfg.x_last.entry_secs, 10);
+        assert!((cfg.x_last.clip_usd - 30.0).abs() < 1e-9);
+        assert!((cfg.x_last.max_ask - 0.99).abs() < 1e-9);
         assert_eq!(cfg.j_endgame.max_clips_per_window, 0);
         assert!((cfg.j_endgame.max_usd_per_window - 80.0).abs() < 1e-9);
         assert!((cfg.j_endgame.max_rescue_usd - 75.0).abs() < 1e-9);
